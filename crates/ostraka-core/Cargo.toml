@@ -1,0 +1,18 @@
+[package]
+name = "ostraka-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Domain types for Ostraka: tasks, gates, verdicts and run records."
+
+[dependencies]
+serde = { workspace = true }
+# Quarantine note: the 2.x core allowed only serde/toml/thiserror. serde_json is
+# admitted because run records preserve each vendor's raw payload verbatim for
+# audit, and that value has no schema we may impose. No other widening.
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }

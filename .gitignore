@@ -1,0 +1,18 @@
+/target
+**/*.rs.bk
+
+# Worktrees the runtime creates for agent tasks.
+/worktrees/
+
+# Run records and caches. See the open question in the workspace notes about
+# whether records belong in history; they are untracked until that is settled.
+/.ostraka/runs/
+/.ostraka/cache/
+
+# Never commit resolved credentials.
+/.ostraka/secrets/
+
+node_modules/
+.DS_Store
+*.swp
+*~

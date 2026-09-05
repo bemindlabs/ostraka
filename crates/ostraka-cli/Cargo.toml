@@ -1,0 +1,20 @@
+[package]
+name = "ostraka-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Run agent fleets you can actually review."
+
+[[bin]]
+name = "ostraka"
+path = "src/main.rs"
+
+[dependencies]
+ostraka-core = { workspace = true }
+ostraka-adapter = { workspace = true }
+ostraka-runtime = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }

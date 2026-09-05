@@ -1,0 +1,20 @@
+# Ostraka project configuration.
+#
+# Gate checks belong to the project, not to any agent: they describe how THIS
+# repository is verified, and every agent that touches it runs the same ones.
+
+[gate]
+checks = [
+    { name = "format", cmd = "cargo fmt --all -- --check", required = true },
+    { name = "lint", cmd = "cargo clippy --all-targets -- -D warnings", required = true },
+    { name = "test", cmd = "cargo test --workspace", required = true },
+    { name = "build", cmd = "cargo build --workspace", required = true },
+]
+
+[gate.review]
+# The structural invariant: whoever wrote the change cannot be the one who
+# approves it. The runtime refuses to mint a merge token when these match.
+must_differ_from_author = true
+
+[worktree]
+base = "worktrees"

@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      # The four checks below are the gate declared in ostraka.toml. The gate
+      # this project enforces on others is the gate it passes itself, so these
+      # must stay identical to that file.
+      - name: format
+        run: cargo fmt --all -- --check
+      - name: lint
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: test
+        run: cargo test --workspace --locked
+      - name: build
+        run: cargo build --workspace --locked
