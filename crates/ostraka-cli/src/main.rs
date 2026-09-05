@@ -2,6 +2,9 @@
 
 mod adapters;
 mod check;
+mod project;
+mod replay;
+mod run;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -30,20 +33,81 @@ struct Cli {
 enum Commands {
     /// Validate the project config and every adapter profile.
     Check,
+
     /// List adapter profiles and whether each one can run here.
     Adapters,
+
+    /// Run one task: isolate, execute, gate, review, record.
+    Run {
+        /// What the agent should do.
+        prompt: String,
+
+        /// Identity accountable for the change.
+        #[arg(long, default_value = "author")]
+        author: String,
+
+        /// Identity that reviews it. Must differ from the author.
+        #[arg(long, default_value = "reviewer")]
+        reviewer: String,
+
+        /// Adapter profile that writes the change.
+        #[arg(long)]
+        adapter: Option<String>,
+
+        /// Adapter profile that reviews it. Must differ from `--adapter`.
+        #[arg(long)]
+        review_adapter: Option<String>,
+
+        /// Git ref the worktree branches from.
+        #[arg(long, default_value = "HEAD")]
+        base_ref: String,
+
+        /// Model hint passed through to the adapter.
+        #[arg(long)]
+        model: Option<String>,
+    },
+
+    /// Read a finished run back from its record.
+    Replay {
+        /// Run id, as printed by `run`.
+        run_id: String,
+    },
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let project = cli.project.clone().unwrap_or_else(|| PathBuf::from("."));
 
-    let result = match cli.command {
+    let result = match &cli.command {
         Commands::Check => check::run(&project, cli.json),
         Commands::Adapters => adapters::run(&project, cli.json),
+        Commands::Replay { run_id } => replay::run(&project, run_id, cli.json),
+        Commands::Run {
+            prompt,
+            author,
+            reviewer,
+            adapter,
+            review_adapter,
+            base_ref,
+            model,
+        } => run::run(
+            &project,
+            &run::Args {
+                prompt: prompt.clone(),
+                author: author.clone(),
+                reviewer: reviewer.clone(),
+                adapter: adapter.clone(),
+                review_adapter: review_adapter.clone(),
+                base_ref: base_ref.clone(),
+                model: model.clone(),
+            },
+            cli.json,
+        ),
     };
 
     match result {
+        // A refused run is a correct outcome reported correctly, but the exit
+        // code has to distinguish it: CI treats a non-zero exit as "not ready".
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(e) => {

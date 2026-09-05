@@ -1,29 +1,21 @@
 //! `ostraka adapters` — what can actually run on this machine.
 
+use crate::project;
 use ostraka_adapter::process::ProcessAdapter;
-use ostraka_adapter::{Availability, Profile, VendorAdapter};
+use ostraka_adapter::{Availability, VendorAdapter};
 use std::path::Path;
 
 type Outcome = Result<bool, Box<dyn std::error::Error>>;
 
-pub fn run(project: &Path, json: bool) -> Outcome {
-    let dir = project.join("adapters");
-    if !dir.is_dir() {
-        return Err(format!("no adapters directory at {}", dir.display()).into());
-    }
-
-    let mut rows = Vec::new();
-    for entry in std::fs::read_dir(&dir)? {
-        let path = entry?.path();
-        if path.extension().is_none_or(|e| e != "toml") {
-            continue;
-        }
-        let profile = Profile::parse(&std::fs::read_to_string(&path)?)?;
-        let adapter = ProcessAdapter::new(profile);
-        let availability = adapter.probe();
-        rows.push((adapter.id().to_string(), availability));
-    }
-
+pub fn run(project_dir: &Path, json: bool) -> Outcome {
+    let mut rows: Vec<(String, Availability)> = project::load_profiles(project_dir)?
+        .into_iter()
+        .map(|p| {
+            let adapter = ProcessAdapter::new(p);
+            let availability = adapter.probe();
+            (adapter.id().to_string(), availability)
+        })
+        .collect();
     rows.sort_by(|a, b| a.0.cmp(&b.0));
 
     if json {

@@ -5,6 +5,7 @@
 //! thiserror. Keeping it inert is what lets every other crate agree on the same
 //! vocabulary without inheriting a runtime.
 
+pub mod clock;
 pub mod config;
 pub mod gate;
 pub mod identity;

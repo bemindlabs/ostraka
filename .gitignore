@@ -16,3 +16,9 @@ node_modules/
 .DS_Store
 *.swp
 *~
+
+# The claude-mem plugin writes a CLAUDE.md into whatever directory it is working
+# in. In this repository the only legitimate one is the root symlink to
+# AGENTS.md; every other copy is scribble that has twice reached a commit.
+CLAUDE.md
+!/CLAUDE.md

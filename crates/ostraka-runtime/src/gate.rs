@@ -58,10 +58,17 @@ impl MergeToken {
 }
 
 /// Why a gate refused.
+///
+/// `ChecksFailed` carries the check records rather than only the names. A run
+/// that fails is exactly when the evidence matters most, so the refusal itself
+/// holds it and a caller cannot record the outcome without it.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// One or more required checks failed. Named so the reason is legible.
-    ChecksFailed { failed: Vec<String> },
+    ChecksFailed {
+        failed: Vec<String>,
+        records: Vec<CheckRecord>,
+    },
     /// The reviewer rejected the change.
     Rejected { reason: String },
     /// The reviewer and the author are the same identity.
@@ -91,7 +98,7 @@ pub fn run_checks(
     if failed.is_empty() {
         Ok(AllChecksPassed { records })
     } else {
-        Err(Refusal::ChecksFailed { failed })
+        Err(Refusal::ChecksFailed { failed, records })
     }
 }
 
@@ -182,12 +189,15 @@ mod tests {
     fn a_failing_required_check_refuses_the_gate() {
         let refusal = run_checks(&spec(&[("fail", "exit 1", true)]), Path::new("."))
             .expect_err("must refuse");
-        assert_eq!(
-            refusal,
-            Refusal::ChecksFailed {
-                failed: vec!["fail".to_string()]
+        match refusal {
+            Refusal::ChecksFailed { failed, records } => {
+                assert_eq!(failed, ["fail"]);
+                // The evidence travels with the refusal.
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0].exit_code, Some(1));
             }
-        );
+            other => panic!("wrong refusal: {other:?}"),
+        }
     }
 
     #[test]

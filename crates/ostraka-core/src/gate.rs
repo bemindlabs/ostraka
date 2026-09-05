@@ -54,7 +54,7 @@ impl Default for ReviewPolicy {
 }
 
 /// What actually happened when a check ran. Produced only by execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckRecord {
     pub name: String,
     pub cmd: String,

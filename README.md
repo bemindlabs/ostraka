@@ -12,16 +12,34 @@ own checks have run and an agent that did not write the change has approved it.
 
 ## Status
 
-**3.0 — early.** The domain model, the vendor boundary, the gate and the run log
-are implemented and tested. `run` and `replay` are not wired yet; see the build
-order in the workspace notes.
-
-What works today:
+**3.0 — early, and it runs.** A task goes end to end: isolated worktree, an
+agent writes, the project's checks actually execute, a *different* agent
+reviews, and the result is a replayable record.
 
 ```
 ostraka check      # validate the project config and every adapter profile
 ostraka adapters   # list adapter profiles and whether each can run here
+ostraka run "..."  # isolate, execute, gate, review, record
+ostraka replay ID  # read a finished run back
 ```
+
+A run in full:
+
+```
+$ ostraka run "add a greeting note" --adapter writer --review-adapter reviewer \
+    --author archon --reviewer ephor
+run t3289514-20260905T151159Z
+  pass  not-empty 0ms
+  pass  greeting 2ms
+approved — written by archon, reviewed by ephor
+```
+
+Refusals are the interesting half. A failing check never reaches the reviewer,
+a reviewer that says nothing is a rejection, and the run record keeps the check
+output either way — a failed run is the one someone needs to read.
+
+Not done: merging (a run commits inside its worktree and stops there), richer
+routing, and a TUI.
 
 ## How it is put together
 

@@ -72,6 +72,55 @@ pub fn touched_paths(worktree: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
+/// The change a run produced, as a diff against the base ref.
+///
+/// This is what a reviewer sees. It is read from git rather than from the
+/// agent, so an agent cannot narrow its own diff by under-reporting.
+pub fn diff(worktree: &Path) -> Result<String> {
+    // Stage everything first so that new files appear in the diff at all;
+    // untracked files are invisible to `git diff` otherwise.
+    let add = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(worktree)
+        .output()?;
+    if !add.status.success() {
+        return Err(Error::Other(format!(
+            "git add failed: {}",
+            String::from_utf8_lossy(&add.stderr).trim()
+        )));
+    }
+
+    let out = Command::new("git")
+        .args(["diff", "--cached"])
+        .current_dir(worktree)
+        .output()?;
+    if !out.status.success() {
+        return Err(Error::Other(format!(
+            "git diff failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Commits the staged change inside the worktree.
+///
+/// Committing is as far as a run goes. Merging is a separate, human-initiated
+/// act: an approved change is ready to merge, not already merged.
+pub fn commit(worktree: &Path, message: &str) -> Result<()> {
+    let out = Command::new("git")
+        .args(["commit", "-m", message])
+        .current_dir(worktree)
+        .output()?;
+    if !out.status.success() {
+        return Err(Error::Other(format!(
+            "git commit failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
 /// Removes a worktree and its branch.
 pub fn remove(repo: &Path, wt: &Worktree) -> Result<()> {
     let out = Command::new("git")

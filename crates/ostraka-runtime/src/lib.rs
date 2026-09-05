@@ -5,8 +5,10 @@
 //! they must not be separated.
 
 pub mod gate;
+pub mod orchestrator;
 pub mod record;
 pub mod review;
+pub mod route;
 pub mod worktree;
 
 use thiserror::Error;
