@@ -169,6 +169,63 @@ pub fn evaluate(
     }
 }
 
+/// The gate again, from a finished run's own evidence.
+///
+/// A run mints its token in memory and the token dies with the process, so
+/// promoting an approved change later has to ask the same question a second
+/// time. It is asked here, in the module that owns the answer: nothing outside
+/// gains a way to build a [`MergeToken`], and a run that was refused cannot be
+/// promoted by a caller that decides it disagrees.
+///
+/// The evidence is the run record, which is not inside the worktree. An agent
+/// works in a worktree; the records live above it, so a fleet cannot write its
+/// own approval. A person with a text editor can — and that same person can
+/// commit anything they like directly. This gate is between the fleet and the
+/// branch, not between the operator and their own repository.
+///
+/// Required checks are read from the project's current spec, not from the
+/// record: a check added since the run was made has never passed, and a record
+/// that predates it must not promote as though it had.
+pub fn reaffirm(
+    spec: &GateSpec,
+    record: &ostraka_core::record::RunRecord,
+    must_differ_from_author: bool,
+) -> std::result::Result<MergeToken, Refusal> {
+    let mut records = Vec::with_capacity(spec.checks.len());
+    let mut failed = Vec::new();
+
+    for check in &spec.checks {
+        match record.checks.iter().find(|c| c.name == check.name) {
+            Some(evidence) => {
+                if check.required && !evidence.passed() {
+                    failed.push(check.name.clone());
+                }
+                records.push(evidence.clone());
+            }
+            None if check.required => failed.push(check.name.clone()),
+            None => {}
+        }
+    }
+
+    if !failed.is_empty() {
+        return Err(Refusal::ChecksFailed { failed, records });
+    }
+
+    let Some(approval) = &record.approval else {
+        return Err(Refusal::Rejected {
+            reason: "the run record carries no approval, so nothing reviewed this change"
+                .to_string(),
+        });
+    };
+
+    evaluate(
+        AllChecksPassed { records },
+        &record.author,
+        approval,
+        must_differ_from_author,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

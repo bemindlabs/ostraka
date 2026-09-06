@@ -21,6 +21,7 @@ ostraka check      # validate the project config and every adapter profile
 ostraka adapters   # list adapter profiles and whether each can run here
 ostraka run "..."  # isolate, execute, gate, review, record
 ostraka replay ID  # read a finished run back
+ostraka promote ID # give an approved run a branch. Merges nothing
 ```
 
 A real run — Claude Code wrote the change, Codex reviewed it, neither knew the
@@ -48,6 +49,23 @@ Author: archon <archon@ostraka.invalid>
     Reviewed-by: ephor (codex)
 ```
 
+An approved run stops at a commit inside its worktree. `ostraka promote` gives
+that commit a branch of its own and then stops too:
+
+```
+$ ostraka promote t907222-20260906T132706Z
+promoted t907222-20260906T132706Z to promoted/t907222-20260906T132706Z (8db12c5f25b2)
+  written by archon, reviewed by ephor
+
+nothing has been merged. To take it further:
+  git merge --no-ff promoted/t907222-20260906T132706Z
+  gh pr create --head promoted/t907222-20260906T132706Z
+```
+
+It refuses a run the gate refused, and it refuses one whose record and whose
+commit disagree — the record is a file beside the repository, the trailers are
+inside history, and a promotion needs both to say the same thing.
+
 Refusals are the interesting half. A failing check never reaches the reviewer,
 a reviewer that says nothing is a rejection, and the run record keeps the check
 output either way — a failed run is the one someone needs to read.
@@ -57,8 +75,8 @@ task through this repository's own four cargo checks and an independent review �
 the gate this project applies to others is the gate it passes itself, executed by
 the same code.
 
-Not done: merging (a run commits inside its worktree and stops there), richer
-routing, and a TUI.
+Not done: merging itself — promotion names a branch and leaves the merge to a
+person — richer routing, and a TUI.
 
 ## How it is put together
 

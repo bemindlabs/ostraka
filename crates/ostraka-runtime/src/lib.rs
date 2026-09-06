@@ -6,6 +6,7 @@
 
 pub mod gate;
 pub mod orchestrator;
+pub mod promote;
 pub mod record;
 pub mod review;
 pub mod route;

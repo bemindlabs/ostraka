@@ -3,6 +3,7 @@
 mod adapters;
 mod check;
 mod project;
+mod promote;
 mod replay;
 mod run;
 
@@ -67,6 +68,16 @@ enum Commands {
         model: Option<String>,
     },
 
+    /// Give an approved run a branch of its own. Merges nothing.
+    Promote {
+        /// Run id, as printed by `run`.
+        run_id: String,
+
+        /// Branch to create. Defaults to `promoted/<run-id>`.
+        #[arg(long)]
+        branch: Option<String>,
+    },
+
     /// Read a finished run back from its record.
     Replay {
         /// Run id, as printed by `run`.
@@ -82,6 +93,9 @@ fn main() -> ExitCode {
         Commands::Check => check::run(&project, cli.json),
         Commands::Adapters => adapters::run(&project, cli.json),
         Commands::Replay { run_id } => replay::run(&project, run_id, cli.json),
+        Commands::Promote { run_id, branch } => {
+            promote::run(&project, run_id, branch.as_deref(), cli.json)
+        }
         Commands::Run {
             prompt,
             author,

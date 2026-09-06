@@ -125,6 +125,17 @@ is not equivalent: automatic routing prefers a profile invoking a *different
 binary*, and only falls back to a same-binary pair when that is all there is.
 Naming one explicitly is still honoured, because naming is a decision.
 
+**Promotion re-asks the gate; it never stores its answer.** A run mints its
+token in memory and the token dies with the process, so `ostraka promote` calls
+`gate::reaffirm`, which builds a token from the run record against the
+project's *current* checks — a check added since the run was made has never
+passed and blocks promotion. Serializing a token would make one anybody could
+write, which is rule 3 defeated by a file format. Promotion additionally
+requires the commit's own trailers to agree with the record, because the record
+sits beside the repository and the trailers sit inside history: forging one is
+not enough. And it stops at a branch. Merging, pushing and opening a pull
+request are acts a person takes.
+
 **Async stays out until parallel execution earns it.** Everything today is
 sequential and synchronous. When several adapters need to stream at once, tokio
 goes in `ostraka-runtime` only — `ostraka-core` stays inert either way, which is
