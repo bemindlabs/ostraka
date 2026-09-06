@@ -45,6 +45,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct AdapterOutcome {
     pub exit_code: Option<i32>,
     pub files_touched: Vec<String>,
+    /// Why it failed, in the vendor's own words. `None` on success.
+    ///
+    /// A coding CLI reports an expired credential, a rate limit or a missing
+    /// sandbox capability on stderr and exits non-zero, saying nothing on
+    /// stdout. Without this, every one of those becomes the same unreadable
+    /// "exited with 1" — and a refusal nobody can act on is barely better than
+    /// no refusal at all.
+    pub diagnostics: Option<String>,
 }
 
 /// A live agent process, yielding normalized events until it ends.

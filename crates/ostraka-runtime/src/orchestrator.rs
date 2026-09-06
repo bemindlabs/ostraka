@@ -161,7 +161,18 @@ fn drive(
     while let Some(event) = session.next_event() {
         log.append(&event)?;
     }
-    Ok(session.finish().exit_code)
+    let outcome = session.finish();
+    // An author that failed for an external reason still produced a diff the
+    // gate will judge on its merits. Record why anyway: an empty diff whose
+    // cause is in the log is diagnosable, and one whose cause was discarded
+    // looks like an agent that simply did nothing.
+    if let Some(diagnostics) = &outcome.diagnostics {
+        log.append(&Event::Error {
+            message: format!("author exited abnormally: {diagnostics}"),
+            raw: None,
+        })?;
+    }
+    Ok(outcome.exit_code)
 }
 
 /// Runs the reviewer and reads its answer.
@@ -203,9 +214,22 @@ fn collect_verdict(
     }
     let outcome = session.finish();
     if outcome.exit_code != Some(0) {
-        return Ok(Verdict::Reject {
-            reason: format!("reviewer exited with {:?}", outcome.exit_code),
-        });
+        let code = outcome
+            .exit_code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "no exit code".to_string());
+        // Say why. A reviewer that failed because a credential expired and one
+        // that failed because it disagreed are the same exit code, and only one
+        // of them is about the change.
+        let reason = match &outcome.diagnostics {
+            Some(d) => format!("reviewer could not run (exit {code}): {d}"),
+            None => format!("reviewer could not run (exit {code}), and said nothing"),
+        };
+        log.append(&Event::Error {
+            message: reason.clone(),
+            raw: None,
+        })?;
+        return Ok(Verdict::Reject { reason });
     }
 
     Ok(review::parse_verdict(&spoken))
