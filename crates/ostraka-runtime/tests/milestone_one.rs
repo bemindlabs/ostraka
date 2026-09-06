@@ -54,6 +54,18 @@ fn fixture(name: &str) -> Fixture {
     Fixture { repo }
 }
 
+/// A reviewer body that answers with the marker it was given.
+///
+/// The marker is derived per review and appears only in the prompt, so a
+/// reviewer has to read it out of what it was handed — which is the mechanism
+/// under test, not a detail of the fixture.
+fn verdict(answer: &str) -> String {
+    format!(
+        "marker=$(printf '%s' \"$1\" | grep -o 'VERDICT-[0-9a-f]*:' | head -1)\n\
+         echo \"$marker {answer}\""
+    )
+}
+
 /// Writes an executable script and returns a profile that runs it.
 fn agent(repo: &Path, id: &str, body: &str) -> Profile {
     let path = repo.join(format!("{id}.sh"));
@@ -105,7 +117,7 @@ fn an_author_that_changed_nothing_is_reported_as_such_and_not_sent_to_a_reviewer
     // that then gets reported as the reason the run was refused.
     let f = fixture("no-change");
     let writer = agent(&f.repo, "writer", "echo 'that test already exists'");
-    let reviewer = agent(&f.repo, "reviewer", "echo 'VERDICT: APPROVE'");
+    let reviewer = agent(&f.repo, "reviewer", &verdict("APPROVE"));
     let routing = route::select(
         &[writer, reviewer],
         Some("writer"),
@@ -141,7 +153,7 @@ fn an_author_that_could_not_run_is_refused_in_its_own_words_without_calling_a_re
     let writer = agent(&f.repo, "writer", "echo 'usage limit reached' >&2; exit 1");
     // Reaching this reviewer at all would be the failure: there is nothing to
     // review, and running it would spend a second vendor to be told so.
-    let reviewer = agent(&f.repo, "reviewer", "echo 'VERDICT: APPROVE'");
+    let reviewer = agent(&f.repo, "reviewer", &verdict("APPROVE"));
     let routing = route::select(
         &[writer, reviewer],
         Some("writer"),
@@ -182,7 +194,7 @@ fn an_approved_run_produces_a_token_a_commit_and_a_replayable_record() {
         "writer",
         "echo 'made the change' && echo new > added.txt",
     );
-    let reviewer = agent(&f.repo, "reviewer", "echo 'VERDICT: APPROVE'");
+    let reviewer = agent(&f.repo, "reviewer", &verdict("APPROVE"));
     let routing = route::select(
         &[writer, reviewer],
         Some("writer"),
@@ -234,7 +246,7 @@ fn a_failing_check_refuses_before_any_reviewer_is_consulted() {
     let f = fixture("checkfail");
     let writer = agent(&f.repo, "writer", "echo broken > added.txt");
     // A reviewer that would approve anything. It must never be reached.
-    let reviewer = agent(&f.repo, "reviewer", "echo 'VERDICT: APPROVE'");
+    let reviewer = agent(&f.repo, "reviewer", &verdict("APPROVE"));
     let routing = route::select(
         &[writer, reviewer],
         Some("writer"),
@@ -279,7 +291,7 @@ fn a_failing_check_refuses_before_any_reviewer_is_consulted() {
 fn a_rejecting_reviewer_blocks_a_change_whose_checks_all_passed() {
     let f = fixture("reject");
     let writer = agent(&f.repo, "writer", "echo new > added.txt");
-    let reviewer = agent(&f.repo, "reviewer", "echo 'VERDICT: REJECT: out of scope'");
+    let reviewer = agent(&f.repo, "reviewer", &verdict("REJECT: out of scope"));
     let routing = route::select(
         &[writer, reviewer],
         Some("writer"),
@@ -336,7 +348,7 @@ fn a_silent_reviewer_is_a_rejection_not_a_pass() {
 fn the_author_cannot_review_their_own_change_end_to_end() {
     let f = fixture("selfapprove");
     let writer = agent(&f.repo, "writer", "echo new > added.txt");
-    let reviewer = agent(&f.repo, "reviewer", "echo 'VERDICT: APPROVE'");
+    let reviewer = agent(&f.repo, "reviewer", &verdict("APPROVE"));
     let routing = route::select(
         &[writer, reviewer],
         Some("writer"),

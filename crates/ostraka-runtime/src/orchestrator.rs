@@ -212,9 +212,13 @@ fn collect_verdict(
     worktree: &Path,
     log: &mut RunLog,
 ) -> Result<Verdict> {
+    // Derived here, after the author has finished, and handed only to the
+    // reviewer: it is what lets the verdict be read from anywhere in the answer
+    // without an author being able to plant one in the diff.
+    let marker = review::verdict_marker(&task.id);
     let review_task = TaskSpec {
         id: format!("{}-review", task.id),
-        prompt: review::review_prompt(&task.prompt, diff),
+        prompt: review::review_prompt(&task.prompt, diff, &marker),
         adapter: reviewer.id().to_string(),
         author: task.author.clone(),
         base_ref: task.base_ref.clone(),
@@ -258,7 +262,7 @@ fn collect_verdict(
         return Ok(Verdict::Reject { reason });
     }
 
-    Ok(review::parse_verdict(&spoken))
+    Ok(review::parse_verdict(&spoken, &marker))
 }
 
 fn finish(
