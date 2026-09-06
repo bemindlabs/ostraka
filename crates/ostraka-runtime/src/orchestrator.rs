@@ -10,7 +10,7 @@ use crate::review;
 use crate::route::Routing;
 use crate::worktree;
 use crate::{Error, Result};
-use ostraka_adapter::VendorAdapter;
+use ostraka_adapter::{AdapterOutcome, VendorAdapter};
 use ostraka_core::clock::now_rfc3339;
 use ostraka_core::config::Config;
 use ostraka_core::gate::{Approval, Verdict};
@@ -72,14 +72,35 @@ pub fn run_task(
 
     // 2. Execute, streaming events into the log as they arrive so an
     //    interrupted run still leaves an account of how far it got.
-    let author_exit = drive(routing.author.as_ref(), task, wt.path(), &mut log)?;
+    let author = drive(routing.author.as_ref(), task, wt.path(), &mut log)?;
 
     // 3. Read what was actually touched, from git rather than from the agent.
     let touched = worktree::touched_paths(wt.path())?;
     log.append(&Event::Finished {
-        exit_code: author_exit,
+        exit_code: author.exit_code,
         files_touched: touched.clone(),
     })?;
+
+    // An author that failed and left nothing behind has produced nothing to
+    // review. Sending an empty diff on would spend a second vendor's quota to
+    // be told it is empty, and would report the reviewer's answer as the reason
+    // when the reason is upstream of it.
+    if touched.is_empty() && author.exit_code != Some(0) {
+        return finish(
+            log,
+            record,
+            Outcome::Rejected,
+            None,
+            Some(Refusal::AuthorFailed {
+                code: author
+                    .exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "no exit code".to_string()),
+                diagnostics: author.diagnostics.clone(),
+            }),
+            String::new(),
+        );
+    }
 
     if !config.policy.permits(&touched) {
         return finish(
@@ -87,7 +108,7 @@ pub fn run_task(
             record,
             Outcome::Rejected,
             None,
-            Some(Refusal::Rejected {
+            Some(Refusal::PolicyViolation {
                 reason: format!("policy forbids writing outside declared paths: {touched:?}"),
             }),
             String::new(),
@@ -156,7 +177,7 @@ fn drive(
     task: &TaskSpec,
     worktree: &Path,
     log: &mut RunLog,
-) -> Result<Option<i32>> {
+) -> Result<AdapterOutcome> {
     let mut session = adapter.launch(task, worktree)?;
     while let Some(event) = session.next_event() {
         log.append(&event)?;
@@ -172,7 +193,7 @@ fn drive(
             raw: None,
         })?;
     }
-    Ok(outcome.exit_code)
+    Ok(outcome)
 }
 
 /// Runs the reviewer and reads its answer.

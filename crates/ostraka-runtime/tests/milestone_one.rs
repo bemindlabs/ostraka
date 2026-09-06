@@ -99,6 +99,48 @@ fn task(prompt: &str, author: &str) -> TaskSpec {
 }
 
 #[test]
+fn an_author_that_could_not_run_is_refused_in_its_own_words_without_calling_a_reviewer() {
+    // A vendor out of quota and a vendor that considered the task and did
+    // nothing leave the same empty worktree. Only one of them is about the
+    // change, and the run has to say which.
+    let f = fixture("author-failed");
+    let writer = agent(&f.repo, "writer", "echo 'usage limit reached' >&2; exit 1");
+    // Reaching this reviewer at all would be the failure: there is nothing to
+    // review, and running it would spend a second vendor to be told so.
+    let reviewer = agent(&f.repo, "reviewer", "echo 'VERDICT: APPROVE'");
+    let routing = route::select(
+        &[writer, reviewer],
+        Some("writer"),
+        Some("reviewer"),
+        &f.repo.join(".ostraka/vendor-home"),
+    )
+    .unwrap();
+
+    let report = orchestrator::run_task(
+        &f.repo,
+        &config("true"),
+        &routing,
+        &task("change something", "archon"),
+        &ActorId::new("ephor"),
+        &f.repo.join(".ostraka"),
+    )
+    .expect("runs");
+
+    assert!(!report.approved());
+    assert!(report.record.approval.is_none(), "a reviewer was called");
+    match report.refusal {
+        Some(ostraka_runtime::gate::Refusal::AuthorFailed { code, diagnostics }) => {
+            assert_eq!(code, "1");
+            assert!(
+                diagnostics.is_some_and(|d| d.contains("usage limit reached")),
+                "the vendor's reason was discarded"
+            );
+        }
+        other => panic!("wrong refusal: {other:?}"),
+    }
+}
+
+#[test]
 fn an_approved_run_produces_a_token_a_commit_and_a_replayable_record() {
     let f = fixture("approve");
     let writer = agent(
@@ -107,7 +149,13 @@ fn an_approved_run_produces_a_token_a_commit_and_a_replayable_record() {
         "echo 'made the change' && echo new > added.txt",
     );
     let reviewer = agent(&f.repo, "reviewer", "echo 'VERDICT: APPROVE'");
-    let routing = route::select(&[writer, reviewer], Some("writer"), Some("reviewer")).unwrap();
+    let routing = route::select(
+        &[writer, reviewer],
+        Some("writer"),
+        Some("reviewer"),
+        &f.repo.join(".ostraka/vendor-home"),
+    )
+    .unwrap();
 
     let records = f.repo.join(".ostraka");
     let report = orchestrator::run_task(
@@ -153,7 +201,13 @@ fn a_failing_check_refuses_before_any_reviewer_is_consulted() {
     let writer = agent(&f.repo, "writer", "echo broken > added.txt");
     // A reviewer that would approve anything. It must never be reached.
     let reviewer = agent(&f.repo, "reviewer", "echo 'VERDICT: APPROVE'");
-    let routing = route::select(&[writer, reviewer], Some("writer"), Some("reviewer")).unwrap();
+    let routing = route::select(
+        &[writer, reviewer],
+        Some("writer"),
+        Some("reviewer"),
+        &f.repo.join(".ostraka/vendor-home"),
+    )
+    .unwrap();
 
     let report = orchestrator::run_task(
         &f.repo,
@@ -192,7 +246,13 @@ fn a_rejecting_reviewer_blocks_a_change_whose_checks_all_passed() {
     let f = fixture("reject");
     let writer = agent(&f.repo, "writer", "echo new > added.txt");
     let reviewer = agent(&f.repo, "reviewer", "echo 'VERDICT: REJECT: out of scope'");
-    let routing = route::select(&[writer, reviewer], Some("writer"), Some("reviewer")).unwrap();
+    let routing = route::select(
+        &[writer, reviewer],
+        Some("writer"),
+        Some("reviewer"),
+        &f.repo.join(".ostraka/vendor-home"),
+    )
+    .unwrap();
 
     let report = orchestrator::run_task(
         &f.repo,
@@ -217,7 +277,13 @@ fn a_silent_reviewer_is_a_rejection_not_a_pass() {
     let f = fixture("silent");
     let writer = agent(&f.repo, "writer", "echo new > added.txt");
     let reviewer = agent(&f.repo, "reviewer", "exit 0");
-    let routing = route::select(&[writer, reviewer], Some("writer"), Some("reviewer")).unwrap();
+    let routing = route::select(
+        &[writer, reviewer],
+        Some("writer"),
+        Some("reviewer"),
+        &f.repo.join(".ostraka/vendor-home"),
+    )
+    .unwrap();
 
     let report = orchestrator::run_task(
         &f.repo,
@@ -237,7 +303,13 @@ fn the_author_cannot_review_their_own_change_end_to_end() {
     let f = fixture("selfapprove");
     let writer = agent(&f.repo, "writer", "echo new > added.txt");
     let reviewer = agent(&f.repo, "reviewer", "echo 'VERDICT: APPROVE'");
-    let routing = route::select(&[writer, reviewer], Some("writer"), Some("reviewer")).unwrap();
+    let routing = route::select(
+        &[writer, reviewer],
+        Some("writer"),
+        Some("reviewer"),
+        &f.repo.join(".ostraka/vendor-home"),
+    )
+    .unwrap();
 
     // Same identity on both sides: the reviewing adapter differs, the actor does not.
     let report = orchestrator::run_task(

@@ -7,6 +7,7 @@
 
 use crate::{Error, Result};
 use ostraka_adapter::{Availability, Profile, VendorAdapter, process::ProcessAdapter};
+use std::path::Path;
 
 /// The pair of adapters a run will use.
 pub struct Routing {
@@ -32,10 +33,16 @@ impl std::fmt::Debug for Routing {
 /// quietly substituted. Everything chosen automatically is drawn only from the
 /// profiles that can actually run here, in id order, so the choice is
 /// reproducible rather than dependent on directory listing order.
+///
+/// `isolation_root` is where a profile that relocates its vendor's home
+/// directory may put it. It is bound here, alongside the read-only review
+/// invocation, for the same reason: what a run is allowed to read is decided
+/// when the routing is, not by whatever calls `launch` later.
 pub fn select(
     profiles: &[Profile],
     author_id: Option<&str>,
     reviewer_id: Option<&str>,
+    isolation_root: &Path,
 ) -> Result<Routing> {
     if profiles.is_empty() {
         return Err(Error::Other("no adapter profiles found".to_string()));
@@ -76,8 +83,8 @@ pub fn select(
     }
 
     Ok(Routing {
-        author: Box::new(ProcessAdapter::new(author)),
-        reviewer: Box::new(ProcessAdapter::reviewing(reviewer)),
+        author: Box::new(ProcessAdapter::new(author).isolated_under(isolation_root)),
+        reviewer: Box::new(ProcessAdapter::reviewing(reviewer).isolated_under(isolation_root)),
     })
 }
 
@@ -128,6 +135,11 @@ fn first_other(profiles: &[Profile], exclude: &str) -> Result<Profile> {
 mod tests {
     use super::*;
 
+    /// Routing never launches anything, so any path will do here.
+    fn root() -> &'static Path {
+        Path::new("/nonexistent-isolation-root")
+    }
+
     fn profile(id: &str) -> Profile {
         Profile::parse(&format!(
             r#"
@@ -141,21 +153,21 @@ mod tests {
 
     #[test]
     fn a_lone_adapter_cannot_review_itself() {
-        let err = select(&[profile("solo")], None, None).expect_err("must refuse");
+        let err = select(&[profile("solo")], None, None, root()).expect_err("must refuse");
         assert!(err.to_string().contains("no independent reviewer"));
     }
 
     #[test]
     fn naming_the_same_adapter_twice_is_refused() {
         let profiles = [profile("a"), profile("b")];
-        let err = select(&profiles, Some("a"), Some("a")).expect_err("must refuse");
+        let err = select(&profiles, Some("a"), Some("a"), root()).expect_err("must refuse");
         assert!(err.to_string().contains("cannot review itself"));
     }
 
     #[test]
     fn selection_is_deterministic_not_listing_order() {
-        let forward = select(&[profile("b"), profile("a")], None, None).expect("routes");
-        let reverse = select(&[profile("a"), profile("b")], None, None).expect("routes");
+        let forward = select(&[profile("b"), profile("a")], None, None, root()).expect("routes");
+        let reverse = select(&[profile("a"), profile("b")], None, None, root()).expect("routes");
         assert_eq!(forward.author.id(), "a");
         assert_eq!(forward.author.id(), reverse.author.id());
         assert_eq!(forward.reviewer.id(), "b");
@@ -172,7 +184,8 @@ mod tests {
         )
         .expect("valid");
         // "aaa-missing" sorts first, so id order alone would pick it.
-        let routing = select(&[missing, profile("b"), profile("c")], None, None).expect("routes");
+        let routing =
+            select(&[missing, profile("b"), profile("c")], None, None, root()).expect("routes");
         assert_eq!(routing.author.id(), "b");
         assert_eq!(routing.reviewer.id(), "c");
     }
@@ -189,7 +202,8 @@ mod tests {
             "#,
         )
         .expect("valid");
-        let routing = select(&[missing, profile("b")], Some("missing"), None).expect("routes");
+        let routing =
+            select(&[missing, profile("b")], Some("missing"), None, root()).expect("routes");
         assert_eq!(routing.author.id(), "missing");
     }
 
@@ -203,13 +217,13 @@ mod tests {
             "#,
         )
         .expect("valid");
-        let err = select(&[missing], None, None).expect_err("must refuse");
+        let err = select(&[missing], None, None, root()).expect_err("must refuse");
         assert!(err.to_string().contains("definitely-not-a-real-binary-xyz"));
     }
 
     #[test]
     fn an_unknown_id_is_reported_by_name() {
-        let err = select(&[profile("a")], Some("nope"), None).expect_err("must refuse");
+        let err = select(&[profile("a")], Some("nope"), None, root()).expect_err("must refuse");
         assert!(err.to_string().contains("nope"));
     }
 }

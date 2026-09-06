@@ -97,6 +97,18 @@ directory is working evidence, readable with `ostraka replay` while it is there;
 a commit is the permanent record, and it is in history whether or not anyone
 kept the directory.
 
+**A run is isolated from the operator, not from the repository.** A repository's
+own instruction files travel with the task and reproduce anywhere; the person
+who installed the CLI does not. So the shipped profiles suppress user-level
+instruction files, settings, hooks, plugins and MCP servers, and keep the
+repository's own `AGENTS.md` and `CLAUDE.md`. Where a vendor offers no flag —
+its whole per-user directory named by one environment variable — the profile
+declares `[isolation]` and the runtime relocates that directory to
+`.ostraka/vendor-home/<profile-id>/`, linking in only the entries the profile
+names as credentials. Where a vendor offers no way at all, the limit is written
+down in `adapters/README.md` rather than papered over. Measured per vendor, both
+directions, before shipping.
+
 **Async stays out until parallel execution earns it.** Everything today is
 sequential and synchronous. When several adapters need to stream at once, tokio
 goes in `ostraka-runtime` only — `ostraka-core` stays inert either way, which is

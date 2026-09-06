@@ -3,6 +3,11 @@
 # `--allow-all-tools` is what the CLI itself requires for non-interactive use, so
 # the author invocation carries it and the reviewer's deliberately does not:
 # without it no tool runs unconfirmed, which is exactly the reviewer's posture.
+#
+# `--disable-builtin-mcps` drops the GitHub MCP server, which reaches the
+# operator's GitHub account and has nothing to do with the change under review.
+# It is the only isolation this CLI offers that does not cost something else —
+# see adapters/README.md for the two that do.
 id = "copilot-cli"
 command = "copilot"
 
@@ -10,13 +15,22 @@ args = [
     "-p",
     "{{prompt}}",
     "--allow-all-tools",
+    "--disable-builtin-mcps",
     "--silent",
     "--no-color",
     "--log-level",
     "none",
 ]
 
-review_args = ["-p", "{{prompt}}", "--silent", "--no-color", "--log-level", "none"]
+review_args = [
+    "-p",
+    "{{prompt}}",
+    "--disable-builtin-mcps",
+    "--silent",
+    "--no-color",
+    "--log-level",
+    "none",
+]
 
 model_args = ["--model", "{{model}}"]
 event_format = "none"

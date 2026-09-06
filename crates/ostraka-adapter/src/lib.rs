@@ -11,6 +11,7 @@
 
 pub mod capability;
 pub mod event;
+pub mod isolation;
 pub mod process;
 pub mod profile;
 
@@ -20,12 +21,18 @@ use std::path::Path;
 use thiserror::Error;
 
 pub use capability::{Availability, Capabilities};
+pub use isolation::Isolation;
 pub use profile::Profile;
 
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("adapter profile {id:?}: {message}")]
     Profile { id: String, message: String },
+
+    #[error(
+        "adapter profile {id:?}: could not isolate this vendor from the operator's setup: {message}"
+    )]
+    Isolation { id: String, message: String },
 
     #[error("failed to launch {command:?}: {source}")]
     Launch {

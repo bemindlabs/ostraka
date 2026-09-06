@@ -71,6 +71,18 @@ pub enum Refusal {
     },
     /// The reviewer rejected the change.
     Rejected { reason: String },
+    /// The authoring agent could not run, and left nothing behind.
+    ///
+    /// Distinct from a rejection: nothing was judged. A vendor that hit a rate
+    /// limit or an expired credential and a vendor that considered the task and
+    /// declined it are the same empty diff, and only one of them is about the
+    /// change. Its own words are carried so the difference is legible.
+    AuthorFailed {
+        code: String,
+        diagnostics: Option<String>,
+    },
+    /// The change touched paths the project's policy does not allow.
+    PolicyViolation { reason: String },
     /// The reviewer and the author are the same identity.
     SelfApproval { actor: ActorId },
 }

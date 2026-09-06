@@ -12,7 +12,7 @@ use ostraka_core::record::Event;
 use ostraka_core::task::TaskSpec;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -27,6 +27,11 @@ const STDERR_TAIL_LINES: usize = 20;
 pub struct ProcessAdapter {
     profile: Profile,
     role: Role,
+    /// Where relocated vendor home directories are created. Absent means the
+    /// caller never offered one, which is fine until a profile asks for
+    /// isolation — at which point launching un-isolated would quietly break
+    /// the promise the profile makes, so it is refused instead.
+    isolation_root: Option<PathBuf>,
 }
 
 impl ProcessAdapter {
@@ -35,6 +40,7 @@ impl ProcessAdapter {
         Self {
             profile,
             role: Role::Author,
+            isolation_root: None,
         }
     }
 
@@ -47,11 +53,41 @@ impl ProcessAdapter {
         Self {
             profile,
             role: Role::Review,
+            isolation_root: None,
         }
+    }
+
+    /// Where this adapter may create a relocated home for its vendor.
+    pub fn isolated_under(mut self, root: impl Into<PathBuf>) -> Self {
+        self.isolation_root = Some(root.into());
+        self
     }
 
     pub fn profile(&self) -> &Profile {
         &self.profile
+    }
+
+    /// The environment this vendor runs with: the profile's own, plus whatever
+    /// isolation adds on top.
+    ///
+    /// Isolation wins by construction — the profile is refused at parse time if
+    /// its `env` sets the same variable — because the isolation guarantee is
+    /// structural and a stray `env` entry should not be able to undo it.
+    fn environment(&self) -> Result<std::collections::BTreeMap<String, String>> {
+        let mut env = self.profile.env.clone();
+        let Some(isolation) = &self.profile.isolation else {
+            return Ok(env);
+        };
+        let Some(root) = &self.isolation_root else {
+            return Err(Error::Isolation {
+                id: self.profile.id.clone(),
+                message: "the profile asks for a relocated home directory and the caller offered \
+                          nowhere to put it; running anyway would read the operator's setup"
+                    .to_string(),
+            });
+        };
+        env.extend(isolation.provision(root, &self.profile.id)?);
+        Ok(env)
     }
 }
 
@@ -108,7 +144,7 @@ impl VendorAdapter for ProcessAdapter {
 
         let mut child = Command::new(&self.profile.command)
             .args(&args)
-            .envs(&self.profile.env)
+            .envs(self.environment()?)
             .current_dir(worktree)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -310,6 +346,49 @@ mod tests {
             "kept {} lines",
             diagnostics.lines().count()
         );
+    }
+
+    fn isolating_profile() -> Profile {
+        Profile::parse(
+            r#"
+            id = "iso"
+            command = "sh"
+            args = ["-c", "echo \"$VENDOR_HOME\"", "--", "{{prompt}}"]
+
+            [isolation]
+            home_env = "VENDOR_HOME"
+            home_source = ".vendor"
+            "#,
+        )
+        .expect("valid profile")
+    }
+
+    #[test]
+    fn an_isolating_profile_will_not_launch_with_nowhere_to_isolate_into() {
+        // Running anyway would read the operator's setup while the profile says
+        // it does not. A refusal is the only honest outcome.
+        let adapter = ProcessAdapter::new(isolating_profile());
+        let Err(err) = adapter.launch(&spec(), Path::new(".")) else {
+            panic!("must refuse to launch un-isolated");
+        };
+        assert!(err.to_string().contains("relocated home"), "{err}");
+    }
+
+    #[test]
+    fn isolation_puts_the_relocated_home_in_the_vendors_environment() {
+        let root = std::env::temp_dir().join(format!("ostraka-process-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let adapter = ProcessAdapter::new(isolating_profile()).isolated_under(&root);
+        let mut session = adapter.launch(&spec(), Path::new(".")).expect("launches");
+
+        let expected = root.join("iso");
+        match session.next_event().expect("one event") {
+            Event::Message { text, .. } => assert_eq!(text, expected.to_string_lossy()),
+            other => panic!("wrong variant: {other:?}"),
+        }
+        assert_eq!(session.finish().exit_code, Some(0));
+        assert!(expected.is_dir(), "the relocated home was never created");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

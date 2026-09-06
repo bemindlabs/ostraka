@@ -48,6 +48,13 @@ event_format = "none"   # or "jsonl"
 [env]
 EXAMPLE_NO_COLOR = "1"
 
+# Only for the part of isolation no flag can reach: a CLI whose entire per-user
+# directory is named by an environment variable. See below.
+[isolation]
+home_env = "EXAMPLE_HOME"
+home_source = ".example"
+credentials = ["auth.json"]
+
 [capabilities]
 headless = true
 streams_json = false
@@ -58,29 +65,81 @@ Placeholders substituted into every argument list: `{{prompt}}`, `{{model}}`,
 `{{worktree}}`. Substitution is one pass and non-recursive, so task text cannot
 expand into further placeholders.
 
-## What a profile has to guarantee
+## Isolation — keeping the operator out of the run
 
-The unit of truth is the git diff the run leaves in the worktree — not the
-vendor's transcript. An adapter only has to run the prompt to completion in the
-given directory, exit with a status, and leave its work on disk.
+A coding CLI reads a great deal from whoever installed it: instruction files,
+MCP servers, hooks, plugins, a default model. None of that travels with the
+repository, so a fleet runner that inherits it produces results that depend on
+whose machine it is on. One run record in this project shows an authoring agent
+replying in Thai inside an English-only repository, because it had adopted a
+persona from the operator's personal instruction file.
 
-Two properties decide whether a CLI can be a *reviewer*, and they are worth
-checking before writing the file:
+The line worth drawing is not "read nothing". It is **the repository travels
+with the task, the operator does not.** A repository's own `AGENTS.md` is part
+of the input and reproduces anywhere; `~/.claude/CLAUDE.md` is not and does not.
 
-1. **stdout carries the answer and little else.** The verdict is read from the
-   first line of what the adapter says. A CLI that prints a banner or progress to
-   stdout needs those routed to stderr, silenced by a flag, or `event_format =
-   "jsonl"` with a shape the normalizer can read.
-2. **It exits non-zero when it fails.** A reviewer that exits non-zero is treated
-   as a rejection, which is the safe direction; one that exits zero having said
-   nothing usable is also a rejection.
+Most of it is flags, and flags belong in `args` and `review_args` where they are
+visible in the command line the run record shows. Only one shape needs the
+`[isolation]` table: a CLI that offers no flag at all and keeps everything
+per-user in a single directory named by an environment variable. Ostraka creates
+`.ostraka/vendor-home/<profile-id>/` and points the variable at it.
 
-## Routing
+Relocating that directory relocates the credentials inside it, which is why
+`credentials` exists: those entries — and nothing else — are linked into the new
+directory, so the CLI can still authenticate. Linked, never copied: isolation
+must not leave a second copy of a secret on disk in order to achieve itself.
+The directory is per profile rather than per run, because a vendor that
+refreshes its own token needs somewhere to keep it.
 
-With no `--adapter` given, the lowest-id profile that is *ready on this machine*
-authors, and the next one reviews. Naming a profile explicitly overrides that and
-is honoured even if the CLI is missing — a named adapter that cannot run should
-fail by name rather than be quietly swapped for another.
+`[isolation]` is a promise, so a profile that declares it will not launch at all
+if the runtime offered nowhere to put the directory.
 
-A single profile is refused outright: one adapter has no independent reviewer,
-and that should fail before any work is done rather than after.
+### What was measured
+
+A scratch repository containing `AGENTS.md` with a codeword and `CLAUDE.md`
+importing it, run outside any workspace, with a canary present in the operator's
+user-level files and nowhere else. Claude Code was asked with `--tools ""` so
+that the answer could only come from injected context rather than from the model
+reading a file.
+
+| | operator config reaches the model | repository instructions reach it | what changes that |
+|---|---|---|---|
+| `claude` | yes | yes | `--setting-sources project` |
+| `codex` | yes — `$CODEX_HOME/AGENTS.md` is spliced into the same block as the project doc | yes | `CODEX_HOME` only |
+| `copilot` | no user-level instructions path exists | yes | `--no-custom-instructions`, which also drops the repository's |
+
+Instruction files turned out to be the smaller half. A baseline `claude -p` in an
+empty scratch repository had 108 tools, 81 of them MCP servers belonging to the
+operator — mail, calendar, drive, an automation server. An authoring agent could
+have sent mail from the operator's account. `--strict-mcp-config`, with no
+`--mcp-config` to go with it, leaves none. `--setting-sources project` alone does
+not: the two flags are orthogonal and both are needed.
+
+### Limits, stated rather than implied
+
+- **Copilot CLI cannot separate the two.** `--no-custom-instructions` drops the
+  operator's instruction files and the repository's `AGENTS.md` together, so it
+  is not shipped: losing the repository's own rules costs more than it buys on a
+  machine where no user-level instructions file exists at all. Its config home
+  (`XDG_CONFIG_HOME`) can be relocated, but `config.json` is where its login
+  lives as well as its default model, so relocating it logs the CLI out — the
+  way back in is `GH_TOKEN` in the environment, which is the operator's call and
+  not something a profile should make for them.
+- **Claude Code's wider hammers cost more than they save.** `--safe-mode` also
+  drops the repository's `CLAUDE.md`; `--bare` additionally forces
+  `ANTHROPIC_API_KEY` and never reads OAuth, so a subscription login stops
+  working. Both were measured, neither is shipped.
+- **`--strict-mcp-config` also drops a repository's own `.mcp.json`.** That is
+  repository content and arguably reproducible, but there is no way today to
+  pass it through, and an MCP server reaches outside the worktree. No servers is
+  the safe end of that trade.
+- **The process environment is still inherited wholesale.** Isolation covers
+  configuration directories, not `PATH`, proxies or API keys already exported.
+- **The default model is operator state.** Two machines with different vendor
+  configuration run the same task on different models. Isolation removes the
+  vendor's *configured* default — a relocated home falls back to the CLI's
+  built-in one, which changes between releases. A run that has to be reproducible
+  names its model.
+- **A relocated home accumulates.** Sessions, caches and a vendor's own memory
+  store live there across runs. It is isolation from the operator, not a fresh
+  sandbox each time.

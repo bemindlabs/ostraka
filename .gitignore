@@ -12,6 +12,10 @@
 # Never commit resolved credentials.
 /.ostraka/secrets/
 
+# Relocated vendor home directories: how a CLI with no isolation flag is kept
+# from reading the operator's own configuration. Contains links to credentials.
+/.ostraka/vendor-home/
+
 node_modules/
 .DS_Store
 *.swp

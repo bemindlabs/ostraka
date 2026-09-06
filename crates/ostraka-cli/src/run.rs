@@ -23,10 +23,14 @@ pub fn run(project: &Path, args: &Args, json: bool) -> Outcome {
     config.validate()?;
     let profiles = project::load_profiles(project)?;
 
+    // Vendors that can only be isolated by relocating their home directory get
+    // one here, beside the run records and ignored by git for the same reason.
+    let records_root: PathBuf = project.join(".ostraka");
     let routing = route::select(
         &profiles,
         args.adapter.as_deref(),
         args.review_adapter.as_deref(),
+        &records_root.join("vendor-home"),
     )?;
 
     let task = TaskSpec {
@@ -38,7 +42,6 @@ pub fn run(project: &Path, args: &Args, json: bool) -> Outcome {
         model: args.model.clone(),
     };
 
-    let records_root: PathBuf = project.join(".ostraka");
     let report = orchestrator::run_task(
         project,
         &config,
@@ -94,6 +97,11 @@ fn describe(refusal: &ostraka_runtime::gate::Refusal) -> String {
             format!("checks failed: {}", failed.join(", "))
         }
         Refusal::Rejected { reason } => format!("reviewer rejected: {reason}"),
+        Refusal::AuthorFailed { code, diagnostics } => match diagnostics {
+            Some(d) => format!("the author could not run (exit {code}): {d}"),
+            None => format!("the author could not run (exit {code}), and said nothing"),
+        },
+        Refusal::PolicyViolation { reason } => reason.clone(),
         Refusal::SelfApproval { actor } => {
             format!("{actor} cannot approve a change {actor} wrote")
         }

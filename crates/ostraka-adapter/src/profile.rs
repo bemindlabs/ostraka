@@ -1,6 +1,7 @@
 //! Adapter profiles: a vendor CLI described as data.
 
 use crate::capability::Capabilities;
+use crate::isolation::Isolation;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -55,6 +56,14 @@ pub struct Profile {
     pub probe_args: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// How this vendor is kept from reading the operator's own setup.
+    ///
+    /// Only for the part that no flag can reach: a CLI whose entire per-user
+    /// directory is named by an environment variable. Everything a flag can
+    /// suppress belongs in `args` and `review_args`, where it is visible in the
+    /// command line the run record shows.
+    #[serde(default)]
+    pub isolation: Option<Isolation>,
     #[serde(default)]
     pub event_format: EventFormat,
     #[serde(default)]
@@ -105,6 +114,20 @@ impl Profile {
                           found"
                     .to_string(),
             });
+        }
+        if let Some(isolation) = &self.isolation {
+            isolation.validate(&self.id)?;
+            // Both would set the same variable and one would silently win. A
+            // profile that contradicts itself should say so at parse time.
+            if self.env.contains_key(&isolation.home_env) {
+                return Err(Error::Profile {
+                    id: self.id.clone(),
+                    message: format!(
+                        "env sets {:?}, which isolation.home_env also sets; remove one",
+                        isolation.home_env
+                    ),
+                });
+            }
         }
         if self.probe_args.is_empty() {
             return Err(Error::Profile {
@@ -286,6 +309,25 @@ mod tests {
         "#;
         let err = Profile::parse(text).expect_err("must refuse");
         assert!(err.to_string().contains("review_args"));
+    }
+
+    #[test]
+    fn a_profile_that_both_isolates_and_unsets_its_own_isolation_is_refused() {
+        // Both would set the same variable and one would silently win.
+        let text = r#"
+            id = "i"
+            command = "c"
+            args = ["{{prompt}}"]
+
+            [env]
+            VENDOR_HOME = "/home/someone/.vendor"
+
+            [isolation]
+            home_env = "VENDOR_HOME"
+            home_source = ".vendor"
+        "#;
+        let err = Profile::parse(text).expect_err("must refuse");
+        assert!(err.to_string().contains("VENDOR_HOME"), "{err}");
     }
 
     #[test]

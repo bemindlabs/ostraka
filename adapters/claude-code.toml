@@ -8,11 +8,36 @@ command = "claude"
 # Author: edits are applied without prompting, but arbitrary shell is not. The
 # leash here is the gate, not the sandbox — widen this to "bypassPermissions" if
 # your authors need to run commands, and know what you are widening.
-args = ["-p", "{{prompt}}", "--permission-mode", "acceptEdits"]
+#
+# The last two flags are what make the run independent of whose machine it is
+# on. `--setting-sources project` drops the operator's user-level settings,
+# hooks and CLAUDE.md while keeping the repository's own, which is exactly the
+# line worth drawing: the repository travels with the task, the operator does
+# not. `--strict-mcp-config` with no `--mcp-config` leaves no MCP servers at
+# all — without it an authoring agent on this machine inherited eighty-one of
+# them, including tools that send mail from the operator's account.
+args = [
+    "-p",
+    "{{prompt}}",
+    "--permission-mode",
+    "acceptEdits",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+]
 
-# Reviewer: read-only. A reviewer that can edit the worktree can make a change it
-# just rejected pass on the next check.
-review_args = ["-p", "{{prompt}}", "--permission-mode", "plan"]
+# Reviewer: read-only, and isolated for the same reasons.
+# A reviewer that can edit the worktree can make a change it just rejected pass
+# on the next check.
+review_args = [
+    "-p",
+    "{{prompt}}",
+    "--permission-mode",
+    "plan",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+]
 
 model_args = ["--model", "{{model}}"]
 event_format = "none"
