@@ -67,6 +67,41 @@ change. It belongs in CI, on a clean checkout.
 6. **Read what happened from git, not from the agent.** Files touched come from
    `git status` in the worktree, never from a vendor's account of its own edits.
 
+## Decisions that are settled
+
+These were open questions across two implementation notes. They are answered;
+reopening one needs a reason, not a preference.
+
+**The repository is self-contained.** The fleet in the sibling workspace —
+`agents/archon`, `agents/ephor` and the rest — is the team that *builds*
+Ostraka. It is not an input to the runtime, which reads `ostraka.toml` and
+`adapters/` and nothing else. The offices survive the move into code as types
+and identities: `MergeToken` is what "the orchestrator cannot approve itself"
+compiles to. Verified by cloning this repository somewhere with no workspace
+above it and running `ostraka run` on itself, gate and review included.
+
+**No second runtime.** No Bun, no Node, no TypeScript. Adapters are subprocesses
+speaking stdio; `std::process` covers that completely. A runtime dependency
+would destroy the one distribution advantage this project has — a curl one-liner
+that then requires you to install a runtime is not a one-liner. Revisit only for
+a genuinely TypeScript-native surface, such as an editor extension.
+
+**SemVer, not CalVer.** crates.io, npm and Homebrew all reason about SemVer
+ranges; a date-shaped version fights all three. Crate versions and git tags are
+the same number.
+
+**Run records are not committed.** `.ostraka/runs/` is ignored. The audit trail
+that has to survive lives in the commit the run produces: it is authored by the
+agent that wrote it and carries the run id and both adapters as trailers. A run
+directory is working evidence, readable with `ostraka replay` while it is there;
+a commit is the permanent record, and it is in history whether or not anyone
+kept the directory.
+
+**Async stays out until parallel execution earns it.** Everything today is
+sequential and synchronous. When several adapters need to stream at once, tokio
+goes in `ostraka-runtime` only — `ostraka-core` stays inert either way, which is
+rule 4 above and is not negotiable.
+
 ## Release artifacts are a contract
 
 `ostraka-<tag>-<target>.tar.gz` plus a `.sha256` sidecar. The install script and

@@ -52,6 +52,11 @@ Refusals are the interesting half. A failing check never reaches the reviewer,
 a reviewer that says nothing is a rejection, and the run record keeps the check
 output either way — a failed run is the one someone needs to read.
 
+It runs on itself. Cloned fresh, with nothing above it, `ostraka run` takes a
+task through this repository's own four cargo checks and an independent review —
+the gate this project applies to others is the gate it passes itself, executed by
+the same code.
+
 Not done: merging (a run commits inside its worktree and stops there), richer
 routing, and a TUI.
 
