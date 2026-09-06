@@ -65,6 +65,34 @@ Placeholders substituted into every argument list: `{{prompt}}`, `{{model}}`,
 `{{worktree}}`. Substitution is one pass and non-recursive, so task text cannot
 expand into further placeholders.
 
+## One vendor, two models
+
+Independence is expressed between profiles, so a reviewer that is the same CLI
+on a different model is a second file. Pin the model in `args` rather than in
+`model_args`, which is only appended when a *run* names one:
+
+```toml
+# adapters/claude-code-sonnet.toml
+id = "claude-code-sonnet"
+command = "claude"
+args = ["-p", "{{prompt}}", "--model", "sonnet", "--permission-mode", "plan",
+        "--setting-sources", "project", "--strict-mcp-config"]
+```
+
+```
+$ ostraka run "..." --adapter claude-code-opus --review-adapter claude-code-sonnet
+approved — written by author, reviewed by reviewer
+
+    Authored-by: author (claude-code-opus)
+    Reviewed-by: reviewer (claude-code-sonnet)
+```
+
+It is a legitimate pair and it is not equivalent to a cross-vendor one: two
+models from one vendor share a training lineage, a system prompt and a set of
+blind spots. So a run that picks for you prefers a profile invoking a different
+binary, and falls back to a same-binary pair only when that is all there is.
+Naming one is still honoured — naming is a decision.
+
 ## Isolation — keeping the operator out of the run
 
 A coding CLI reads a great deal from whoever installed it: instruction files,

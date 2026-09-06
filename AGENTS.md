@@ -109,6 +109,22 @@ names as credentials. Where a vendor offers no way at all, the limit is written
 down in `adapters/README.md` rather than papered over. Measured per vendor, both
 directions, before shipping.
 
+**Independence is between profiles, not between models.** A profile is already
+the unit of "how this agent is invoked" — binary, arguments, permission posture,
+isolation, capabilities — and a different model is a different invocation, so a
+same-vendor pair is a second five-line file and needs no new concept. Expressing
+it at the model level would need the runtime to compare model identifiers, which
+rule 2 forbids, and "a different string in a `--model` flag" is a far weaker
+property than "a different command line with its own read-only posture". The
+commit trailers name adapters; two profile ids keep them true.
+
+What is really being bought is not different weights. It is a different training
+lineage, a different system prompt and a different set of blind spots — and two
+models from one vendor share all three. So a same-vendor pair is legitimate and
+is not equivalent: automatic routing prefers a profile invoking a *different
+binary*, and only falls back to a same-binary pair when that is all there is.
+Naming one explicitly is still honoured, because naming is a decision.
+
 **Async stays out until parallel execution earns it.** Everything today is
 sequential and synchronous. When several adapters need to stream at once, tokio
 goes in `ostraka-runtime` only — `ostraka-core` stays inert either way, which is

@@ -60,17 +60,17 @@ pub fn select(
         (Some(a), Some(r)) => (find(a)?, find(r)?),
         (Some(a), None) => {
             let author = find(a)?;
-            let reviewer = first_other(profiles, &author.id)?;
+            let reviewer = first_other(profiles, Some(&author))?;
             (author, reviewer)
         }
         (None, Some(r)) => {
             let reviewer = find(r)?;
-            let author = first_other(profiles, &reviewer.id)?;
+            let author = first_other(profiles, Some(&reviewer))?;
             (author, reviewer)
         }
         (None, None) => {
-            let author = first_other(profiles, "")?;
-            let reviewer = first_other(profiles, &author.id)?;
+            let author = first_other(profiles, None)?;
+            let reviewer = first_other(profiles, Some(&author))?;
             (author, reviewer)
         }
     };
@@ -88,14 +88,27 @@ pub fn select(
     })
 }
 
-/// The lowest-id profile that is usable on this machine, excluding one id.
+/// The profile to pair with another one, or the first to pick when there is no
+/// other one yet.
 ///
 /// Availability is asked, not assumed. A profile whose CLI is absent or refuses
 /// to answer would otherwise be routed to and fail after a worktree had been
 /// created and a task dispatched.
-fn first_other(profiles: &[Profile], exclude: &str) -> Result<Profile> {
-    let mut others: Vec<&Profile> = profiles.iter().filter(|p| p.id != exclude).collect();
-    others.sort_by(|a, b| a.id.cmp(&b.id));
+///
+/// Among the usable ones, a profile invoking a *different binary* is preferred.
+/// Independence is expressed between profiles, so two profiles of one vendor on
+/// two models are a legitimate pair — but they share a lineage, a system prompt
+/// and a set of blind spots, and picking them over an actually different vendor
+/// because their ids happen to sort first would weaken every unattended run.
+/// Naming one explicitly still gets it: this orders a choice nobody made.
+fn first_other(profiles: &[Profile], exclude: Option<&Profile>) -> Result<Profile> {
+    let excluded_id = exclude.map(|p| p.id.as_str()).unwrap_or_default();
+    let excluded_command = exclude.map(|p| p.command.as_str());
+    let mut others: Vec<&Profile> = profiles.iter().filter(|p| p.id != excluded_id).collect();
+    others.sort_by(|a, b| {
+        let same = |p: &Profile| excluded_command == Some(p.command.as_str());
+        same(a).cmp(&same(b)).then_with(|| a.id.cmp(&b.id))
+    });
 
     let mut unusable: Vec<String> = Vec::new();
     for candidate in &others {
@@ -120,10 +133,10 @@ fn first_other(profiles: &[Profile], exclude: &str) -> Result<Profile> {
                 .to_string(),
         ));
     }
-    let besides = if exclude.is_empty() {
+    let besides = if excluded_id.is_empty() {
         String::new()
     } else {
-        format!(" besides {exclude:?}")
+        format!(" besides {excluded_id:?}")
     };
     Err(Error::Other(format!(
         "no usable adapter profile{besides}; run `ostraka adapters` for detail. Checked — {}",
@@ -138,6 +151,17 @@ mod tests {
     /// Routing never launches anything, so any path will do here.
     fn root() -> &'static Path {
         Path::new("/nonexistent-isolation-root")
+    }
+
+    fn command_profile(id: &str, command: &str) -> Profile {
+        Profile::parse(&format!(
+            r#"
+            id = "{id}"
+            command = "{command}"
+            args = ["{{{{prompt}}}}"]
+            "#
+        ))
+        .expect("valid")
     }
 
     fn profile(id: &str) -> Profile {
@@ -219,6 +243,39 @@ mod tests {
         .expect("valid");
         let err = select(&[missing], None, None, root()).expect_err("must refuse");
         assert!(err.to_string().contains("definitely-not-a-real-binary-xyz"));
+    }
+
+    #[test]
+    fn an_unpicked_reviewer_prefers_a_different_binary_over_a_lower_id() {
+        // Two profiles of one vendor on two models are a legitimate pair, and
+        // the ids here would sort them together ahead of "zz". Chosen for
+        // someone rather than by them, the genuinely different vendor wins.
+        let same_vendor_a = command_profile("aa-vendor-fast", "true");
+        let same_vendor_b = command_profile("ab-vendor-slow", "true");
+        let other_vendor = command_profile("zz-other", "echo");
+
+        let routing = select(
+            &[same_vendor_a, same_vendor_b, other_vendor],
+            Some("aa-vendor-fast"),
+            None,
+            root(),
+        )
+        .expect("routes");
+        assert_eq!(routing.reviewer.id(), "zz-other");
+    }
+
+    #[test]
+    fn one_vendor_on_two_profiles_is_still_a_usable_pair() {
+        // The escape hatch has to actually work: with nothing else installed,
+        // two profiles of the same binary review each other rather than the run
+        // refusing outright.
+        let profiles = [
+            command_profile("vendor-fast", "true"),
+            command_profile("vendor-slow", "true"),
+        ];
+        let routing = select(&profiles, None, None, root()).expect("routes");
+        assert_eq!(routing.author.id(), "vendor-fast");
+        assert_eq!(routing.reviewer.id(), "vendor-slow");
     }
 
     #[test]
