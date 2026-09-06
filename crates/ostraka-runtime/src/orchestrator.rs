@@ -133,7 +133,17 @@ pub fn run_task(
         config.gate.review.must_differ_from_author,
     ) {
         Ok(token) => {
-            worktree::commit(wt.path(), &format!("{}\n\nRun: {run_id}", task.prompt))?;
+            // The trailers are the audit trail in the place it survives longest:
+            // a commit outlives the run directory it came from.
+            let message = format!(
+                "{}\n\nRun: {run_id}\nAuthored-by: {} ({})\nReviewed-by: {} ({})",
+                task.prompt,
+                task.author,
+                routing.author.id(),
+                reviewer_identity,
+                routing.reviewer.id(),
+            );
+            worktree::commit(wt.path(), &message, &task.author)?;
             finish(log, record, Outcome::Approved, Some(token), None, diff)
         }
         Err(refusal) => finish(log, record, Outcome::Rejected, None, Some(refusal), diff),
@@ -167,7 +177,7 @@ fn collect_verdict(
 ) -> Result<Verdict> {
     let review_task = TaskSpec {
         id: format!("{}-review", task.id),
-        prompt: review::review_prompt(diff),
+        prompt: review::review_prompt(&task.prompt, diff),
         adapter: reviewer.id().to_string(),
         author: task.author.clone(),
         base_ref: task.base_ref.clone(),

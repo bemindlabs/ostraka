@@ -1,0 +1,31 @@
+# OpenAI's Codex CLI.
+#
+# `codex exec` puts its progress on stderr and only the final message on stdout,
+# so the verdict line arrives clean. `--skip-git-repo-check` is required because
+# the worktree is a linked checkout rather than a plain repository root.
+id = "codex"
+command = "codex"
+
+args = [
+    "exec",
+    "--skip-git-repo-check",
+    "--sandbox",
+    "workspace-write",
+    "{{prompt}}",
+]
+
+review_args = [
+    "exec",
+    "--skip-git-repo-check",
+    "--sandbox",
+    "read-only",
+    "{{prompt}}",
+]
+
+model_args = ["--model", "{{model}}"]
+event_format = "none"
+
+[capabilities]
+headless = true
+streams_json = true
+resumable = true

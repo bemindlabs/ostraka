@@ -6,7 +6,7 @@
 
 use crate::capability::{Availability, Capabilities};
 use crate::event::normalize_line;
-use crate::profile::Profile;
+use crate::profile::{Profile, Role};
 use crate::{AdapterOutcome, Error, Result, Session, VendorAdapter};
 use ostraka_core::record::Event;
 use ostraka_core::task::TaskSpec;
@@ -17,11 +17,28 @@ use std::process::{Child, Command, Stdio};
 
 pub struct ProcessAdapter {
     profile: Profile,
+    role: Role,
 }
 
 impl ProcessAdapter {
+    /// An adapter that writes changes.
     pub fn new(profile: Profile) -> Self {
-        Self { profile }
+        Self {
+            profile,
+            role: Role::Author,
+        }
+    }
+
+    /// An adapter that reviews someone else's change.
+    ///
+    /// Separate constructor rather than a flag on `launch`, so that the review
+    /// invocation is fixed when the routing is decided: nothing downstream can
+    /// hand a reviewer the author's write-enabled command line.
+    pub fn reviewing(profile: Profile) -> Self {
+        Self {
+            profile,
+            role: Role::Review,
+        }
     }
 
     pub fn profile(&self) -> &Profile {
@@ -35,10 +52,12 @@ impl VendorAdapter for ProcessAdapter {
     }
 
     fn probe(&self) -> Availability {
-        // `--version` is the one flag it is safe to assume: it must not modify
-        // anything, and a CLI that refuses it is one we cannot reason about.
+        // `--version` is the one flag it is safe to assume by default: it must
+        // not modify anything, and a CLI that refuses it is one we cannot reason
+        // about. A profile may name a stronger question — a CLI can be on PATH
+        // and answer `--version` while being unauthenticated and unusable.
         match Command::new(&self.profile.command)
-            .arg("--version")
+            .args(&self.profile.probe_args)
             .stdin(Stdio::null())
             .output()
         {
@@ -51,8 +70,10 @@ impl VendorAdapter for ProcessAdapter {
             },
             Ok(out) => Availability::Unusable {
                 reason: format!(
-                    "{} --version exited with {}",
-                    self.profile.command, out.status
+                    "{} {} exited with {}",
+                    self.profile.command,
+                    self.profile.probe_args.join(" "),
+                    out.status
                 ),
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Availability::NotFound {
@@ -70,6 +91,7 @@ impl VendorAdapter for ProcessAdapter {
 
     fn launch(&self, spec: &TaskSpec, worktree: &Path) -> Result<Box<dyn Session>> {
         let args = self.profile.render_args(
+            self.role,
             &spec.prompt,
             spec.model.as_deref(),
             &worktree.to_string_lossy(),

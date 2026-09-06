@@ -23,15 +23,29 @@ ostraka run "..."  # isolate, execute, gate, review, record
 ostraka replay ID  # read a finished run back
 ```
 
-A run in full:
+A real run — Claude Code wrote the change, Codex reviewed it, neither knew the
+other was involved:
 
 ```
-$ ostraka run "add a greeting note" --adapter writer --review-adapter reviewer \
+$ ostraka run "print the current date after the greeting" \
     --author archon --reviewer ephor
-run t3289514-20260905T151159Z
-  pass  not-empty 0ms
-  pass  greeting 2ms
+run t907222-20260906T132706Z
+  pass  executable 1ms
+  pass  test     9ms
 approved — written by archon, reviewed by ephor
+```
+
+The commit it leaves says who did what, because the run directory will not
+outlive the repository:
+
+```
+Author: archon <archon@ostraka.invalid>
+
+    print the current date after the greeting
+
+    Run: t907222-20260906T132706Z
+    Authored-by: archon (claude-code)
+    Reviewed-by: ephor (codex)
 ```
 
 Refusals are the interesting half. A failing check never reaches the reviewer,
@@ -64,12 +78,24 @@ An orchestrator holding every other type in the crate still cannot produce one.
 That is why the gate is not a separate crate: across a crate boundary it would
 have to be injectable, and an injectable gate is a bypassable gate.
 
-## Adding a vendor
+## Vendors
 
-Adapter profiles are data. Drop a TOML file in `adapters/`, point `command` at a
-CLI on your PATH, and `ostraka adapters` will find it. No vendor name appears
-anywhere in the runtime, and adding one does not need a release. See
-[`adapters/README.md`](adapters/README.md).
+Adapter profiles are data. Three ship, each run end to end before it was
+committed:
+
+| Profile | CLI |
+|---|---|
+| `claude-code` | `claude` |
+| `codex` | `codex` |
+| `copilot-cli` | `copilot` |
+
+Adding a fourth is a TOML file in `adapters/`, not a release: point `command` at
+a CLI on your PATH and `ostraka adapters` will find it. No vendor name appears
+anywhere in the runtime. See [`adapters/README.md`](adapters/README.md).
+
+Each profile declares two invocations. The author's may write; the reviewer's may
+not — a reviewer that can edit the worktree can make a change it just rejected
+pass on the next attempt.
 
 ## Working in this repository
 
