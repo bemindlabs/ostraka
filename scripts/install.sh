@@ -11,6 +11,11 @@ set -eu
 REPO="bemindlabs/ostraka"
 INSTALL_DIR="${OSTRAKA_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${OSTRAKA_VERSION:-latest}"
+# Where release artifacts are fetched from. Overridable so that this script can
+# be exercised end to end against a directory of locally built artifacts —
+# `file://` works with both curl and wget — rather than only ever being tested
+# by cutting a real release and watching what happens to other people.
+BASE_URL="${OSTRAKA_BASE_URL:-}"
 
 say() { printf '%s\n' "$*" >&2; }
 die() { say "install: $*"; exit 1; }
@@ -47,7 +52,11 @@ if [ "$VERSION" = "latest" ]; then
 fi
 
 name="ostraka-${VERSION}-${target}"
-url="https://github.com/$REPO/releases/download/${VERSION}/${name}.tar.gz"
+if [ -n "$BASE_URL" ]; then
+  url="${BASE_URL}/${name}.tar.gz"
+else
+  url="https://github.com/$REPO/releases/download/${VERSION}/${name}.tar.gz"
+fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT

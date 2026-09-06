@@ -64,3 +64,38 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256
+
+  # Homebrew needs a checksum per platform, and those exist only once the
+  # artifacts are built — so the formula is pointed at a release after it, not
+  # before the tag. `bump-formula.sh` refuses rather than guesses: a missing
+  # sidecar or a surviving placeholder fails here instead of shipping a formula
+  # that installs nothing.
+  formula:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: fetch the published checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" --pattern '*.sha256' --dir dist
+
+      - run: ./scripts/bump-formula.sh "$GITHUB_REF_NAME" dist
+
+      - name: commit the formula
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/ostraka.rb
+          if git diff --cached --quiet; then
+            echo "the formula already points at $GITHUB_REF_NAME"
+            exit 0
+          fi
+          git commit -m "Point the Homebrew formula at $GITHUB_REF_NAME"
+          git push

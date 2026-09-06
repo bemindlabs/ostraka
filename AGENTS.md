@@ -145,4 +145,24 @@ rule 4 above and is not negotiable.
 
 `ostraka-<tag>-<target>.tar.gz` plus a `.sha256` sidecar. The install script and
 the Homebrew formula both parse that name. Changing it breaks installs silently,
-so it changes only deliberately.
+so it changes only deliberately — and `check-hygiene.sh` now fails when the
+three files that construct or parse it stop agreeing, including when a platform
+is added to the release matrix and not to the two things that install it.
+
+**Publish the workspace, not the crates.** `cargo publish -p ostraka-adapter`
+fails before the first release with `no matching package named ostraka-core
+found`: the path dependencies carry versions, and cargo resolves them against
+the registry. `cargo publish --workspace` orders them and verifies each against
+the previous one locally. Dry-run clean for all four.
+
+**The formula is bumped after the build, not before the tag.** Homebrew needs a
+checksum per platform and those exist only once the artifacts do, so
+`scripts/bump-formula.sh` runs in a second release job and commits the result to
+the default branch. It refuses rather than guesses: a missing sidecar or a
+surviving `0000…` placeholder fails the job instead of publishing a formula that
+installs nothing.
+
+**`scripts/install.sh` takes `OSTRAKA_BASE_URL`.** Without it the script could
+only ever be tested by cutting a real release and watching what happened to
+other people. With a `file://` directory of locally packaged artifacts it runs
+end to end, checksum verification included.

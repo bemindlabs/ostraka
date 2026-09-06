@@ -110,4 +110,32 @@ for check in "cargo fmt --all -- --check" "cargo clippy --all-targets" \
 done
 ok "the gate in ci.yml matches the gate in ostraka.toml"
 
+# 5. The release artifact name is a contract. Three files construct or parse it
+#    — the workflow that publishes, the script that installs, the formula that
+#    taps — and none of them can see the other two. Getting it wrong breaks
+#    installs silently, for other people, after a tag has already been cut.
+if ! grep -qF 'name="ostraka-${tag}-${{ matrix.target }}"' .github/workflows/release.yml; then
+    bad "release.yml no longer packages ostraka-<tag>-<target>.tar.gz"
+elif ! grep -qF 'name="ostraka-${VERSION}-${target}"' scripts/install.sh; then
+    bad "install.sh no longer expects ostraka-<version>-<target>.tar.gz"
+elif ! grep -qF 'ostraka-v#{version}-' Formula/ostraka.rb; then
+    bad "Formula/ostraka.rb no longer expects ostraka-v<version>-<target>.tar.gz"
+else
+    ok "install.sh and the formula parse the name release.yml builds"
+fi
+
+# Every platform the release builds must be installable by both paths. Adding a
+# target to the matrix and forgetting the installer is the quiet half of that
+# contract; Windows is deliberately binary-only, with no formula.
+for target in $(grep -oE '^          - target: \S+' .github/workflows/release.yml | awk '{print $3}'); do
+    case "$target" in *windows*) continue ;; esac
+    if ! grep -qF "$target" scripts/install.sh; then
+        bad "release.yml builds $target and install.sh cannot install it"
+    fi
+    if ! grep -qF "$target" Formula/ostraka.rb; then
+        bad "release.yml builds $target and the formula does not name it"
+    fi
+done
+ok "every released platform is reachable from install.sh and the formula"
+
 exit $fail
