@@ -106,6 +106,20 @@ impl Isolation {
             message: format!("could not create {}: {e}", home.display()),
         })?;
 
+        // Absolute, always. The value is read by a process whose working
+        // directory is the worktree, not the project, so a relative root
+        // resolves somewhere else entirely — and the vendor does not complain:
+        // it creates a fresh empty configuration directory there and reports
+        // that nobody is logged in. `ostraka run` defaults `--project` to `.`,
+        // so the relative case is the common one, not the exotic one.
+        let home = std::fs::canonicalize(&home).map_err(|e| Error::Isolation {
+            id: profile_id.to_string(),
+            message: format!(
+                "could not resolve {} to an absolute path: {e}",
+                home.display()
+            ),
+        })?;
+
         if !self.credentials.is_empty() {
             let Some(operator_home) = operator_home else {
                 return Err(Error::Isolation {
@@ -208,6 +222,32 @@ mod tests {
             Some(root.join("vendor").to_string_lossy().as_ref())
         );
         assert!(root.join("vendor").is_dir());
+    }
+
+    #[test]
+    fn the_relocated_home_is_handed_over_as_an_absolute_path() {
+        // The vendor reads this with the worktree as its working directory. A
+        // relative path sends it to a directory that does not exist, where it
+        // silently makes a fresh empty one and reports that nobody is logged in.
+        let root = tempdir();
+        let cwd = std::env::current_dir().expect("cwd");
+        let relative = pathdiff(&root, &cwd);
+        let env = isolation(&[])
+            .provision_from(&relative, "vendor", None)
+            .expect("provisions");
+        let handed = Path::new(env.get("VENDOR_HOME").expect("names the home"));
+        assert!(handed.is_absolute(), "handed over {handed:?}");
+        assert!(handed.ends_with("vendor"));
+    }
+
+    /// `root` expressed relative to `base`, when `root` is under it.
+    fn pathdiff(root: &Path, base: &Path) -> PathBuf {
+        match root.strip_prefix(base) {
+            Ok(rest) => Path::new(".").join(rest),
+            // Not under the working directory: the absolute path still
+            // exercises the canonicalization, just not the relative case.
+            Err(_) => root.to_path_buf(),
+        }
     }
 
     #[test]
