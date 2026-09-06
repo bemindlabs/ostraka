@@ -81,23 +81,28 @@ pub fn run_task(
         files_touched: touched.clone(),
     })?;
 
-    // An author that failed and left nothing behind has produced nothing to
-    // review. Sending an empty diff on would spend a second vendor's quota to
-    // be told it is empty, and would report the reviewer's answer as the reason
-    // when the reason is upstream of it.
-    if touched.is_empty() && author.exit_code != Some(0) {
-        return finish(
-            log,
-            record,
-            Outcome::Rejected,
-            None,
-            Some(Refusal::AuthorFailed {
+    // Nothing was written, so there is nothing a reviewer can rule on: it would
+    // be handed an empty diff and asked what it thinks of it, which spends a
+    // second vendor to produce a confused answer and then reports that answer
+    // as the reason. Why it is empty is the reason, and it is known here.
+    if touched.is_empty() {
+        let refusal = if author.exit_code == Some(0) {
+            Refusal::NoChange
+        } else {
+            Refusal::AuthorFailed {
                 code: author
                     .exit_code
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| "no exit code".to_string()),
                 diagnostics: author.diagnostics.clone(),
-            }),
+            }
+        };
+        return finish(
+            log,
+            record,
+            Outcome::Rejected,
+            None,
+            Some(refusal),
             String::new(),
         );
     }

@@ -99,6 +99,40 @@ fn task(prompt: &str, author: &str) -> TaskSpec {
 }
 
 #[test]
+fn an_author_that_changed_nothing_is_reported_as_such_and_not_sent_to_a_reviewer() {
+    // A legitimate answer to a task — the work was already done — and not one a
+    // reviewer can rule on. Handing it an empty diff produces a confused answer
+    // that then gets reported as the reason the run was refused.
+    let f = fixture("no-change");
+    let writer = agent(&f.repo, "writer", "echo 'that test already exists'");
+    let reviewer = agent(&f.repo, "reviewer", "echo 'VERDICT: APPROVE'");
+    let routing = route::select(
+        &[writer, reviewer],
+        Some("writer"),
+        Some("reviewer"),
+        &f.repo.join(".ostraka/vendor-home"),
+    )
+    .unwrap();
+
+    let report = orchestrator::run_task(
+        &f.repo,
+        &config("true"),
+        &routing,
+        &task("add a test that is already there", "archon"),
+        &ActorId::new("ephor"),
+        &f.repo.join(".ostraka"),
+    )
+    .expect("runs");
+
+    assert!(!report.approved());
+    assert!(report.record.approval.is_none(), "a reviewer was called");
+    assert!(matches!(
+        report.refusal,
+        Some(ostraka_runtime::gate::Refusal::NoChange)
+    ));
+}
+
+#[test]
 fn an_author_that_could_not_run_is_refused_in_its_own_words_without_calling_a_reviewer() {
     // A vendor out of quota and a vendor that considered the task and did
     // nothing leave the same empty worktree. Only one of them is about the

@@ -102,6 +102,9 @@ fn describe(refusal: &ostraka_runtime::gate::Refusal) -> String {
             None => format!("the author could not run (exit {code}), and said nothing"),
         },
         Refusal::PolicyViolation { reason } => reason.clone(),
+        Refusal::NoChange => {
+            "the author ran cleanly and changed nothing; there is nothing to review".to_string()
+        }
         Refusal::SelfApproval { actor } => {
             format!("{actor} cannot approve a change {actor} wrote")
         }

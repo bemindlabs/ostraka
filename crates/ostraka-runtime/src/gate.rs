@@ -83,6 +83,12 @@ pub enum Refusal {
     },
     /// The change touched paths the project's policy does not allow.
     PolicyViolation { reason: String },
+    /// The authoring agent ran cleanly and changed nothing.
+    ///
+    /// A legitimate answer to a task — the work was already done, or the agent
+    /// judged that nothing was needed — and not one a reviewer can rule on: it
+    /// would be handed an empty diff and asked what it thinks of it.
+    NoChange,
     /// The reviewer and the author are the same identity.
     SelfApproval { actor: ActorId },
 }
