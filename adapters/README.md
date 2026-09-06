@@ -143,6 +143,26 @@ have sent mail from the operator's account. `--strict-mcp-config`, with no
 `--mcp-config` to go with it, leaves none. `--setting-sources project` alone does
 not: the two flags are orthogonal and both are needed.
 
+### Two routes, and why the flags are shipped
+
+Claude Code can be isolated either way, and both were measured. The flags above
+leave the operator's own installation untouched. Relocating `CLAUDE_CONFIG_DIR`
+with `.credentials.json` carried is *stronger* — it drops every MCP server with
+no flag at all, because the servers are configured in the directory that moved:
+
+```toml
+[isolation]
+home_env = "CLAUDE_CONFIG_DIR"
+home_source = ".claude"
+credentials = [".credentials.json"]
+```
+
+The flags are shipped anyway. An isolation that needs no credential handling is
+worth more than a marginally stronger one that does: linking a credential into a
+directory is a thing that can go wrong, and it only has to be done for a vendor
+that leaves no alternative. Use the table above when you want one mechanism
+across every vendor.
+
 ### Limits, stated rather than implied
 
 - **Copilot CLI cannot separate the two.** `--no-custom-instructions` drops the
@@ -162,7 +182,11 @@ not: the two flags are orthogonal and both are needed.
   pass it through, and an MCP server reaches outside the worktree. No servers is
   the safe end of that trade.
 - **The process environment is still inherited wholesale.** Isolation covers
-  configuration directories, not `PATH`, proxies or API keys already exported.
+  configuration directories and instruction files, not the environment. An
+  adapter profile that runs `env` showed an authoring agent inheriting its
+  launcher's `PATH`, telemetry settings, and — when the launcher was itself a
+  coding CLI — that session's own id, socket and messaging token. None of it is
+  read by the vendors here, and none of it is isolated either.
 - **The default model is operator state.** Two machines with different vendor
   configuration run the same task on different models. Isolation removes the
   vendor's *configured* default — a relocated home falls back to the CLI's
