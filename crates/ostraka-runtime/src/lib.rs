@@ -5,6 +5,7 @@
 //! they must not be separated.
 
 pub mod gate;
+pub mod index;
 pub mod orchestrator;
 pub mod promote;
 pub mod record;

@@ -136,6 +136,22 @@ sits beside the repository and the trailers sit inside history: forging one is
 not enough. And it stops at a branch. Merging, pushing and opening a pull
 request are acts a person takes.
 
+**The TUI is a view, and it earns two dependencies.** `ratatui` and `crossterm`
+go in `ostraka-cli` only, with `default-features = false` — the defaults pull a
+second backend and a colour stack that cost 67 crates including wasm bindings,
+for nothing. Both are pure Rust with no runtime of their own, which is the
+condition any dependency here has to meet: the distribution advantage is a
+binary you can curl, and that survives a library but not a runtime. Measured:
+1.61 MB to 1.97 MB.
+
+Drawing is a pure function of state, so the screen is asserted against a
+rendered buffer rather than looked at. The browser holds no logic: the listing
+is `runtime::index`, the detail is `orchestrator::replay`, and promoting goes
+through `promote::promote` like every other caller — pressing a key cannot
+approve anything. It shows finished runs only; a live view of a run in progress
+needs the orchestrator to stream while something else renders, which is the
+parallel-execution problem and waits for the same answer.
+
 **Async stays out until parallel execution earns it.** Everything today is
 sequential and synchronous. When several adapters need to stream at once, tokio
 goes in `ostraka-runtime` only — `ostraka-core` stays inert either way, which is

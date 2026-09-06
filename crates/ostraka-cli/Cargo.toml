@@ -18,3 +18,10 @@ ostraka-adapter = { workspace = true }
 ostraka-runtime = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
+# The TUI, and nothing else it drags in. ratatui's defaults pull a second
+# backend and a colour-conversion stack; `crossterm` alone is the terminal this
+# ships against. Both are pure Rust with no runtime of their own, which is the
+# condition under which a dependency here is allowed at all: the distribution
+# advantage is a binary you can curl, and that survives a library.
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+crossterm = { version = "0.29", default-features = false }

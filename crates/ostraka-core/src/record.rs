@@ -50,6 +50,11 @@ pub enum Outcome {
 pub struct RunRecord {
     pub run_id: String,
     pub task_id: String,
+    /// What was asked. Defaulted so records written before this field existed
+    /// still read back — a run id is opaque, and a list of runs nobody can
+    /// identify is a list nobody uses.
+    #[serde(default)]
+    pub prompt: String,
     pub author: ActorId,
     pub adapter: String,
     pub started_at: String,

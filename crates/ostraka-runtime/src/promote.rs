@@ -215,6 +215,7 @@ mod tests {
         RunRecord {
             run_id: "r1".into(),
             task_id: "t1".into(),
+            prompt: "do a thing".into(),
             author: ActorId::new("archon"),
             adapter: "a".into(),
             started_at: "now".into(),

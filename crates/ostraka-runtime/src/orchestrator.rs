@@ -53,6 +53,7 @@ pub fn run_task(
     let mut record = RunRecord {
         run_id: run_id.clone(),
         task_id: task.id.clone(),
+        prompt: task.prompt.clone(),
         author: task.author.clone(),
         adapter: routing.author.id().to_string(),
         started_at: now_rfc3339(),

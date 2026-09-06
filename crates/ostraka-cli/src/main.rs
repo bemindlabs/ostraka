@@ -6,6 +6,8 @@ mod project;
 mod promote;
 mod replay;
 mod run;
+mod runs;
+mod tui;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -68,6 +70,12 @@ enum Commands {
         model: Option<String>,
     },
 
+    /// List every run this project has recorded.
+    Runs,
+
+    /// Browse runs in the terminal.
+    Tui,
+
     /// Give an approved run a branch of its own. Merges nothing.
     Promote {
         /// Run id, as printed by `run`.
@@ -93,6 +101,8 @@ fn main() -> ExitCode {
         Commands::Check => check::run(&project, cli.json),
         Commands::Adapters => adapters::run(&project, cli.json),
         Commands::Replay { run_id } => replay::run(&project, run_id, cli.json),
+        Commands::Runs => runs::run(&project, cli.json),
+        Commands::Tui => tui::run(&project),
         Commands::Promote { run_id, branch } => {
             promote::run(&project, run_id, branch.as_deref(), cli.json)
         }

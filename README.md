@@ -21,6 +21,8 @@ ostraka check      # validate the project config and every adapter profile
 ostraka adapters   # list adapter profiles and whether each can run here
 ostraka run "..."  # isolate, execute, gate, review, record
 ostraka replay ID  # read a finished run back
+ostraka runs       # every run this project has recorded
+ostraka tui        # browse them in the terminal
 ostraka promote ID # give an approved run a branch. Merges nothing
 ```
 
@@ -66,6 +68,31 @@ It refuses a run the gate refused, and it refuses one whose record and whose
 commit disagree — the record is a file beside the repository, the trailers are
 inside history, and a promotion needs both to say the same thing.
 
+`ostraka tui` is a browser over the same records — what ran, what it was for,
+which check failed and what it printed, what the reviewer said, and `p` to
+promote an approved one:
+
+```
+ostraka  .  ·  5 runs
++ 09-07 00:30  Add a unit test for the workt…│ t102-20260907T001000Z
+- 09-07 00:20  Rewrite the gate to skip revi…│ refused
+- 09-07 00:10  Make the parser accept a trai…│
+? 09-07 00:05  (no record — the run did not …│ task     Make the parser accept a trailing comma
++ 09-06 17:57  (recorded before runs kept th…│ author   archon (claude-code)
+                                             │
+                                             │ checks
+                                             │   pass  format     101ms
+                                             │   FAIL  test       2140ms
+                                             │         assertion failed: left == right
+                                             │           left: Some(1)
+                                             │          right: None
+j/k move · tab checks|events · p promote · r reload · q quit
+```
+
+It holds no logic of its own, so `p` cannot approve anything: promotion goes
+through the same gate as the command, and a record claiming an approval its
+commit does not corroborate is refused there as it is anywhere else.
+
 Refusals are the interesting half. A failing check never reaches the reviewer,
 a reviewer that says nothing is a rejection, and the run record keeps the check
 output either way — a failed run is the one someone needs to read.
@@ -76,7 +103,7 @@ the gate this project applies to others is the gate it passes itself, executed b
 the same code.
 
 Not done: merging itself — promotion names a branch and leaves the merge to a
-person — richer routing, and a TUI.
+person — richer routing, and a live view of a run in progress.
 
 ## How it is put together
 
