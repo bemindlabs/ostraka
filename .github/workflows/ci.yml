@@ -13,6 +13,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Cheap, and it fails for reasons a compiler never will: a backend
+      # instruction file that has drifted from AGENTS.md, plugin scribble that
+      # reached a commit, a translation, or a gate in ci.yml that no longer
+      # matches the one in ostraka.toml. Before the toolchain, so it reports in
+      # seconds rather than after a build.
+      - name: hygiene
+        run: ./scripts/check-hygiene.sh
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

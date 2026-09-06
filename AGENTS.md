@@ -1,7 +1,13 @@
 # AGENTS.md
 
 Instructions for any agent working in this repository. This file is the single
-source of truth; every backend-specific filename symlinks here.
+source of truth. `AGY.md`, `CODEX.md`, `COPILOT.md`, `GROK.md`, `KIMI.md`,
+`OLLAMA.md` and `OPENAI.md` are symlinks to it. `CLAUDE.md` is a file containing
+only `@AGENTS.md`, because a plugin rewrites CLAUDE.md in every directory it
+observes and replaces a symlink with a copy that then goes stale — an import
+line survives being rewritten. Put instructions here, never there.
+
+`./scripts/check-hygiene.sh` enforces all of that, and CI runs it first.
 
 Ostraka runs coding agents from different vendors as one reviewed fleet. It
 favors no vendor — including in how this repository is laid out.
@@ -20,6 +26,7 @@ crates/ostraka-runtime   engine: worktrees, gate, review, run records
 crates/ostraka-cli       the `ostraka` binary
 adapters/                one TOML profile per vendor CLI — data, not code
 scripts/install.sh       the curl one-liner; downloads a released binary
+scripts/check-hygiene.sh the AGENTS.md rules a compiler cannot enforce
 Formula/ostraka.rb       Homebrew tap formula, bumped by the release workflow
 ```
 
@@ -35,7 +42,12 @@ cargo test --workspace
 cargo build --workspace
 ```
 
-Run all four before proposing a change.
+Run all four before proposing a change, plus `./scripts/check-hygiene.sh`.
+
+The hygiene check is deliberately *not* one of the four. Gate checks run inside
+a worktree while an agent is working in it, and an editor plugin writing a file
+there would refuse correct work for a reason that has nothing to do with the
+change. It belongs in CI, on a clean checkout.
 
 ## Rules that are structural, not stylistic
 
