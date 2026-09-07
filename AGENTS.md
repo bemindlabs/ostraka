@@ -190,6 +190,22 @@ found`: the path dependencies carry versions, and cargo resolves them against
 the registry. `cargo publish --workspace` orders them and verifies each against
 the previous one locally. Dry-run clean for all four.
 
+**Dry-run twice at the same version and the second one lies.** Verification
+compiles each packaged crate against the previously packaged ones, and those are
+cached by name and version. Change the source without changing the version — the
+normal state while preparing a release — and cargo happily reuses the copy it
+built last time. It cost most of an afternoon presenting as three compiler
+errors about a field that does exist, which reads as a code fault and is not
+one. Run it with a throwaway target directory:
+
+```
+CARGO_TARGET_DIR=$(mktemp -d) cargo publish --dry-run --workspace
+```
+
+A real release bumps the version and never sees this. Every rehearsal does, and
+the dangerous direction is not the failure — it is a dry-run that *passes*
+against stale artifacts.
+
 **The formula is bumped after the build, not before the tag.** Homebrew needs a
 checksum per platform and those exist only once the artifacts do, so
 `scripts/bump-formula.sh` runs in a second release job and commits the result to
