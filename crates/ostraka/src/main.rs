@@ -2,6 +2,8 @@
 
 mod adapters;
 mod check;
+mod init;
+mod init_cmd;
 mod project;
 mod promote;
 mod replay;
@@ -36,6 +38,14 @@ struct Cli {
 enum Commands {
     /// Validate the project config and every adapter profile.
     Check,
+
+    /// Write the files a project needs to be run by Ostraka.
+    Init {
+        /// Rewrite files that already exist. Off by default: what is there is
+        /// somebody's, and a setup command should not be how they lose it.
+        #[arg(long)]
+        force: bool,
+    },
 
     /// List adapter profiles and whether each one can run here.
     Adapters,
@@ -99,6 +109,7 @@ fn main() -> ExitCode {
 
     let result = match &cli.command {
         Commands::Check => check::run(&project, cli.json),
+        Commands::Init { force } => init_cmd::run(&project, *force, cli.json),
         Commands::Adapters => adapters::run(&project, cli.json),
         Commands::Replay { run_id } => replay::run(&project, run_id, cli.json),
         Commands::Runs => runs::run(&project, cli.json),

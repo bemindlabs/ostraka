@@ -158,4 +158,23 @@ for target in $(grep -oE '^          - target: \S+' .github/workflows/release.ym
 done
 ok "every released platform is reachable from the npm shim"
 
+# 7. `ostraka init` writes adapter profiles into a new project, and it carries
+#    them as embedded copies because a binary installed by curl has no
+#    repository beside it. Copies drift; these two must not.
+for profile in adapters/*.toml; do
+    template="crates/ostraka/templates/$(basename "$profile")"
+    if [ ! -f "$template" ]; then
+        bad "$profile has no template in crates/ostraka/templates/"
+        note "cp $profile $template"
+    elif ! cmp -s "$profile" "$template"; then
+        bad "$template has drifted from $profile"
+        note "the profile init writes would differ from the one this repo ships"
+        note "cp $profile $template"
+    fi
+done
+for template in crates/ostraka/templates/*.toml; do
+    [ -f "adapters/$(basename "$template")" ] || bad "$template has no profile in adapters/"
+done
+ok "the profiles init writes are the ones this repository ships"
+
 exit $fail

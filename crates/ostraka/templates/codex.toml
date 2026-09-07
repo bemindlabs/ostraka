@@ -1,0 +1,68 @@
+# OpenAI's Codex CLI.
+#
+# `codex exec` puts its progress on stderr and only the final message on stdout,
+# so the verdict line arrives clean. `--skip-git-repo-check` is required because
+# the worktree is a linked checkout rather than a plain repository root.
+id = "codex"
+command = "codex"
+
+args = [
+    "exec",
+    "--skip-git-repo-check",
+    "--sandbox",
+    "workspace-write",
+    "{{prompt}}",
+]
+
+review_args = [
+    "exec",
+    "--skip-git-repo-check",
+    "--sandbox",
+    "read-only",
+    "{{prompt}}",
+]
+
+model_args = ["--model", "{{model}}"]
+# Authentication that does not live in the relocated home. A subscription login
+# comes from the carried auth.json; a key-based one comes from here.
+inherit_env = ["OPENAI_API_KEY", "OPENAI_BASE_URL"]
+
+event_format = "none"
+
+# This CLI has no flag that ignores the operator's setup. Its global
+# instructions, its config and its plugin list all live in one directory named
+# by CODEX_HOME, and relocating that directory is the only lever there is:
+# with it, `$CODEX_HOME/AGENTS.md` and `config.toml` stop reaching the model and
+# no MCP server is configured, while the repository's own AGENTS.md still
+# arrives. Verified against `codex debug prompt-input`, which renders the exact
+# model-visible prompt, and `codex doctor`, which reports what authenticated.
+#
+# `auth.json` is carried because it is a credential rather than configuration;
+# without it the relocated home is unauthenticated and every run refuses. It is
+# linked, not copied.
+[isolation]
+home_env = "CODEX_HOME"
+home_source = ".codex"
+credentials = ["auth.json"]
+
+# Whether this CLI can *write* is detectable: `codex sandbox -- true` exits 1
+# with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` on a host
+# where its sandbox cannot start, which is exactly the state in which it authors
+# nothing and exits zero anyway. It is not the default probe because a probe
+# gates the whole profile and this vendor still reviews perfectly well there —
+# trading a working reviewer for a wasted authoring call is the wrong way round.
+# Uncomment it if you route this profile as an author only.
+#
+# probe_args = ["sandbox", "--", "true"]
+
+# This CLI prints `tokens used` and the count on the following line, to stderr,
+# on success as well as failure. Read verbatim: no estimate is made here.
+[usage]
+stream = "stderr"
+shape = "text"
+total = "tokens used"
+
+[capabilities]
+headless = true
+streams_json = true
+resumable = true

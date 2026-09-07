@@ -1,0 +1,74 @@
+# Anthropic's Claude Code CLI.
+#
+# Verified headless: `claude -p '<prompt>'` writes the final answer to stdout and
+# nothing else, which is what the reviewer's one-line verdict depends on.
+id = "claude-code"
+command = "claude"
+
+# Author: edits are applied without prompting, but arbitrary shell is not. The
+# leash here is the gate, not the sandbox — widen this to "bypassPermissions" if
+# your authors need to run commands, and know what you are widening.
+#
+# The last two flags are what make the run independent of whose machine it is
+# on. `--setting-sources project` drops the operator's user-level settings,
+# hooks and CLAUDE.md while keeping the repository's own, which is exactly the
+# line worth drawing: the repository travels with the task, the operator does
+# not. `--strict-mcp-config` with no `--mcp-config` leaves no MCP servers at
+# all — without it an authoring agent on this machine inherited eighty-one of
+# them, including tools that send mail from the operator's account.
+args = [
+    "-p",
+    "{{prompt}}",
+    "--permission-mode",
+    "acceptEdits",
+    "--output-format",
+    "json",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+]
+
+# Reviewer: read-only, and isolated for the same reasons.
+# A reviewer that can edit the worktree can make a change it just rejected pass
+# on the next check.
+review_args = [
+    "-p",
+    "{{prompt}}",
+    "--permission-mode",
+    "plan",
+    "--output-format",
+    "json",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+]
+
+model_args = ["--model", "{{model}}"]
+# Started with a built environment, not an inherited one, so anything this CLI
+# needs from the outside is named here. These are its authentication and its
+# endpoint: an OAuth login needs none of them and a key-based one needs the
+# first. Add your provider's variables if you run it against Bedrock or Vertex.
+inherit_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]
+
+# Structured output, for two reasons. It is the only way this CLI reports what a
+# run cost, and a parsed field is a steadier contract than the shape of printed
+# text. The reply moves from being the whole of stdout to being one field in it.
+event_format = "json"
+event_text = "/result"
+
+[usage]
+stream = "stdout"
+shape = "json"
+# Three parts of one number. `input_tokens` alone is the uncached remainder and
+# reads as ten tokens for a run that actually sent ten thousand.
+input = [
+    "/usage/input_tokens",
+    "/usage/cache_creation_input_tokens",
+    "/usage/cache_read_input_tokens",
+]
+output = "/usage/output_tokens"
+
+[capabilities]
+headless = true
+streams_json = true
+resumable = true

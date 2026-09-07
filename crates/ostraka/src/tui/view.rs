@@ -9,6 +9,7 @@
 //! can be counted before they are drawn, which is how scrolling knows where the
 //! bottom is.
 
+use crate::init::{Action, Plan};
 use ostraka_core::gate::Verdict;
 use ostraka_core::record::{Event, Outcome, RunRecord};
 use ostraka_runtime::index::{self, BackendUsage, RunSummary};
@@ -66,6 +67,9 @@ pub struct App {
     /// page rather than by a number somebody guessed.
     pub page: u16,
     pub status: Option<String>,
+    /// Present when this directory is not a project yet: what `init` would
+    /// write. `None` once there is nothing left to write.
+    pub setup: Option<Plan>,
     pub quit: bool,
 }
 
@@ -86,6 +90,7 @@ impl App {
             scroll: 0,
             page: 10,
             status: None,
+            setup: None,
             quit: false,
         }
     }
@@ -155,6 +160,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
         .split(rows[1]);
+
+    if app.setup.is_some() {
+        // Nothing to browse yet, so the whole width says what is missing.
+        render_setup(frame, app, rows[1]);
+        frame.render_widget(footer(app), rows[3]);
+        return;
+    }
 
     render_list(frame, app, columns[0]);
     render_detail(frame, app, columns[1]);
@@ -272,6 +284,12 @@ fn footer(app: &App) -> Paragraph<'static> {
     } else {
         format!(" · filter {:?}", app.filter)
     };
+    if app.setup.is_some() {
+        return Paragraph::new(Line::from(Span::styled(
+            "i set this directory up · q quit",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
     Paragraph::new(Line::from(Span::styled(
         format!(
             "j/k move · tab {} · space/b scroll · / filter · p promote · r reload · q quit{filtered}",
@@ -279,6 +297,45 @@ fn footer(app: &App) -> Paragraph<'static> {
         ),
         Style::default().fg(Color::DarkGray),
     )))
+}
+
+/// The opening screen in a directory that is not a project yet.
+///
+/// Lists exactly what would be written and what is already there, because a
+/// setup step that writes into someone's repository should say what it is about
+/// to do before it does it.
+fn render_setup(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(plan) = &app.setup else { return };
+    let mut lines = vec![
+        bold("This directory is not an Ostraka project yet.".to_string()),
+        Line::from(""),
+        dim(format!("Detected {}.", plan.kind.describe())),
+        Line::from(""),
+        bold("Pressing i writes:".to_string()),
+    ];
+    for file in plan.files.iter() {
+        let name = file
+            .path
+            .strip_prefix(&plan.project)
+            .unwrap_or(&file.path)
+            .display()
+            .to_string();
+        let (word, colour) = match file.action {
+            Action::Create => ("create", Color::Green),
+            Action::Append => ("append to", Color::Cyan),
+            Action::AlreadyThere => ("already there", Color::DarkGray),
+        };
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(format!("{word:<14}"), Style::default().fg(colour)),
+            Span::raw(name),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(dim(
+        "Nothing already on disk is overwritten. `ostraka init` does the same.".to_string(),
+    ));
+    frame.render_widget(Paragraph::new(lines), inset(area));
 }
 
 fn render_list(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -641,6 +698,44 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn a_directory_that_is_not_a_project_says_what_would_be_written() {
+        // Rather than an empty run list, which reads as a broken screen.
+        let dir = std::env::temp_dir().join(format!("ostraka-tui-init-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        std::fs::write(dir.join("Cargo.toml"), "[package]\n").expect("write");
+
+        let mut app = App::new(dir.clone(), Vec::new());
+        app.setup = Some(crate::init::plan(&dir));
+
+        let out = screen(&mut app, 100, 20);
+        assert!(out.contains("not an Ostraka project yet"), "{out}");
+        assert!(out.contains("a Rust project"), "{out}");
+        assert!(out.contains("ostraka.toml"), "{out}");
+        assert!(out.contains("adapters/codex.toml"), "{out}");
+        assert!(out.contains("i set this directory up"), "{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn setup_names_what_is_already_there_rather_than_offering_to_rewrite_it() {
+        let dir = std::env::temp_dir().join(format!("ostraka-tui-half-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        std::fs::write(dir.join("ostraka.toml"), "# mine\n").expect("write");
+
+        let mut app = App::new(dir.clone(), Vec::new());
+        app.setup = Some(crate::init::plan(&dir));
+        let out = screen(&mut app, 100, 20);
+        assert!(out.contains("already there"), "{out}");
+        assert!(
+            out.contains("Nothing already on disk is overwritten"),
+            "{out}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -7,6 +7,7 @@
 
 mod view;
 
+use crate::init;
 use crate::project;
 use ostraka_runtime::promote::{self, NotPromoted};
 use ostraka_runtime::{index, orchestrator};
@@ -37,6 +38,9 @@ pub fn run(project_dir: &Path) -> Outcome {
 
     let records_root = project_dir.join(".ostraka");
     let mut app = App::new(project_dir.to_path_buf(), index::list(&records_root)?);
+    // Opened somewhere that is not a project yet: say what is missing and offer
+    // to write it, rather than showing an empty list that looks like a bug.
+    app.setup = Some(init::plan(project_dir)).filter(|plan| !plan.complete());
     load_detail(&mut app, &records_root);
 
     // Installs a panic hook that restores the terminal first. Without it a
@@ -107,6 +111,7 @@ fn handle(app: &mut App, code: KeyCode, records_root: &Path) {
             load_detail(app, records_root);
         }
         KeyCode::Char('/') => app.filtering = true,
+        KeyCode::Char('i') => initialise(app, records_root),
         KeyCode::Char('r') => match index::list(records_root) {
             Ok(runs) => {
                 app.runs = runs;
@@ -164,6 +169,27 @@ fn load_detail(app: &mut App, records_root: &Path) {
     // one — moving down a list of fifty runs should not shell out fifty times.
     if app.detail == Detail::Diff && app.diff.is_none() {
         app.diff = Some(index::diff(&app.project, &run).ok().flatten());
+    }
+}
+
+/// Carries out the setup the opening screen offered.
+fn initialise(app: &mut App, records_root: &Path) {
+    let Some(plan) = &app.setup else {
+        return;
+    };
+    match init::apply(plan, false) {
+        Ok(written) => {
+            app.status = Some(format!(
+                "wrote {} file(s) — `ostraka run` will work here now",
+                written.len()
+            ));
+            app.setup = None;
+            if let Ok(runs) = index::list(records_root) {
+                app.runs = runs;
+                app.refilter();
+            }
+        }
+        Err(e) => app.status = Some(format!("could not write the project files: {e}")),
     }
 }
 

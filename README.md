@@ -17,6 +17,7 @@ agent writes, the project's checks actually execute, a *different* agent
 reviews, and the result is a replayable record.
 
 ```
+ostraka init       # write the files a project needs. Overwrites nothing
 ostraka check      # validate the project config and every adapter profile
 ostraka adapters   # list adapter profiles and whether each can run here
 ostraka run "..."  # isolate, execute, gate, review, record
@@ -25,6 +26,15 @@ ostraka runs       # every run this project has recorded
 ostraka tui        # browse them in the terminal
 ostraka promote ID # give an approved run a branch. Merges nothing
 ```
+
+`init` writes `ostraka.toml`, the adapter profiles, and two `.gitignore` lines,
+and works out the gate from what it finds: cargo's four checks for a Rust
+project, `npm test` for a Node one. When it cannot tell, it writes a check that
+**fails on purpose** — a gate declaring nothing would approve whatever a
+reviewer waved through, and finding that out later is the wrong way to learn it.
+Nothing already on disk is touched, so running it twice is a no-op and running
+it in a half-configured project completes it. `ostraka tui` offers the same
+thing on `i` when you open it somewhere that is not a project yet.
 
 A real run — Claude Code wrote the change, Codex reviewed it, neither knew the
 other was involved:

@@ -24,6 +24,7 @@ crates/ostraka-core      domain types; no IO, no process spawning
 crates/ostraka-adapter   vendor boundary: profiles, launch, event normalization
 crates/ostraka-runtime   engine: worktrees, gate, review, run records
 crates/ostraka           the `ostraka` binary; the crate people install
+crates/ostraka/templates the adapter profiles `init` writes into a new project
 crates/ostraka-app       the `ostraka-app` desktop window; a second view
 adapters/                one TOML profile per vendor CLI — data, not code
 scripts/install.sh       the curl one-liner; downloads a released binary
@@ -166,6 +167,19 @@ combined figure is shown as a total rather than as a split with a fabricated
 zero, and one that rounds is marked as an estimate. A field may sum several
 counters: reading Claude Code's `input_tokens` alone, without the two cache
 counters beside it, reported 16 for a run that actually sent 159,460.
+
+**`init` never generates a gate that passes everything.** It infers checks from
+what it finds, and where it cannot tell, it writes one that fails with an
+instruction. An empty `[gate]` is refused by `Config::validate`, but a *generated*
+one that quietly passed would be worse than a refusal: someone would learn what
+their gate did from a change that should not have been approved. Nothing on
+disk is overwritten either — a setup command is not how anybody should lose a
+file they wrote.
+
+The profiles it writes are embedded, because a binary installed by curl has no
+repository beside it. They are copies of `adapters/*.toml`, and
+`check-hygiene.sh` fails if the two drift — the same treatment as the gate
+written out in both `ci.yml` and `ostraka.toml`.
 
 **The desktop application is a second view, not a second product.** `ostraka-app`
 draws with `egui` in a window `eframe` opens: pure Rust, no web runtime, no
