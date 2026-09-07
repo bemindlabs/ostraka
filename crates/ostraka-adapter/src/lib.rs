@@ -15,6 +15,7 @@ pub mod event;
 pub mod isolation;
 pub mod process;
 pub mod profile;
+pub mod usage;
 
 use ostraka_core::record::Event;
 use ostraka_core::task::TaskSpec;
@@ -53,6 +54,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct AdapterOutcome {
     pub exit_code: Option<i32>,
     pub files_touched: Vec<String>,
+    /// What the vendor said the run cost. `None` when it said nothing.
+    pub usage: Option<ostraka_core::record::TokenUsage>,
     /// Why it failed, in the vendor's own words. `None` on success.
     ///
     /// A coding CLI reports an expired credential, a rate limit or a missing

@@ -45,6 +45,35 @@ pub enum Outcome {
     Failed,
 }
 
+/// What one adapter invocation cost, as the vendor itself reported it.
+///
+/// Not measured here and not estimated: every field is absent unless the vendor
+/// said the number. Vendors disagree about what they report — a single total, a
+/// split, or a rounded figure like `7.5k` — so the shape is optional throughout
+/// and `approximate` marks the ones that were rounded before we saw them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub adapter: String,
+    pub role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    /// The vendor rounded before reporting. Summing these gives an estimate.
+    #[serde(default)]
+    pub approximate: bool,
+}
+
+impl TokenUsage {
+    /// Everything the vendor accounted for, however it chose to split it.
+    pub fn counted(&self) -> u64 {
+        self.total
+            .unwrap_or_else(|| self.input.unwrap_or(0) + self.output.unwrap_or(0))
+    }
+}
+
 /// The durable record of one task, start to finish.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRecord {
@@ -64,6 +93,10 @@ pub struct RunRecord {
     pub checks: Vec<CheckRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<Approval>,
+    /// What each adapter invocation cost. Empty for runs recorded before this
+    /// existed, and for vendors that report nothing.
+    #[serde(default)]
+    pub usage: Vec<TokenUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<Outcome>,
 }

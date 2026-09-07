@@ -82,8 +82,13 @@ ostraka  .  ·  2 of 7 runs
                                                 │ @@ -57,3 +57,33 @@ fn first_line(prompt: &str)
                                                 │ +#[cfg(test)]
                                                 │ +mod tests {
+tokens   claude-code 159.5k in / 4.3k out · codex 14.7k total · copilot-cli ~10.6k in / ~296 out
 j/k move · tab diff · space/b scroll · / filter · p promote · r reload · q quit
 ```
+
+The bottom line totals tokens per backend, from what each vendor said about
+itself — a combined figure shown as a total, a rounded one marked with a tilde,
+and a backend that reports nothing left out rather than shown as zero.
 
 Tab cycles checks, events and diff. `/` filters on the task text, the run id or
 the outcome word. A run that produced no commit says so rather than showing the

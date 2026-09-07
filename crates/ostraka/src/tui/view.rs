@@ -11,7 +11,7 @@
 
 use ostraka_core::gate::Verdict;
 use ostraka_core::record::{Event, Outcome, RunRecord};
-use ostraka_runtime::index::RunSummary;
+use ostraka_runtime::index::{self, BackendUsage, RunSummary};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -145,6 +145,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             Constraint::Length(1),
             Constraint::Min(3),
             Constraint::Length(1),
+            Constraint::Length(1),
         ])
         .split(frame.area());
 
@@ -157,7 +158,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     render_list(frame, app, columns[0]);
     render_detail(frame, app, columns[1]);
-    frame.render_widget(footer(app), rows[2]);
+    frame.render_widget(tokens(app), rows[2]);
+    frame.render_widget(footer(app), rows[3]);
 }
 
 fn header(app: &App) -> Paragraph<'static> {
@@ -172,6 +174,75 @@ fn header(app: &App) -> Paragraph<'static> {
         Span::styled("ostraka", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(format!("  {}  ·  {count}", app.project.display())),
     ]))
+}
+
+/// What each backend has cost, across the runs currently listed.
+///
+/// Every figure is a vendor's own accounting. A backend that reports nothing
+/// does not appear here at all rather than appearing as a zero — "does not say"
+/// and "spent nothing" are different claims, and only one of them is true.
+fn tokens(app: &App) -> Paragraph<'static> {
+    let listed: Vec<RunSummary> = app
+        .matching
+        .iter()
+        .filter_map(|i| app.runs.get(*i))
+        .cloned()
+        .collect();
+    let backends = index::by_backend(&listed);
+
+    if backends.is_empty() {
+        return Paragraph::new(Line::from(Span::styled(
+            "tokens   no backend on these runs reported what it spent",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    let mut spans = vec![Span::styled(
+        "tokens   ",
+        Style::default().fg(Color::DarkGray),
+    )];
+    for (i, backend) in backends.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+        }
+        spans.push(Span::styled(
+            backend.adapter.clone(),
+            Style::default().fg(Color::Cyan),
+        ));
+        spans.push(Span::raw(format!(" {}", describe_backend(backend))));
+    }
+    Paragraph::new(Line::from(spans))
+}
+
+fn describe_backend(backend: &BackendUsage) -> String {
+    // The tilde is the whole point of tracking `approximate`: one vendor rounds
+    // before it reports, so a figure including it is an estimate and says so.
+    let about = if backend.approximate { "~" } else { "" };
+    // Said the way the vendor said it. One reports a split, another a single
+    // combined figure, and printing the second as "14.7k in / 0 out" would put
+    // a number in its mouth it never gave.
+    if backend.input == 0 && backend.output == 0 {
+        return format!("{about}{} total", compact(backend.total));
+    }
+    let split = format!(
+        "{about}{} in / {about}{} out",
+        compact(backend.input),
+        compact(backend.output)
+    );
+    if backend.total == 0 {
+        split
+    } else {
+        format!("{split} · {about}{} total", compact(backend.total))
+    }
+}
+
+/// A token count at a glance. Exactness below a thousand, magnitude above it.
+fn compact(n: u64) -> String {
+    match n {
+        0..=999 => n.to_string(),
+        1_000..=999_999 => format!("{:.1}k", n as f64 / 1_000.0),
+        _ => format!("{:.1}M", n as f64 / 1_000_000.0),
+    }
 }
 
 fn plural(n: usize) -> &'static str {
@@ -553,6 +624,7 @@ mod tests {
             outcome,
             checks_passed: 3,
             checks_total: 4,
+            usage: Vec::new(),
         }
     }
 
@@ -639,6 +711,7 @@ mod tests {
                 },
             ],
             approval: None,
+            usage: Vec::new(),
             outcome: Some(Outcome::Rejected),
         });
 
@@ -702,6 +775,7 @@ mod tests {
                     reason: "went outside the task".into(),
                 },
             }),
+            usage: Vec::new(),
             outcome: Some(Outcome::Rejected),
         });
         let out = screen(&mut app, 100, 16);
@@ -890,6 +964,115 @@ mod tests {
         app.detail = app.detail.next();
         assert!(screen(&mut app, 100, 12).contains("tab checks"));
         assert_eq!(app.detail.next(), Detail::Checks);
+    }
+
+    /// A usage row shaped the way a vendor reports it: a split, or — when
+    /// `output` is `None` — one combined total.
+    fn with_usage(
+        mut run: RunSummary,
+        rows: &[(&str, &str, u64, Option<u64>, bool)],
+    ) -> RunSummary {
+        run.usage = rows
+            .iter()
+            .map(
+                |(adapter, role, first, output, approximate)| ostraka_core::record::TokenUsage {
+                    adapter: (*adapter).to_string(),
+                    role: (*role).to_string(),
+                    input: output.map(|_| *first),
+                    output: *output,
+                    total: output.map_or(Some(*first), |_| None),
+                    approximate: *approximate,
+                },
+            )
+            .collect();
+        run
+    }
+
+    #[test]
+    fn the_status_line_totals_each_backend_separately() {
+        let mut app = App::new(
+            PathBuf::from("/p"),
+            vec![
+                with_usage(
+                    summary("t1-20260907T000300Z", "one", Some(Outcome::Approved)),
+                    &[
+                        ("claude-code", "author", 10_136, Some(1_258), false),
+                        ("codex", "reviewer", 3_303, None, false),
+                    ],
+                ),
+                with_usage(
+                    summary("t2-20260907T000200Z", "two", Some(Outcome::Approved)),
+                    &[("claude-code", "author", 20_000, Some(742), false)],
+                ),
+            ],
+        );
+        let out = screen(&mut app, 120, 16);
+        assert!(out.contains("tokens"), "{out}");
+        assert!(out.contains("claude-code 30.1k in / 2.0k out"), "{out}");
+        assert!(out.contains("codex 3.3k total"), "{out}");
+    }
+
+    #[test]
+    fn a_rounded_backend_is_marked_as_an_estimate() {
+        // One vendor rounds before it reports. A total including it is an
+        // estimate, and a status line that implied otherwise would be lying in
+        // the one place this project cannot afford to.
+        let mut app = App::new(
+            PathBuf::from("/p"),
+            vec![with_usage(
+                summary("t1-20260907T000300Z", "one", Some(Outcome::Approved)),
+                &[("copilot-cli", "reviewer", 10_600, Some(296), true)],
+            )],
+        );
+        let out = screen(&mut app, 120, 14);
+        assert!(out.contains("copilot-cli ~10.6k in / ~296 out"), "{out}");
+    }
+
+    #[test]
+    fn a_backend_that_reports_nothing_is_absent_rather_than_zero() {
+        // "Does not say" and "spent nothing" are different claims.
+        let mut app = App::new(
+            PathBuf::from("/p"),
+            vec![summary(
+                "t1-20260907T000300Z",
+                "one",
+                Some(Outcome::Approved),
+            )],
+        );
+        let out = screen(&mut app, 120, 14);
+        assert!(out.contains("no backend on these runs reported"), "{out}");
+        assert!(!out.contains(" 0 in "), "{out}");
+    }
+
+    #[test]
+    fn the_status_line_follows_the_filter() {
+        // It totals what is listed, so narrowing the list narrows the total.
+        let mut app = App::new(
+            PathBuf::from("/p"),
+            vec![
+                with_usage(
+                    summary("t1-20260907T000300Z", "keep me", Some(Outcome::Approved)),
+                    &[("claude-code", "author", 1_000, Some(100), false)],
+                ),
+                with_usage(
+                    summary("t2-20260907T000200Z", "hide me", Some(Outcome::Approved)),
+                    &[("claude-code", "author", 9_000, Some(900), false)],
+                ),
+            ],
+        );
+        assert!(screen(&mut app, 120, 14).contains("10.0k in"));
+        app.filter = "keep".into();
+        app.refilter();
+        assert!(screen(&mut app, 120, 14).contains("1.0k in / 100 out"));
+    }
+
+    #[test]
+    fn counts_are_compact_without_becoming_vague_below_a_thousand() {
+        assert_eq!(compact(0), "0");
+        assert_eq!(compact(999), "999");
+        assert_eq!(compact(1_000), "1.0k");
+        assert_eq!(compact(10_136), "10.1k");
+        assert_eq!(compact(2_500_000), "2.5M");
     }
 
     #[test]

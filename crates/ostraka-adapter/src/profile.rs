@@ -2,6 +2,7 @@
 
 use crate::capability::Capabilities;
 use crate::isolation::Isolation;
+use crate::usage::UsageSpec;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -15,6 +16,10 @@ pub enum EventFormat {
     None,
     /// One JSON object per line.
     Jsonl,
+    /// The whole of stdout is a single JSON document, and the reply is at
+    /// `event_text` within it. Used by CLIs whose structured mode reports both
+    /// the answer and what it cost in one object.
+    Json,
 }
 
 /// Which side of a run a profile is being invoked for.
@@ -74,8 +79,17 @@ pub struct Profile {
     /// command line the run record shows.
     #[serde(default)]
     pub isolation: Option<Isolation>,
+    /// Where this vendor reports what a run cost, if it reports it at all.
+    ///
+    /// Configuration rather than code because the three CLIs shipped today use
+    /// three different shapes on two different streams, and one of them rounds.
+    #[serde(default)]
+    pub usage: Option<UsageSpec>,
     #[serde(default)]
     pub event_format: EventFormat,
+    /// RFC 6901 pointer to the reply, when `event_format` is `json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_text: Option<String>,
     #[serde(default)]
     pub capabilities: Capabilities,
 }
@@ -138,6 +152,14 @@ impl Profile {
                     ),
                 });
             }
+        }
+        if self.event_format == EventFormat::Json && self.event_text.is_none() {
+            return Err(Error::Profile {
+                id: self.id.clone(),
+                message: "event_format is \"json\", so event_text must point at the reply inside \
+                          the document; without it the run has no output at all"
+                    .to_string(),
+            });
         }
         if self.probe_args.is_empty() {
             return Err(Error::Profile {

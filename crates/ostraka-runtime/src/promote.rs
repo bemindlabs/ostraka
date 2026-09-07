@@ -232,6 +232,7 @@ mod tests {
                 reviewer: ActorId::new("ephor"),
                 verdict: Verdict::Approve,
             }),
+            usage: Vec::new(),
             outcome: Some(Outcome::Approved),
         }
     }

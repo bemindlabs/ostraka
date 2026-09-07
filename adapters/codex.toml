@@ -55,6 +55,13 @@ credentials = ["auth.json"]
 #
 # probe_args = ["sandbox", "--", "true"]
 
+# This CLI prints `tokens used` and the count on the following line, to stderr,
+# on success as well as failure. Read verbatim: no estimate is made here.
+[usage]
+stream = "stderr"
+shape = "text"
+total = "tokens used"
+
 [capabilities]
 headless = true
 streams_json = true

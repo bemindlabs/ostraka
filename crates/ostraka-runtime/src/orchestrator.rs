@@ -60,6 +60,7 @@ pub fn run_task(
         finished_at: None,
         checks: Vec::new(),
         approval: None,
+        usage: Vec::new(),
         outcome: None,
     };
 
@@ -74,6 +75,7 @@ pub fn run_task(
     // 2. Execute, streaming events into the log as they arrive so an
     //    interrupted run still leaves an account of how far it got.
     let author = drive(routing.author.as_ref(), task, wt.path(), &mut log)?;
+    record.usage.extend(author.usage.clone());
 
     // 3. Read what was actually touched, from git rather than from the agent.
     let touched = worktree::touched_paths(wt.path())?;
@@ -145,7 +147,9 @@ pub fn run_task(
 
     // 5. Review, by an adapter that is not the one that wrote the change.
     let diff = worktree::diff(wt.path())?;
-    let verdict = collect_verdict(routing.reviewer.as_ref(), task, &diff, wt.path(), &mut log)?;
+    let (verdict, reviewer_usage) =
+        collect_verdict(routing.reviewer.as_ref(), task, &diff, wt.path(), &mut log)?;
+    record.usage.extend(reviewer_usage);
     let approval = Approval {
         reviewer: reviewer_identity.clone(),
         verdict: verdict.clone(),
@@ -206,13 +210,15 @@ fn drive(
 ///
 /// Fail-safe throughout: a reviewer that cannot be launched, or that says
 /// nothing usable, has not approved anything.
+type Reviewed = (Verdict, Option<ostraka_core::record::TokenUsage>);
+
 fn collect_verdict(
     reviewer: &dyn VendorAdapter,
     task: &TaskSpec,
     diff: &str,
     worktree: &Path,
     log: &mut RunLog,
-) -> Result<Verdict> {
+) -> Result<Reviewed> {
     // Derived here, after the author has finished, and handed only to the
     // reviewer: it is what lets the verdict be read from anywhere in the answer
     // without an author being able to plant one in the diff.
@@ -229,9 +235,12 @@ fn collect_verdict(
     let mut session = match reviewer.launch(&review_task, worktree) {
         Ok(s) => s,
         Err(e) => {
-            return Ok(Verdict::Reject {
-                reason: format!("reviewer could not be launched: {e}"),
-            });
+            return Ok((
+                Verdict::Reject {
+                    reason: format!("reviewer could not be launched: {e}"),
+                },
+                None,
+            ));
         }
     };
 
@@ -260,10 +269,10 @@ fn collect_verdict(
             message: reason.clone(),
             raw: None,
         })?;
-        return Ok(Verdict::Reject { reason });
+        return Ok((Verdict::Reject { reason }, outcome.usage));
     }
 
-    Ok(review::parse_verdict(&spoken, &marker))
+    Ok((review::parse_verdict(&spoken, &marker), outcome.usage))
 }
 
 fn finish(

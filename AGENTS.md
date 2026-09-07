@@ -155,6 +155,17 @@ profile, which is rule 1 applied to the environment. Gate checks are *not*
 scrubbed: they are the project's commands run on the operator's behalf and need
 the operator's toolchain.
 
+**Token counts are quoted, never computed.** Every figure in the TUI's bottom
+line is a vendor's own accounting, extracted by a `[usage]` block in that
+vendor's profile — no vendor variable, marker or JSON pointer appears in
+`ostraka-adapter`, for the same reason no product name does. A vendor that
+reports nothing produces no row and is absent from the display, because "does
+not say" and "spent nothing" are different claims. A vendor that reports one
+combined figure is shown as a total rather than as a split with a fabricated
+zero, and one that rounds is marked as an estimate. A field may sum several
+counters: reading Claude Code's `input_tokens` alone, without the two cache
+counters beside it, reported 16 for a run that actually sent 159,460.
+
 **The TUI is a view, and it earns two dependencies.** `ratatui` and `crossterm`
 go in the `ostraka` crate only, with `default-features = false` — the defaults pull a
 second backend and a colour stack that cost 67 crates including wasm bindings,

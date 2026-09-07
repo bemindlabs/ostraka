@@ -7,7 +7,7 @@
 
 use crate::{Error, Result};
 use ostraka_core::identity::ActorId;
-use ostraka_core::record::{Outcome, RunRecord};
+use ostraka_core::record::{Outcome, RunRecord, TokenUsage};
 use std::path::Path;
 
 /// One run, as much of it as its record can say.
@@ -22,6 +22,53 @@ pub struct RunSummary {
     pub outcome: Option<Outcome>,
     pub checks_passed: usize,
     pub checks_total: usize,
+    /// What each adapter in this run reported spending.
+    pub usage: Vec<TokenUsage>,
+}
+
+/// What one backend has cost across the runs on record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendUsage {
+    pub adapter: String,
+    pub input: u64,
+    pub output: u64,
+    /// Counts from vendors that report one combined figure instead of a split.
+    ///
+    /// Kept apart from `input` and `output` on purpose. Folding a combined
+    /// total into the input side renders as "14.7k in / 0 out", and that zero
+    /// is a claim the vendor never made.
+    pub total: u64,
+    pub runs: usize,
+    /// Any part of this total came from a vendor that rounds.
+    pub approximate: bool,
+}
+
+/// Per-backend totals across every run given, in adapter-id order.
+///
+/// Sums only what vendors reported. A backend that reports nothing does not
+/// appear, which is the honest difference between "spent nothing" and "does not
+/// say" — the caller can show the second as a dash rather than as a zero.
+pub fn by_backend(runs: &[RunSummary]) -> Vec<BackendUsage> {
+    let mut totals: std::collections::BTreeMap<String, BackendUsage> =
+        std::collections::BTreeMap::new();
+    for usage in runs.iter().flat_map(|run| run.usage.iter()) {
+        let entry = totals
+            .entry(usage.adapter.clone())
+            .or_insert_with(|| BackendUsage {
+                adapter: usage.adapter.clone(),
+                input: 0,
+                output: 0,
+                total: 0,
+                runs: 0,
+                approximate: false,
+            });
+        entry.input += usage.input.unwrap_or(0);
+        entry.output += usage.output.unwrap_or(0);
+        entry.total += usage.total.unwrap_or(0);
+        entry.runs += 1;
+        entry.approximate |= usage.approximate;
+    }
+    totals.into_values().collect()
 }
 
 impl RunSummary {
@@ -41,6 +88,7 @@ impl RunSummary {
             outcome: None,
             checks_passed: 0,
             checks_total: 0,
+            usage: Vec::new(),
         }
     }
 
@@ -55,6 +103,7 @@ impl RunSummary {
             outcome: record.outcome,
             checks_passed: record.checks.iter().filter(|c| c.passed()).count(),
             checks_total: record.checks.len(),
+            usage: record.usage.clone(),
         }
     }
 
@@ -190,6 +239,7 @@ mod tests {
                 reviewer: ActorId::new("ephor"),
                 verdict: Verdict::Approve,
             }),
+            usage: Vec::new(),
             outcome: Some(outcome),
         };
         std::fs::write(

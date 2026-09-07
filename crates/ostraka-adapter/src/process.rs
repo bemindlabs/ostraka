@@ -194,7 +194,9 @@ impl VendorAdapter for ProcessAdapter {
         Ok(Box::new(ProcessSession {
             child,
             profile: self.profile.clone(),
+            role: self.role,
             pending: VecDeque::new(),
+            stdout_text: String::new(),
             drained: false,
             stderr_tail,
             stderr_reader,
@@ -205,7 +207,11 @@ impl VendorAdapter for ProcessAdapter {
 pub struct ProcessSession {
     child: Child,
     profile: Profile,
+    role: Role,
     pending: VecDeque<Event>,
+    /// Kept verbatim alongside the normalized events, because a vendor that
+    /// reports its own accounting on stdout reports it in its own shape.
+    stdout_text: String,
     drained: bool,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
     stderr_reader: Option<JoinHandle<()>>,
@@ -224,7 +230,17 @@ impl ProcessSession {
             .lines()
             .map_while(std::result::Result::ok)
         {
+            self.stdout_text.push_str(&line);
+            self.stdout_text.push('\n');
             if let Some(event) = normalize_line(self.profile.event_format, &line) {
+                self.pending.push_back(event);
+            }
+        }
+
+        // A whole-document format only makes sense once the document is whole.
+        if self.profile.event_format == crate::profile::EventFormat::Json {
+            let pointer = self.profile.event_text.clone().unwrap_or_default();
+            if let Some(event) = crate::event::document_event(&self.stdout_text, &pointer) {
                 self.pending.push_back(event);
             }
         }
@@ -243,21 +259,35 @@ impl Session for ProcessSession {
         if let Some(reader) = self.stderr_reader.take() {
             let _ = reader.join();
         }
-        // Kept only for a failure. A successful run's stderr is progress
-        // reporting, and recording it would bury the runs that went wrong.
+        let stderr_text = {
+            let tail = self.stderr_tail.lock().expect("stderr tail lock");
+            tail.iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // Read before the tail is discarded: a vendor reports what it spent on
+        // a successful run too, and that is the run whose cost anyone asks about.
+        let usage = self.profile.usage.as_ref().and_then(|spec| {
+            let role = match self.role {
+                Role::Author => "author",
+                Role::Review => "reviewer",
+            };
+            spec.read(&self.profile.id, role, &self.stdout_text, &stderr_text)
+        });
+
+        // Diagnostics are kept only for a failure. A successful run's stderr is
+        // progress reporting, and recording it would bury the runs that went
+        // wrong.
         let diagnostics = if exit_code == Some(0) {
             None
         } else {
-            let tail = self.stderr_tail.lock().expect("stderr tail lock");
-            let text = tail
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .join("\n");
-            (!text.trim().is_empty()).then_some(text)
+            (!stderr_text.trim().is_empty()).then_some(stderr_text)
         };
         AdapterOutcome {
             exit_code,
+            usage,
             // Files touched are read from the worktree's git status by the
             // runtime, not from the vendor's own account of what it did.
             files_touched: Vec::new(),

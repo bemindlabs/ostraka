@@ -16,7 +16,6 @@ args = [
     "{{prompt}}",
     "--allow-all-tools",
     "--disable-builtin-mcps",
-    "--silent",
     "--no-color",
     "--log-level",
     "none",
@@ -26,7 +25,6 @@ review_args = [
     "-p",
     "{{prompt}}",
     "--disable-builtin-mcps",
-    "--silent",
     "--no-color",
     "--log-level",
     "none",
@@ -46,6 +44,22 @@ inherit_env = [
 ]
 
 event_format = "none"
+
+# `--silent` is gone from both invocations because it suppresses the usage
+# summary along with the rest of the stats. It cost nothing to drop: the stats
+# go to stderr, so stdout is still only the reply, and the verdict is found by
+# its marker rather than by being the first line.
+#
+# This CLI writes the count before the label — `7.5k input, 4 output` — and
+# rounds it. `approximate` says so, because a total summed from rounded parts is
+# an estimate and a status line should not imply otherwise.
+[usage]
+stream = "stderr"
+shape = "text"
+number = "before"
+input = ["input", "cache read"]
+output = "output"
+approximate = true
 
 [capabilities]
 headless = true

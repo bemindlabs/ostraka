@@ -21,7 +21,37 @@ pub fn normalize_line(format: EventFormat, line: &str) -> Option<Event> {
             raw: None,
         }),
         EventFormat::Jsonl => Some(normalize_json_line(line)),
+        // The document is not readable a line at a time; the session parses it
+        // once stdout has closed. See `document_event`.
+        EventFormat::Json => None,
     }
+}
+
+/// Reads the reply out of a whole-stdout JSON document.
+///
+/// Fail-safe like everything else on this path: a document that does not parse,
+/// or that has nothing at the pointer, yields the raw text as a message rather
+/// than nothing. Losing a vendor's output because its shape changed would turn
+/// a formatting surprise into a silent empty run.
+pub fn document_event(text: &str, pointer: &str) -> Option<Event> {
+    if text.trim().is_empty() {
+        return None;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text.trim()) else {
+        return Some(Event::Message {
+            text: text.trim().to_string(),
+            raw: None,
+        });
+    };
+    let reply = value
+        .pointer(pointer)
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| text.trim().to_string());
+    Some(Event::Message {
+        text: reply,
+        raw: Some(value),
+    })
 }
 
 fn normalize_json_line(line: &str) -> Event {

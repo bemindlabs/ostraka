@@ -50,7 +50,27 @@ model_args = ["--model", "{{model}}"]
 # skip what it can detect.
 probe_args = ["--version"]
 
-event_format = "none"   # or "jsonl"
+event_format = "none"   # "none", "jsonl", or "json" (one document)
+event_text = "/result"  # required with "json": where the reply is in it
+
+# Where this vendor reports what a run cost, if it reports it at all. Nothing
+# here is estimated: a vendor that says nothing produces no row, which is what
+# lets a status line show a dash instead of a zero.
+#
+#   stream      "stdout" | "stderr"
+#   shape       "text" (find a marker) | "json" (RFC 6901 pointers)
+#   number      "after" | "before" — which side of the marker the count is on
+#   approximate this vendor rounds before reporting, so treat it as an estimate
+#
+# A field may name several counters, which are summed: a vendor that splits
+# input into fresh, cache-creating and cache-read tokens is reporting three
+# parts of one number, and taking the first alone understated a real run by
+# four orders of magnitude.
+[usage]
+stream = "stdout"
+shape = "json"
+input = ["/usage/input_tokens", "/usage/cache_read_input_tokens"]
+output = "/usage/output_tokens"
 
 [env]
 EXAMPLE_NO_COLOR = "1"
@@ -99,6 +119,23 @@ models from one vendor share a training lineage, a system prompt and a set of
 blind spots. So a run that picks for you prefers a profile invoking a different
 binary, and falls back to a same-binary pair only when that is all there is.
 Naming one is still honoured — naming is a decision.
+
+## What a run cost
+
+`ostraka tui` totals tokens per backend along the bottom, from what each vendor
+reported about itself. The three shipped CLIs report in three shapes, on two
+streams, and one rounds — which is why extraction is profile data rather than
+code, and why the display says which is which:
+
+```
+tokens   claude-code 159.5k in / 4.3k out · codex 14.7k total · copilot-cli ~10.6k in / ~296 out
+```
+
+Three claims, each made the way its vendor made it. `codex` reports one combined
+figure, so it is shown as a total rather than as a split with a zero nobody
+claimed. `copilot-cli` rounds before it reports, so its figures carry a tilde. A
+backend that reports nothing is absent rather than shown as zero — "does not
+say" and "spent nothing" are different, and only one of them is true.
 
 ## Isolation — keeping the operator out of the run
 

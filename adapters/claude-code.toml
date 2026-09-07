@@ -21,6 +21,8 @@ args = [
     "{{prompt}}",
     "--permission-mode",
     "acceptEdits",
+    "--output-format",
+    "json",
     "--setting-sources",
     "project",
     "--strict-mcp-config",
@@ -34,6 +36,8 @@ review_args = [
     "{{prompt}}",
     "--permission-mode",
     "plan",
+    "--output-format",
+    "json",
     "--setting-sources",
     "project",
     "--strict-mcp-config",
@@ -46,7 +50,23 @@ model_args = ["--model", "{{model}}"]
 # first. Add your provider's variables if you run it against Bedrock or Vertex.
 inherit_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]
 
-event_format = "none"
+# Structured output, for two reasons. It is the only way this CLI reports what a
+# run cost, and a parsed field is a steadier contract than the shape of printed
+# text. The reply moves from being the whole of stdout to being one field in it.
+event_format = "json"
+event_text = "/result"
+
+[usage]
+stream = "stdout"
+shape = "json"
+# Three parts of one number. `input_tokens` alone is the uncached remainder and
+# reads as ten tokens for a run that actually sent ten thousand.
+input = [
+    "/usage/input_tokens",
+    "/usage/cache_creation_input_tokens",
+    "/usage/cache_read_input_tokens",
+]
+output = "/usage/output_tokens"
 
 [capabilities]
 headless = true
