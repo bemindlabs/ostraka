@@ -72,7 +72,39 @@ pub fn run_task(
         &task.base_ref,
     )?;
 
-    // 2. Execute, streaming events into the log as they arrive so an
+    // 2. Make the checkout usable. A worktree is a fresh checkout, so whatever
+    //    git ignores is missing from it — and the agent needs the project's
+    //    tools as much as the gate does.
+    match worktree::prepare(
+        repo,
+        wt.path(),
+        &config.worktree,
+        config.gate.timeout_secs.map(std::time::Duration::from_secs),
+    ) {
+        Ok(steps) => {
+            for step in steps {
+                log.append(&Event::Message {
+                    text: format!("prepared: {step}"),
+                    raw: None,
+                })?;
+            }
+        }
+        Err(problem) => {
+            return finish(
+                log,
+                record,
+                Outcome::Failed,
+                None,
+                Some(Refusal::SetupFailed {
+                    step: problem.step,
+                    reason: problem.reason,
+                }),
+                String::new(),
+            );
+        }
+    }
+
+    // 3. Execute, streaming events into the log as they arrive so an
     //    interrupted run still leaves an account of how far it got.
     let author = drive(routing.author.as_ref(), task, wt.path(), &mut log)?;
     record.usage.extend(author.usage.clone());

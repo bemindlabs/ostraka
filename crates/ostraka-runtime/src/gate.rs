@@ -84,6 +84,12 @@ pub enum Refusal {
     },
     /// The change touched paths the project's policy does not allow.
     PolicyViolation { reason: String },
+    /// The worktree could not be made ready to work in.
+    ///
+    /// Nothing was judged and nothing was written: the environment was not
+    /// there. Reporting it as a failed check would say the change was rejected,
+    /// which is the confusion this variant exists to end.
+    SetupFailed { step: String, reason: String },
     /// The operator stopped the run.
     ///
     /// Not a judgement on the change at all — nobody finished looking at it.
@@ -133,7 +139,22 @@ pub fn run_checks(
 }
 
 fn run_one(check: &Check, worktree: &Path, ceiling: Option<Duration>) -> CheckRecord {
+    let mut record = run_command(&check.cmd, worktree, ceiling);
+    record.name = check.name.clone();
+    record
+}
+
+/// Runs one shell command in a worktree, bounded, capturing both streams.
+///
+/// Shared with worktree preparation, which needs exactly this and must not be
+/// reported as a gate check.
+pub fn run_command(cmd: &str, worktree: &Path, ceiling: Option<Duration>) -> CheckRecord {
     let started = Instant::now();
+    let check = Check {
+        name: String::new(),
+        cmd: cmd.to_string(),
+        required: true,
+    };
 
     let spawned = Command::new("sh")
         .arg("-c")

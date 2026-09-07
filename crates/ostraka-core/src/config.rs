@@ -9,6 +9,35 @@ use serde::{Deserialize, Serialize};
 pub struct WorktreeConfig {
     #[serde(default = "default_worktree_base")]
     pub base: String,
+    /// Paths linked from the project into every worktree before anything runs.
+    ///
+    /// A worktree is a fresh checkout, so anything git ignores is absent from
+    /// it — `node_modules/`, `.venv/`, `vendor/`. Without them the gate cannot
+    /// execute and neither can the agent, and the run fails for a reason that
+    /// has nothing to do with the change.
+    ///
+    /// Linked rather than copied: installing per worktree costs hundreds of
+    /// megabytes each, and a run should not be the reason a disk fills.
+    #[serde(default)]
+    pub link: Vec<String>,
+    /// A command run inside the worktree before the agent starts.
+    ///
+    /// For what linking cannot express — generated code, a build step, an
+    /// install that must be per-worktree. It runs before the author, not just
+    /// before the gate: an agent that cannot run the project's tools cannot see
+    /// what it broke.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<String>,
+}
+
+/// True for a relative path that cannot climb out of the directory it joins.
+fn is_contained(path: &str) -> bool {
+    use std::path::{Component, Path};
+    let path = Path::new(path);
+    !path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
 fn default_worktree_base() -> String {
@@ -22,6 +51,8 @@ impl Default for WorktreeConfig {
     fn default() -> Self {
         Self {
             base: default_worktree_base(),
+            link: Vec::new(),
+            setup: None,
         }
     }
 }
@@ -55,6 +86,13 @@ impl Config {
                 "[gate] declares no checks; the gate would pass everything".to_string(),
             ));
         }
+        for path in &self.worktree.link {
+            if !is_contained(path) {
+                return Err(Error::Invalid(format!(
+                    "[worktree] link {path:?} must be a relative path inside the project"
+                )));
+            }
+        }
         for check in &self.gate.checks {
             if check.cmd.trim().is_empty() {
                 return Err(Error::Invalid(format!(
@@ -70,6 +108,26 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_link_cannot_climb_out_of_the_project() {
+        for bad in ["../secrets", "/etc", "a/../../b"] {
+            let text = format!(
+                "[gate]\nchecks = [{{ name = \"t\", cmd = \"true\", required = true }}]\n[worktree]\nlink = [\"{bad}\"]\n"
+            );
+            let config = Config::parse(&text).expect("parses");
+            assert!(config.validate().is_err(), "{bad} was accepted");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_link_is_accepted() {
+        let text = "[gate]\nchecks = [{ name = \"t\", cmd = \"true\", required = true }]\n[worktree]\nlink = [\"node_modules\", \"packages/app/node_modules\"]\n";
+        Config::parse(text)
+            .expect("parses")
+            .validate()
+            .expect("valid");
+    }
 
     const SAMPLE: &str = r#"
         [gate]

@@ -119,6 +119,9 @@ fn describe(refusal: &ostraka_runtime::gate::Refusal) -> String {
             None => format!("the author could not run (exit {code}), and said nothing"),
         },
         Refusal::PolicyViolation { reason } => reason.clone(),
+        Refusal::SetupFailed { step, reason } => {
+            format!("the worktree could not be prepared ({step}): {reason}")
+        }
         Refusal::Interrupted => "stopped by the operator".to_string(),
         Refusal::TimedOut { after_secs } => {
             format!("the author was still running after {after_secs}s and was stopped")

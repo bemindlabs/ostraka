@@ -151,6 +151,21 @@ platform. macOS, Linux and Windows on x86-64, plus Apple silicon; the command
 line additionally ships for aarch64 Linux, where a GUI would need a cross
 sysroot of window libraries.
 
+### Projects whose dependencies are gitignored
+
+A worktree is a fresh checkout, so `node_modules/`, `.venv/` and `vendor/` are
+not in it. Say what to bring:
+
+```toml
+[worktree]
+base = "worktrees"
+link = ["node_modules"]     # symlinked in, not installed per worktree
+setup = "make deps"         # or a command, for what linking cannot express
+```
+
+Both run before the agent starts, so it can use the project's tools too, and a
+failure is reported as a setup problem rather than as a rejected change.
+
 ## How it is put together
 
 | Crate | Owns |

@@ -250,6 +250,25 @@ whole foreground process group, so the child usually dies of the same signal
 before the poll notices, which made an interrupted run report as an agent
 failure until `finish` learned to ask whether a stop had been requested at all.
 
+**A worktree is prepared before the agent, not just before the gate.** A fresh
+checkout has none of what git ignores — `node_modules/`, `.venv/`, `vendor/` —
+so every check that shells out to the toolchain fails for a reason that has
+nothing to do with the change, and the agent cannot run those tools either.
+`[worktree] link` symlinks them in from the project, absolute so the link does
+not depend on how deep `base` puts the checkout; `[worktree] setup` runs a
+command for what linking cannot express. Linked rather than installed per
+worktree: `npm ci` in each one costs hundreds of megabytes, and a run should not
+be why a disk fills.
+
+A failure here is `SetupFailed`, never a failed check. "The environment was not
+ready" and "the change was rejected" are different answers, and reporting the
+first as the second is what made a missing `node_modules` read as a refused
+change — reported from a real Next.js onboarding, issue #1.
+
+`init` writes `link = ["node_modules"]` for a Node project, because detecting
+the ecosystem and then handing over a gate that cannot run in the environment
+Ostraka itself builds is worse than not detecting it.
+
 **Worktrees are released on success only.** The commit is on the run's branch,
 and the diff pane, replay and promotion all read it from there, so the checkout
 is redundant once a run is approved — and a directory per run is how a busy

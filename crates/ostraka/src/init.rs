@@ -236,7 +236,41 @@ fn config_for(kind: Kind) -> String {
          [worktree]\n\
          base = \"worktrees\"\n",
     );
+    out.push_str(link_for(kind));
     out
+}
+
+/// What a worktree needs linked into it for this kind of project.
+///
+/// A worktree is a fresh checkout, so anything git ignores is absent — and for
+/// most ecosystems that is exactly the directory the toolchain needs. Detecting
+/// a Node project and writing `npm test` without this hands somebody a gate
+/// that cannot run in the environment Ostraka itself builds.
+fn link_for(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Node => concat!(
+            "\n",
+            "# A worktree is a fresh checkout, so gitignored directories are not in it.\n",
+            "# Linked rather than installed per worktree: `npm ci` in each one costs\n",
+            "# hundreds of megabytes, and linking is instant and free.\n",
+            "link = [\"node_modules\"]\n",
+        ),
+        Kind::Python => concat!(
+            "\n",
+            "# A worktree is a fresh checkout, so gitignored directories are not in it.\n",
+            "# Uncomment whichever your toolchain needs.\n",
+            "# link = [\".venv\"]\n",
+        ),
+        Kind::Rust | Kind::Unknown => concat!(
+            "\n",
+            "# A worktree is a fresh checkout, so anything git ignores is absent from it.\n",
+            "# List what your toolchain needs; it is linked, not copied.\n",
+            "# link = [\"node_modules\"]\n",
+            "\n",
+            "# Or run a command in the worktree before the agent starts.\n",
+            "# setup = \"make deps\"\n",
+        ),
+    }
 }
 
 /// Writes the missing part of a plan. Returns what it wrote.
@@ -311,6 +345,16 @@ mod tests {
         let parsed = ostraka_core::config::Config::parse(config).expect("parses");
         parsed.validate().expect("a generated config is usable");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_node_project_gets_a_gate_that_can_actually_run() {
+        // The reported defect: init detected Node and wrote `npm test`, which
+        // cannot execute in a worktree because node_modules is gitignored and
+        // therefore absent. Detecting the ecosystem and then handing over an
+        // unrunnable gate is worse than not detecting it.
+        let config = ostraka_core::config::Config::parse(&config_for(Kind::Node)).expect("parses");
+        assert_eq!(config.worktree.link, ["node_modules"]);
     }
 
     #[test]

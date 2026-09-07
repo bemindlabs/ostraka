@@ -46,6 +46,114 @@ pub fn create(repo: &Path, base: &Path, run_id: &str, base_ref: &str) -> Result<
     Ok(Worktree { path, branch })
 }
 
+/// What went wrong getting a worktree ready to work in.
+///
+/// Separate from a gate failure on purpose. "The environment was not ready" and
+/// "the change was rejected" are different answers, and reporting the first as
+/// the second is what made a missing `node_modules` read as a refused change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupProblem {
+    pub step: String,
+    pub reason: String,
+}
+
+/// Makes a fresh checkout usable: links what git ignores, runs what the project
+/// says it needs.
+///
+/// Runs before the agent, not merely before the gate. An agent that cannot run
+/// the project's own tools cannot see what it broke, which is how a run ends
+/// with the agent having changed nothing and nobody knowing why.
+pub fn prepare(
+    project: &Path,
+    worktree: &Path,
+    config: &ostraka_core::config::WorktreeConfig,
+    ceiling: Option<std::time::Duration>,
+) -> std::result::Result<Vec<String>, SetupProblem> {
+    let mut done = Vec::new();
+
+    for name in &config.link {
+        let source = project.join(name);
+        let target = worktree.join(name);
+        if !source.exists() {
+            // Said plainly rather than left to surface as an unrunnable check.
+            // Declaring it means needing it, so its absence is the answer.
+            return Err(SetupProblem {
+                step: format!("link {name}"),
+                reason: format!(
+                    "{} is declared in [worktree] link and is not there; the worktree cannot be \
+                     prepared without it",
+                    source.display()
+                ),
+            });
+        }
+        // Something the repository tracks under that name already arrived with
+        // the checkout, and it is not this to replace.
+        if target.exists() || std::fs::symlink_metadata(&target).is_ok() {
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Absolute, so the link does not depend on how deep `[worktree] base`
+        // puts the checkout — the fragility a relative `../../` would carry.
+        let source = source.canonicalize().unwrap_or(source);
+        if let Err(e) = symlink(&source, &target) {
+            return Err(SetupProblem {
+                step: format!("link {name}"),
+                reason: format!("could not link {} into the worktree: {e}", source.display()),
+            });
+        }
+        done.push(format!("link {name}"));
+    }
+
+    if let Some(command) = config.setup.as_deref().filter(|c| !c.trim().is_empty()) {
+        let record = crate::gate::run_command(command, worktree, ceiling);
+        if record.exit_code != Some(0) {
+            let tail: Vec<&str> = record
+                .stderr
+                .lines()
+                .rev()
+                .take(6)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            return Err(SetupProblem {
+                step: "setup".to_string(),
+                reason: format!(
+                    "`{command}` exited with {}: {}",
+                    record
+                        .exit_code
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "no exit code".to_string()),
+                    if tail.is_empty() {
+                        "and said nothing".to_string()
+                    } else {
+                        tail.join(" / ")
+                    }
+                ),
+            });
+        }
+        done.push(format!("setup `{command}`"));
+    }
+
+    Ok(done)
+}
+
+#[cfg(unix)]
+fn symlink(source: &Path, target: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(source, target)
+}
+
+#[cfg(windows)]
+fn symlink(source: &Path, target: &Path) -> std::io::Result<()> {
+    if source.is_dir() {
+        std::os::windows::fs::symlink_dir(source, target)
+    } else {
+        std::os::windows::fs::symlink_file(source, target)
+    }
+}
+
 /// Lists paths modified inside a worktree.
 ///
 /// Read from git, never from the agent's own account of what it did — an agent
@@ -208,6 +316,146 @@ pub fn list(repo: &Path, base: &Path) -> Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ostraka_core::config::WorktreeConfig;
+
+    fn scratch(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("ostraka-prep-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(path.join("project")).expect("project");
+        std::fs::create_dir_all(path.join("wt")).expect("worktree");
+        path
+    }
+
+    fn prep_config(link: &[&str], setup: Option<&str>) -> WorktreeConfig {
+        WorktreeConfig {
+            base: "worktrees".into(),
+            link: link.iter().map(|s| (*s).to_string()).collect(),
+            setup: setup.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn what_git_ignores_is_linked_into_the_checkout() {
+        // The reported defect: a worktree is a fresh checkout, so node_modules
+        // is absent and every check needing the toolchain fails for a reason
+        // that has nothing to do with the change.
+        let dir = scratch("link");
+        std::fs::create_dir_all(dir.join("project/node_modules")).expect("deps");
+        std::fs::write(dir.join("project/node_modules/marker"), "here").expect("write");
+
+        let done = prepare(
+            &dir.join("project"),
+            &dir.join("wt"),
+            &prep_config(&["node_modules"], None),
+            None,
+        )
+        .expect("prepares");
+
+        assert_eq!(done, ["link node_modules"]);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("wt/node_modules/marker")).expect("reads"),
+            "here"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_link_is_absolute_so_the_worktree_depth_does_not_matter() {
+        // A relative `../../` breaks the moment [worktree] base changes.
+        let dir = scratch("absolute");
+        std::fs::create_dir_all(dir.join("project/node_modules")).expect("deps");
+        std::fs::create_dir_all(dir.join("wt/deep/deeper")).expect("deep");
+        prepare(
+            &dir.join("project"),
+            &dir.join("wt/deep/deeper"),
+            &prep_config(&["node_modules"], None),
+            None,
+        )
+        .expect("prepares");
+        let link = std::fs::read_link(dir.join("wt/deep/deeper/node_modules")).expect("a link");
+        assert!(link.is_absolute(), "{link:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_declared_link_that_is_absent_is_said_plainly() {
+        let dir = scratch("missing");
+        let problem = prepare(
+            &dir.join("project"),
+            &dir.join("wt"),
+            &prep_config(&["node_modules"], None),
+            None,
+        )
+        .expect_err("must refuse");
+        assert_eq!(problem.step, "link node_modules");
+        assert!(problem.reason.contains("is not there"), "{problem:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn something_the_repository_tracks_is_not_replaced_by_a_link() {
+        let dir = scratch("tracked");
+        std::fs::create_dir_all(dir.join("project/vendor")).expect("source");
+        std::fs::create_dir_all(dir.join("wt/vendor")).expect("checked out");
+        std::fs::write(dir.join("wt/vendor/theirs"), "tracked").expect("write");
+
+        prepare(
+            &dir.join("project"),
+            &dir.join("wt"),
+            &prep_config(&["vendor"], None),
+            None,
+        )
+        .expect("prepares");
+        assert!(
+            dir.join("wt/vendor/theirs").is_file(),
+            "the checkout lost a tracked file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_setup_command_that_fails_reports_the_environment_not_the_change() {
+        let dir = scratch("setup-fails");
+        let problem = prepare(
+            &dir.join("project"),
+            &dir.join("wt"),
+            &prep_config(&[], Some("echo no registry >&2; exit 1")),
+            None,
+        )
+        .expect_err("must refuse");
+        assert_eq!(problem.step, "setup");
+        assert!(problem.reason.contains("no registry"), "{problem:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_setup_command_runs_inside_the_worktree() {
+        let dir = scratch("setup-cwd");
+        prepare(
+            &dir.join("project"),
+            &dir.join("wt"),
+            &prep_config(&[], Some("pwd > where")),
+            None,
+        )
+        .expect("prepares");
+        let ran_in = std::fs::read_to_string(dir.join("wt/where")).expect("reads");
+        assert!(ran_in.trim().ends_with("wt"), "{ran_in}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nothing_declared_means_nothing_done() {
+        let dir = scratch("nothing");
+        let done = prepare(
+            &dir.join("project"),
+            &dir.join("wt"),
+            &prep_config(&[], None),
+            None,
+        )
+        .expect("prepares");
+        assert!(done.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn an_identity_with_spaces_still_yields_a_usable_address() {
