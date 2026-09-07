@@ -12,7 +12,7 @@ jobs:
   gate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Cheap, and it fails for reasons a compiler never will: a backend
       # instruction file that has drifted from AGENTS.md, plugin scribble that
