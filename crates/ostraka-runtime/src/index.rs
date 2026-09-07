@@ -98,6 +98,53 @@ pub fn list(records_root: &Path) -> Result<Vec<RunSummary>> {
         .collect())
 }
 
+/// The change a finished run produced, read from git.
+///
+/// The run record does not keep the diff, and should not: it would be a second
+/// copy of something git already stores exactly. A run's commit lives on its own
+/// branch, or on the branch a promotion named.
+///
+/// The branch existing is not enough. A refused run has a branch — it was
+/// created before the agent started — whose head is simply the base commit it
+/// branched from, and showing that would present somebody else's change as this
+/// run's output. So the head commit has to say it is this run's, by the trailer
+/// the runtime wrote into it. `None` means the run produced no commit, which is
+/// a true answer rather than a missing one.
+pub fn diff(repo: &Path, run_id: &str) -> Result<Option<String>> {
+    for branch in [format!("ostraka/{run_id}"), format!("promoted/{run_id}")] {
+        if !head_is_this_run(repo, &branch, run_id)? {
+            continue;
+        }
+        let out = std::process::Command::new("git")
+            .args(["show", "--format=", "--patch", &branch])
+            .current_dir(repo)
+            .output()
+            .map_err(|e| Error::Other(format!("git show: {e}")))?;
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+            if !text.trim().is_empty() {
+                return Ok(Some(text));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn head_is_this_run(repo: &Path, branch: &str, run_id: &str) -> Result<bool> {
+    let out = std::process::Command::new("git")
+        .args(["log", "-1", "--format=%B", branch])
+        .current_dir(repo)
+        .output()
+        .map_err(|e| Error::Other(format!("git log: {e}")))?;
+    if !out.status.success() {
+        return Ok(false);
+    }
+    let message = String::from_utf8_lossy(&out.stdout);
+    Ok(message
+        .lines()
+        .any(|line| line.trim() == format!("Run: {run_id}")))
+}
+
 fn read(dir: &Path) -> Option<RunRecord> {
     let text = std::fs::read_to_string(dir.join("record.json")).ok()?;
     serde_json::from_str(&text).ok()
@@ -192,6 +239,68 @@ mod tests {
         assert!(runs[0].prompt.contains("did not finish"));
         assert!(runs[1].approved());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn a_refused_runs_branch_is_not_mistaken_for_its_change() {
+        // A run's branch is created before the agent starts, so a refused run
+        // leaves a branch whose head is the commit it branched from. Showing
+        // that would present an unrelated change as this run's output — which
+        // is worse than showing nothing, because it looks right.
+        let repo = root();
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.email", "t@example.invalid"]);
+        git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("seed.txt"), "seed\n").expect("write");
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "someone else's change"]);
+
+        // Refused: a branch, no commit of its own.
+        git(&repo, &["branch", "ostraka/t-refused"]);
+        assert_eq!(diff(&repo, "t-refused").expect("reads"), None);
+
+        // Approved: a branch whose head carries the run trailer.
+        git(&repo, &["checkout", "-q", "-b", "ostraka/t-approved"]);
+        std::fs::write(repo.join("added.txt"), "new\n").expect("write");
+        git(&repo, &["add", "-A"]);
+        git(
+            &repo,
+            &["commit", "-q", "-m", "do a thing\n\nRun: t-approved"],
+        );
+
+        let change = diff(&repo, "t-approved")
+            .expect("reads")
+            .expect("has a diff");
+        assert!(change.contains("added.txt"), "{change}");
+        assert!(
+            !change.contains("seed.txt"),
+            "showed the base commit:\n{change}"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn a_run_with_no_branch_at_all_reads_as_no_change_rather_than_an_error() {
+        let repo = root();
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        git(&repo, &["init", "-q", "-b", "main"]);
+        assert_eq!(diff(&repo, "t-never-existed").expect("reads"), None);
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[test]

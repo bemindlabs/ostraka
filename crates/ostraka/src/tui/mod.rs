@@ -71,9 +71,16 @@ fn event_loop(
 }
 
 fn handle(app: &mut App, code: KeyCode, records_root: &Path) {
+    if app.filtering {
+        filter_key(app, code);
+        load_detail(app, records_root);
+        return;
+    }
+
     // Any keypress supersedes the last message. A status line that outlives
     // what it described is worse than no status line.
     app.status = None;
+    let page = app.page as i16;
     match code {
         KeyCode::Char('q') | KeyCode::Esc => app.quit = true,
         KeyCode::Char('j') | KeyCode::Down => {
@@ -84,23 +91,56 @@ fn handle(app: &mut App, code: KeyCode, records_root: &Path) {
             app.move_by(-1);
             load_detail(app, records_root);
         }
+        KeyCode::Char('g') | KeyCode::Home => {
+            app.move_by(-(app.matching.len() as isize));
+            load_detail(app, records_root);
+        }
+        KeyCode::Char('G') | KeyCode::End => {
+            app.move_by(app.matching.len() as isize);
+            load_detail(app, records_root);
+        }
+        KeyCode::Char(' ') | KeyCode::PageDown => app.scroll_by(page),
+        KeyCode::Char('b') | KeyCode::PageUp => app.scroll_by(-page),
         KeyCode::Tab | KeyCode::Right | KeyCode::Left => {
-            app.detail = match app.detail {
-                Detail::Checks => Detail::Events,
-                Detail::Events => Detail::Checks,
-            };
+            app.detail = app.detail.next();
+            app.scroll = 0;
+            load_detail(app, records_root);
         }
-        KeyCode::Char('r') => {
-            match index::list(records_root) {
-                Ok(runs) => {
-                    app.runs = runs;
-                    app.move_by(0);
-                    load_detail(app, records_root);
-                }
-                Err(e) => app.status = Some(format!("could not reload: {e}")),
-            };
-        }
+        KeyCode::Char('/') => app.filtering = true,
+        KeyCode::Char('r') => match index::list(records_root) {
+            Ok(runs) => {
+                app.runs = runs;
+                app.refilter();
+                load_detail(app, records_root);
+            }
+            Err(e) => app.status = Some(format!("could not reload: {e}")),
+        },
         KeyCode::Char('p') => app.status = Some(promote_selected(app)),
+        _ => {}
+    }
+}
+
+/// Keys while the filter is being typed.
+///
+/// Every command key is a filter character here, deliberately: a filter that
+/// swallowed `q` and then quit on the next keystroke would be worse than one
+/// that needs an explicit way out. Enter keeps it, Escape clears it.
+fn filter_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc => {
+            app.filter.clear();
+            app.filtering = false;
+            app.refilter();
+        }
+        KeyCode::Enter => app.filtering = false,
+        KeyCode::Backspace => {
+            app.filter.pop();
+            app.refilter();
+        }
+        KeyCode::Char(c) => {
+            app.filter.push(c);
+            app.refilter();
+        }
         _ => {}
     }
 }
@@ -111,12 +151,19 @@ fn handle(app: &mut App, code: KeyCode, records_root: &Path) {
 /// interrupted, the listing already says so, and the browser should keep working
 /// rather than fall over on the one entry someone is trying to look at.
 fn load_detail(app: &mut App, records_root: &Path) {
-    app.record = None;
-    app.events.clear();
-    let Some(run) = app.current() else { return };
-    if let Ok((record, events)) = orchestrator::replay(records_root, &run.run_id) {
-        app.record = Some(record);
-        app.events = events;
+    let Some(run) = app.current().map(|r| r.run_id.clone()) else {
+        return;
+    };
+    if app.record.is_none() {
+        if let Ok((record, events)) = orchestrator::replay(records_root, &run) {
+            app.record = Some(record);
+            app.events = events;
+        }
+    }
+    // The diff costs a git call, so it is fetched only when someone asks to see
+    // one — moving down a list of fifty runs should not shell out fifty times.
+    if app.detail == Detail::Diff && app.diff.is_none() {
+        app.diff = Some(index::diff(&app.project, &run).ok().flatten());
     }
 }
 

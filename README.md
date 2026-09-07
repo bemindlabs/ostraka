@@ -69,25 +69,25 @@ commit disagree — the record is a file beside the repository, the trailers are
 inside history, and a promotion needs both to say the same thing.
 
 `ostraka tui` is a browser over the same records — what ran, what it was for,
-which check failed and what it printed, what the reviewer said, and `p` to
-promote an approved one:
+which check failed and what it printed, what the reviewer said, the diff itself,
+and `p` to promote an approved one:
 
 ```
-ostraka  .  ·  5 runs
-+ 09-07 00:30  Add a unit test for the workt…│ t102-20260907T001000Z
-- 09-07 00:20  Rewrite the gate to skip revi…│ refused
-- 09-07 00:10  Make the parser accept a trai…│
-? 09-07 00:05  (no record — the run did not …│ task     Make the parser accept a trailing comma
-+ 09-06 17:57  (recorded before runs kept th…│ author   archon (claude-code)
-                                             │
-                                             │ checks
-                                             │   pass  format     101ms
-                                             │   FAIL  test       2140ms
-                                             │         assertion failed: left == right
-                                             │           left: Some(1)
-                                             │          right: None
-j/k move · tab checks|events · p promote · r reload · q quit
+ostraka  .  ·  2 of 7 runs
++ 09-07 03:54  crates/ostraka-cli/src/runs.rs h…│ t3354339-20260907T035406Z
+- 09-07 02:11  In crates/ostraka-core/src/ident…│ approved
+                                                │ reviewer ephor — approve
+                                                │
+                                                │ diff
+                                                │ @@ -57,3 +57,33 @@ fn first_line(prompt: &str)
+                                                │ +#[cfg(test)]
+                                                │ +mod tests {
+j/k move · tab diff · space/b scroll · / filter · p promote · r reload · q quit
 ```
+
+Tab cycles checks, events and diff. `/` filters on the task text, the run id or
+the outcome word. A run that produced no commit says so rather than showing the
+commit its branch happens to point at, which is a thing it used to do.
 
 It holds no logic of its own, so `p` cannot approve anything: promotion goes
 through the same gate as the command, and a record claiming an approval its
