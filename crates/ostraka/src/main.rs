@@ -6,6 +6,7 @@ mod init;
 mod init_cmd;
 mod project;
 mod promote;
+mod prune;
 mod replay;
 mod run;
 mod runs;
@@ -96,6 +97,13 @@ enum Commands {
         branch: Option<String>,
     },
 
+    /// Remove worktrees left by finished runs. Branches are untouched.
+    Prune {
+        /// Actually remove them. Without this it only reports what it would do.
+        #[arg(long)]
+        apply: bool,
+    },
+
     /// Read a finished run back from its record.
     Replay {
         /// Run id, as printed by `run`.
@@ -113,6 +121,7 @@ fn main() -> ExitCode {
         Commands::Adapters => adapters::run(&project, cli.json),
         Commands::Replay { run_id } => replay::run(&project, run_id, cli.json),
         Commands::Runs => runs::run(&project, cli.json),
+        Commands::Prune { apply } => prune::run(&project, *apply, cli.json),
         Commands::Tui => tui::run(&project),
         Commands::Promote { run_id, branch } => {
             promote::run(&project, run_id, branch.as_deref(), cli.json)

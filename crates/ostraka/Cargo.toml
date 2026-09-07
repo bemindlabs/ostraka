@@ -22,3 +22,8 @@ serde_json = { workspace = true }
 # advantage is a binary you can curl, and that survives a library.
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 crossterm = { version = "0.29", default-features = false }
+# Ctrl-C, which std has no portable way to catch. Tiny and pure Rust, which is
+# the condition every dependency here meets: it adds no runtime to a binary
+# whose distribution advantage is that it needs none. Without it, interrupting
+# a run abandons a subprocess still writing into a worktree.
+ctrlc = { version = "3.5", default-features = false }

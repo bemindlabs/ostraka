@@ -24,6 +24,7 @@ ostraka run "..."  # isolate, execute, gate, review, record
 ostraka replay ID  # read a finished run back
 ostraka runs       # every run this project has recorded
 ostraka tui        # browse them in the terminal
+ostraka prune      # remove worktrees finished runs left. Branches untouched
 ostraka promote ID # give an approved run a branch. Merges nothing
 ```
 

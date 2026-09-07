@@ -34,6 +34,10 @@ impl std::fmt::Debug for Routing {
 /// profiles that can actually run here, in id order, so the choice is
 /// reproducible rather than dependent on directory listing order.
 ///
+/// `timeout` is the ceiling either side gets before it is killed, bound here
+/// for the same reason as the rest: what a run is allowed to do is decided when
+/// the routing is, not by whatever calls `launch` later.
+///
 /// `isolation_root` is where a profile that relocates its vendor's home
 /// directory may put it. It is bound here, alongside the read-only review
 /// invocation, for the same reason: what a run is allowed to read is decided
@@ -43,6 +47,7 @@ pub fn select(
     author_id: Option<&str>,
     reviewer_id: Option<&str>,
     isolation_root: &Path,
+    timeout: Option<std::time::Duration>,
 ) -> Result<Routing> {
     if profiles.is_empty() {
         return Err(Error::Other("no adapter profiles found".to_string()));
@@ -83,8 +88,16 @@ pub fn select(
     }
 
     Ok(Routing {
-        author: Box::new(ProcessAdapter::new(author).isolated_under(isolation_root)),
-        reviewer: Box::new(ProcessAdapter::reviewing(reviewer).isolated_under(isolation_root)),
+        author: Box::new(
+            ProcessAdapter::new(author)
+                .isolated_under(isolation_root)
+                .within(timeout),
+        ),
+        reviewer: Box::new(
+            ProcessAdapter::reviewing(reviewer)
+                .isolated_under(isolation_root)
+                .within(timeout),
+        ),
     })
 }
 
@@ -177,21 +190,23 @@ mod tests {
 
     #[test]
     fn a_lone_adapter_cannot_review_itself() {
-        let err = select(&[profile("solo")], None, None, root()).expect_err("must refuse");
+        let err = select(&[profile("solo")], None, None, root(), None).expect_err("must refuse");
         assert!(err.to_string().contains("no independent reviewer"));
     }
 
     #[test]
     fn naming_the_same_adapter_twice_is_refused() {
         let profiles = [profile("a"), profile("b")];
-        let err = select(&profiles, Some("a"), Some("a"), root()).expect_err("must refuse");
+        let err = select(&profiles, Some("a"), Some("a"), root(), None).expect_err("must refuse");
         assert!(err.to_string().contains("cannot review itself"));
     }
 
     #[test]
     fn selection_is_deterministic_not_listing_order() {
-        let forward = select(&[profile("b"), profile("a")], None, None, root()).expect("routes");
-        let reverse = select(&[profile("a"), profile("b")], None, None, root()).expect("routes");
+        let forward =
+            select(&[profile("b"), profile("a")], None, None, root(), None).expect("routes");
+        let reverse =
+            select(&[profile("a"), profile("b")], None, None, root(), None).expect("routes");
         assert_eq!(forward.author.id(), "a");
         assert_eq!(forward.author.id(), reverse.author.id());
         assert_eq!(forward.reviewer.id(), "b");
@@ -208,8 +223,14 @@ mod tests {
         )
         .expect("valid");
         // "aaa-missing" sorts first, so id order alone would pick it.
-        let routing =
-            select(&[missing, profile("b"), profile("c")], None, None, root()).expect("routes");
+        let routing = select(
+            &[missing, profile("b"), profile("c")],
+            None,
+            None,
+            root(),
+            None,
+        )
+        .expect("routes");
         assert_eq!(routing.author.id(), "b");
         assert_eq!(routing.reviewer.id(), "c");
     }
@@ -226,8 +247,14 @@ mod tests {
             "#,
         )
         .expect("valid");
-        let routing =
-            select(&[missing, profile("b")], Some("missing"), None, root()).expect("routes");
+        let routing = select(
+            &[missing, profile("b")],
+            Some("missing"),
+            None,
+            root(),
+            None,
+        )
+        .expect("routes");
         assert_eq!(routing.author.id(), "missing");
     }
 
@@ -241,7 +268,7 @@ mod tests {
             "#,
         )
         .expect("valid");
-        let err = select(&[missing], None, None, root()).expect_err("must refuse");
+        let err = select(&[missing], None, None, root(), None).expect_err("must refuse");
         assert!(err.to_string().contains("definitely-not-a-real-binary-xyz"));
     }
 
@@ -259,6 +286,7 @@ mod tests {
             Some("aa-vendor-fast"),
             None,
             root(),
+            None,
         )
         .expect("routes");
         assert_eq!(routing.reviewer.id(), "zz-other");
@@ -273,14 +301,15 @@ mod tests {
             command_profile("vendor-fast", "true"),
             command_profile("vendor-slow", "true"),
         ];
-        let routing = select(&profiles, None, None, root()).expect("routes");
+        let routing = select(&profiles, None, None, root(), None).expect("routes");
         assert_eq!(routing.author.id(), "vendor-fast");
         assert_eq!(routing.reviewer.id(), "vendor-slow");
     }
 
     #[test]
     fn an_unknown_id_is_reported_by_name() {
-        let err = select(&[profile("a")], Some("nope"), None, root()).expect_err("must refuse");
+        let err =
+            select(&[profile("a")], Some("nope"), None, root(), None).expect_err("must refuse");
         assert!(err.to_string().contains("nope"));
     }
 }

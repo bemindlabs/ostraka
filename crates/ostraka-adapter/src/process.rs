@@ -14,8 +14,20 @@ use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+/// How long to keep collecting output after a vendor has been killed.
+///
+/// Short: it is only there to catch what was already in flight.
+const GRACE: Duration = Duration::from_millis(200);
+
+/// How often a waiting adapter looks up to see whether it should stop.
+///
+/// Short enough that Ctrl-C feels immediate, long enough not to spin.
+const POLL: Duration = Duration::from_millis(100);
 
 /// How much of a failed process's stderr is kept.
 ///
@@ -32,6 +44,9 @@ pub struct ProcessAdapter {
     /// isolation — at which point launching un-isolated would quietly break
     /// the promise the profile makes, so it is refused instead.
     isolation_root: Option<PathBuf>,
+    /// Wall-clock ceiling for one invocation. `None` means wait forever, which
+    /// is what this did before the ceiling existed.
+    timeout: Option<Duration>,
 }
 
 impl ProcessAdapter {
@@ -41,6 +56,7 @@ impl ProcessAdapter {
             profile,
             role: Role::Author,
             isolation_root: None,
+            timeout: None,
         }
     }
 
@@ -54,7 +70,18 @@ impl ProcessAdapter {
             profile,
             role: Role::Review,
             isolation_root: None,
+            timeout: None,
         }
+    }
+
+    /// How long this vendor gets before it is killed.
+    ///
+    /// An agent that hangs — a stalled connection, a prompt waiting on stdin
+    /// nobody will answer — otherwise hangs the run forever, and a fleet runner
+    /// that can be stopped by one wedged subprocess has not automated anything.
+    pub fn within(mut self, timeout: Option<Duration>) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     /// Where this adapter may create a relocated home for its vendor.
@@ -171,9 +198,12 @@ impl VendorAdapter for ProcessAdapter {
                 source,
             })?;
 
-        // Stderr is drained on its own thread. Reading it after stdout would
-        // deadlock the moment a vendor wrote more than a pipe buffer of
-        // progress to stderr before closing stdout, which the talkative ones do.
+        // Both streams are read on their own threads. Stderr must be, or a
+        // vendor writing more than a pipe buffer of progress before closing
+        // stdout deadlocks the run — which the talkative ones do. Stdout must
+        // be too, for a different reason: a deadline cannot be applied to a
+        // blocking read on this thread, and a vendor that hangs without writing
+        // would wedge the run somewhere no timeout could reach it.
         let stderr_tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LINES)));
         let stderr_reader = child.stderr.take().map(|stderr| {
             let sink = Arc::clone(&stderr_tail);
@@ -191,8 +221,30 @@ impl VendorAdapter for ProcessAdapter {
             })
         });
 
+        let (stdout_tx, stdout_rx) = mpsc::channel();
+        let stdout_reader = child.stdout.take().map(|stdout| {
+            std::thread::spawn(move || {
+                // Line by line rather than one blob at EOF: a vendor that has
+                // to be killed never reaches EOF, and what it said before it
+                // stalled is the only clue anyone gets.
+                for line in BufReader::new(stdout)
+                    .lines()
+                    .map_while(std::result::Result::ok)
+                {
+                    if stdout_tx.send(line).is_err() {
+                        return;
+                    }
+                }
+            })
+        });
+
         Ok(Box::new(ProcessSession {
             child,
+            deadline: self.timeout.map(|t| Instant::now() + t),
+            stdout_rx: Some(stdout_rx),
+            stdout_reader,
+            timed_out: false,
+            interrupted: false,
             profile: self.profile.clone(),
             role: self.role,
             pending: VecDeque::new(),
@@ -208,6 +260,14 @@ pub struct ProcessSession {
     child: Child,
     profile: Profile,
     role: Role,
+    /// When this invocation must be killed, if it has not finished.
+    deadline: Option<Instant>,
+    stdout_rx: Option<Receiver<String>>,
+    stdout_reader: Option<JoinHandle<()>>,
+    /// True once the deadline passed and the child was killed for it.
+    timed_out: bool,
+    /// True once the operator asked to stop and the child was killed for it.
+    interrupted: bool,
     pending: VecDeque<Event>,
     /// Kept verbatim alongside the normalized events, because a vendor that
     /// reports its own accounting on stdout reports it in its own shape.
@@ -218,21 +278,61 @@ pub struct ProcessSession {
 }
 
 impl ProcessSession {
+    /// Collects everything the vendor wrote, or kills it for taking too long.
+    ///
+    /// The reader runs on its own thread, so waiting for it can carry a
+    /// deadline. On expiry the child is killed and the reader is drained
+    /// afterwards, which keeps whatever it managed to say — a vendor usually
+    /// explains itself before it hangs, and that explanation is the only clue
+    /// anyone gets.
     fn drain_stdout(&mut self) {
         if self.drained {
             return;
         }
         self.drained = true;
-        let Some(stdout) = self.child.stdout.take() else {
+        let Some(rx) = self.stdout_rx.take() else {
             return;
         };
-        for line in BufReader::new(stdout)
-            .lines()
-            .map_while(std::result::Result::ok)
-        {
-            self.stdout_text.push_str(&line);
-            self.stdout_text.push('\n');
-            if let Some(event) = normalize_line(self.profile.event_format, &line) {
+
+        let mut lines: Vec<String> = Vec::new();
+        loop {
+            // Polled rather than blocked, so a Ctrl-C is noticed even for a
+            // vendor producing no output at all — which is the one most worth
+            // being able to stop.
+            let wait = match self.deadline {
+                None => POLL,
+                Some(deadline) => POLL.min(deadline.saturating_duration_since(Instant::now())),
+            };
+            match rx.recv_timeout(wait) {
+                Ok(line) => lines.push(line),
+                // The vendor closed its output: it is done.
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let expired = self
+                        .deadline
+                        .is_some_and(|deadline| Instant::now() >= deadline);
+                    if !expired && !crate::interrupt::requested() {
+                        continue;
+                    }
+                    self.timed_out = expired;
+                    self.interrupted = !expired;
+                    let _ = self.child.kill();
+                    // Take what already arrived and stop. Killing a shell does
+                    // not kill what it spawned, and a surviving grandchild
+                    // holds this pipe open — so waiting for EOF here would wait
+                    // on precisely the process we just gave up waiting for.
+                    while let Ok(line) = rx.recv_timeout(GRACE) {
+                        lines.push(line);
+                    }
+                    break;
+                }
+            }
+        }
+        let text = lines.join("\n");
+
+        self.stdout_text = text;
+        for line in self.stdout_text.lines() {
+            if let Some(event) = normalize_line(self.profile.event_format, line) {
                 self.pending.push_back(event);
             }
         }
@@ -256,8 +356,17 @@ impl Session for ProcessSession {
     fn finish(mut self: Box<Self>) -> AdapterOutcome {
         self.drain_stdout();
         let exit_code = self.child.wait().ok().and_then(|s| s.code());
-        if let Some(reader) = self.stderr_reader.take() {
-            let _ = reader.join();
+        // Joined only when the vendor ended on its own. After a kill a
+        // grandchild may still hold the pipes, and joining would reintroduce
+        // exactly the wait the ceiling exists to bound. The threads end when
+        // the last writer closes; nothing leaks but patience.
+        if !self.timed_out && !self.interrupted {
+            if let Some(reader) = self.stderr_reader.take() {
+                let _ = reader.join();
+            }
+            if let Some(reader) = self.stdout_reader.take() {
+                let _ = reader.join();
+            }
         }
         let stderr_text = {
             let tail = self.stderr_tail.lock().expect("stderr tail lock");
@@ -285,8 +394,17 @@ impl Session for ProcessSession {
         } else {
             (!stderr_text.trim().is_empty()).then_some(stderr_text)
         };
+        // A terminal sends Ctrl-C to the whole foreground process group, so the
+        // child usually dies of the same signal before the poll above notices
+        // and the drain ends at EOF instead. The run still ended because the
+        // operator said so, and reporting it as the agent failing would blame
+        // the work for their decision.
+        let interrupted = self.interrupted || crate::interrupt::requested();
+
         AdapterOutcome {
             exit_code,
+            timed_out: self.timed_out,
+            interrupted,
             usage,
             // Files touched are read from the worktree's git status by the
             // runtime, not from the vendor's own account of what it did.
@@ -300,6 +418,21 @@ impl Session for ProcessSession {
 mod tests {
     use super::*;
     use ostraka_core::identity::ActorId;
+
+    /// Serializes the tests that touch the interrupt flag.
+    ///
+    /// The flag is global because a signal is global — that is right for a
+    /// process and hostile to a test harness that runs threads in parallel, so
+    /// every test that reads or writes it takes this first. Without it, the
+    /// interrupt tests make the timeout tests take the interrupt branch and
+    /// report that the ceiling was not enforced.
+    static SIGNALS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+        let guard = SIGNALS.lock().unwrap_or_else(|e| e.into_inner());
+        crate::interrupt::clear();
+        guard
+    }
 
     fn profile(command: &str) -> Profile {
         Profile::parse(&format!(
@@ -361,6 +494,116 @@ mod tests {
             "diagnostics were {:?}",
             outcome.diagnostics
         );
+    }
+
+    #[test]
+    fn a_vendor_that_hangs_is_killed_at_the_ceiling() {
+        let _signals = exclusive();
+        // The reason this exists: an agent waiting on a stalled connection, or
+        // on stdin nobody will answer, otherwise wedges the run forever.
+        let adapter = ProcessAdapter::new(shell_profile("echo starting; sleep 120"))
+            .within(Some(Duration::from_millis(400)));
+        let started = Instant::now();
+        let session = adapter.launch(&spec(), Path::new(".")).expect("launches");
+        let outcome = session.finish();
+        let elapsed = started.elapsed();
+
+        assert!(outcome.timed_out, "the ceiling was not enforced");
+        assert!(
+            elapsed < Duration::from_secs(20),
+            "waited {elapsed:?} for a 400ms ceiling"
+        );
+    }
+
+    #[test]
+    fn what_a_killed_vendor_managed_to_say_is_kept() {
+        let _signals = exclusive();
+        // A vendor usually explains itself before it hangs, and that sentence
+        // is the only clue anyone gets about why.
+        let adapter = ProcessAdapter::new(shell_profile("echo 'about to stall'; sleep 120"))
+            .within(Some(Duration::from_millis(400)));
+        let mut session = adapter.launch(&spec(), Path::new(".")).expect("launches");
+        let first = session.next_event().expect("kept the output");
+        match first {
+            Event::Message { text, .. } => assert_eq!(text, "about to stall"),
+            other => panic!("wrong variant: {other:?}"),
+        }
+        assert!(session.finish().timed_out);
+    }
+
+    #[test]
+    fn a_child_killed_by_the_same_ctrl_c_still_reads_as_an_interrupt() {
+        let _signals = exclusive();
+        // The shape a real terminal produces: the signal reaches the whole
+        // foreground group, so the child dies on its own and the drain ends at
+        // EOF. Without this the run reported "the author could not run", which
+        // blames the agent for the operator's decision.
+        let adapter = ProcessAdapter::new(shell_profile("echo working; exit 130"));
+        let session = adapter.launch(&spec(), Path::new(".")).expect("launches");
+        crate::interrupt::request();
+        let outcome = session.finish();
+        crate::interrupt::clear();
+        assert!(
+            outcome.interrupted,
+            "an interrupt in flight was not recorded"
+        );
+    }
+
+    #[test]
+    fn an_interrupt_stops_a_vendor_that_has_no_ceiling_at_all() {
+        let _signals = exclusive();
+        // The case that used to wedge forever: no deadline, no output, and an
+        // operator who wants their terminal back.
+        let adapter = ProcessAdapter::new(shell_profile("echo working; sleep 120"));
+        let started = Instant::now();
+        let session = adapter.launch(&spec(), Path::new(".")).expect("launches");
+        // Scoped, so the thread is joined before the guard is released. A
+        // detached one fires after this test has finished and sets the flag
+        // underneath whichever test runs next — which is how the timeout tests
+        // started reporting that the ceiling was not enforced.
+        let outcome = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(300));
+                crate::interrupt::request();
+            });
+            session.finish()
+        });
+        crate::interrupt::clear();
+
+        assert!(outcome.interrupted, "the interrupt was not noticed");
+        assert!(!outcome.timed_out, "an interrupt is not a timeout");
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "waited {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_vendor_that_finishes_in_time_is_not_marked_as_stopped() {
+        let _signals = exclusive();
+        let adapter =
+            ProcessAdapter::new(shell_profile("echo quick")).within(Some(Duration::from_secs(30)));
+        let outcome = adapter
+            .launch(&spec(), Path::new("."))
+            .expect("launches")
+            .finish();
+        assert!(!outcome.timed_out);
+        assert_eq!(outcome.exit_code, Some(0));
+    }
+
+    #[test]
+    fn no_ceiling_means_what_it_did_before() {
+        let _signals = exclusive();
+        // The default has to stay "wait", or adding the field would change how
+        // every existing project behaves.
+        let adapter = ProcessAdapter::new(shell_profile("echo done"));
+        let outcome = adapter
+            .launch(&spec(), Path::new("."))
+            .expect("launches")
+            .finish();
+        assert!(!outcome.timed_out);
+        assert_eq!(outcome.exit_code, Some(0));
     }
 
     #[test]

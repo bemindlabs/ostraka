@@ -12,6 +12,7 @@
 pub mod capability;
 pub mod environment;
 pub mod event;
+pub mod interrupt;
 pub mod isolation;
 pub mod process;
 pub mod profile;
@@ -54,6 +55,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct AdapterOutcome {
     pub exit_code: Option<i32>,
     pub files_touched: Vec<String>,
+    /// The operator asked for the run to stop, and it was.
+    pub interrupted: bool,
+    /// The invocation outlived its ceiling and was killed.
+    ///
+    /// Distinct from a non-zero exit: a vendor that was stopped never reached a
+    /// verdict, and reporting that as a failure of the change would blame the
+    /// work for the clock.
+    pub timed_out: bool,
     /// What the vendor said the run cost. `None` when it said nothing.
     pub usage: Option<ostraka_core::record::TokenUsage>,
     /// Why it failed, in the vendor's own words. `None` on success.

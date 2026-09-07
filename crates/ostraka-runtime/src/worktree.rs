@@ -161,11 +161,24 @@ fn email_local(author: &ActorId) -> String {
     }
 }
 
-/// Removes a worktree and its branch.
-pub fn remove(repo: &Path, wt: &Worktree) -> Result<()> {
+/// Removes a worktree, keeping the branch it was on.
+///
+/// The distinction matters: the branch holds the commit a run produced, and
+/// promotion, replay and the diff pane all read it from there. Taking the
+/// branch would take the change.
+pub fn release(repo: &Path, wt: &Worktree) -> Result<()> {
+    remove_checkout(repo, &wt.path)
+}
+
+/// Removes a worktree by path, for one that has outlived its run.
+pub fn release_path(repo: &Path, path: &Path) -> Result<()> {
+    remove_checkout(repo, path)
+}
+
+fn remove_checkout(repo: &Path, path: &Path) -> Result<()> {
     let out = Command::new("git")
         .args(["worktree", "remove", "--force"])
-        .arg(&wt.path)
+        .arg(path)
         .current_dir(repo)
         .output()?;
 
@@ -176,6 +189,20 @@ pub fn remove(repo: &Path, wt: &Worktree) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Every worktree this project has created, by path.
+pub fn list(repo: &Path, base: &Path) -> Result<Vec<PathBuf>> {
+    if !base.is_dir() {
+        return Ok(Vec::new());
+    }
+    let _ = repo;
+    let mut found: Vec<PathBuf> = std::fs::read_dir(base)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_dir())
+        .collect();
+    found.sort();
+    Ok(found)
 }
 
 #[cfg(test)]

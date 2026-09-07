@@ -230,6 +230,34 @@ approve anything. It shows finished runs only; a live view of a run in progress
 needs the orchestrator to stream while something else renders, which is the
 parallel-execution problem and waits for the same answer.
 
+**Nothing waits forever.** `policy.timeout_secs` spent this project's life
+declared, documented as a wall-clock ceiling, and read by nothing — which is
+worse than absent, because someone sets it and believes their fleet is bounded.
+It is enforced now, and `[gate] timeout_secs` bounds the project's own checks
+separately: a test suite is allowed to take longer than an agent is. Unset still
+means wait, so no existing project changes behaviour; `init` writes both so the
+default is visible rather than buried.
+
+A stopped vendor is its own outcome, never a verdict on the change. `TimedOut`
+and `Interrupted` are distinct from `AuthorFailed`, because "the clock ran out"
+and "the operator changed their mind" are not "the agent could not do it".
+
+Two things only a real terminal revealed. A shell killed at the ceiling leaves
+its children alive, and they hold the pipe open — so waiting for EOF after a
+kill waits on precisely the process the ceiling gave up on; output is collected
+line by line and abandoned after a short grace instead. And Ctrl-C reaches the
+whole foreground process group, so the child usually dies of the same signal
+before the poll notices, which made an interrupted run report as an agent
+failure until `finish` learned to ask whether a stop had been requested at all.
+
+**Worktrees are released on success only.** The commit is on the run's branch,
+and the diff pane, replay and promotion all read it from there, so the checkout
+is redundant once a run is approved — and a directory per run is how a busy
+repository fills a disk with copies of itself. A refused run keeps its worktree:
+that is the evidence someone needs, and deleting it would take it away exactly
+when it matters. `ostraka prune` clears what is left, reports before it acts,
+and never touches a branch.
+
 **Async stays out until parallel execution earns it.** Everything today is
 sequential and synchronous. When several adapters need to stream at once, tokio
 goes in `ostraka-runtime` only — `ostraka-core` stays inert either way, which is

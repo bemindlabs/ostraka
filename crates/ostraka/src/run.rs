@@ -26,11 +26,28 @@ pub fn run(project: &Path, args: &Args, json: bool) -> Outcome {
     // Vendors that can only be isolated by relocating their home directory get
     // one here, beside the run records and ignored by git for the same reason.
     let records_root: PathBuf = project.join(".ostraka");
+    // One Ctrl-C asks the run to stop; the adapters notice within a poll and
+    // kill what they launched. A second is the operator saying they meant it,
+    // and the default handler takes over.
+    let interrupts = std::sync::atomic::AtomicUsize::new(0);
+    let _ = ctrlc::set_handler(move || {
+        if interrupts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            eprintln!("\nstopping the run — press Ctrl-C again to give up on it");
+            ostraka_adapter::interrupt::request();
+        } else {
+            std::process::exit(130);
+        }
+    });
+
     let routing = route::select(
         &profiles,
         args.adapter.as_deref(),
         args.review_adapter.as_deref(),
         &records_root.join("vendor-home"),
+        config
+            .policy
+            .timeout_secs
+            .map(std::time::Duration::from_secs),
     )?;
 
     let task = TaskSpec {
@@ -102,6 +119,10 @@ fn describe(refusal: &ostraka_runtime::gate::Refusal) -> String {
             None => format!("the author could not run (exit {code}), and said nothing"),
         },
         Refusal::PolicyViolation { reason } => reason.clone(),
+        Refusal::Interrupted => "stopped by the operator".to_string(),
+        Refusal::TimedOut { after_secs } => {
+            format!("the author was still running after {after_secs}s and was stopped")
+        }
         Refusal::NoChange => {
             "the author ran cleanly and changed nothing; there is nothing to review".to_string()
         }

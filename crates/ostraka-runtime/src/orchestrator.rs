@@ -88,6 +88,33 @@ pub fn run_task(
     // be handed an empty diff and asked what it thinks of it, which spends a
     // second vendor to produce a confused answer and then reports that answer
     // as the reason. Why it is empty is the reason, and it is known here.
+    // A killed author is refused whether or not it left something behind: what
+    // is on disk is half of whatever it was doing, and half a change is not a
+    // change anybody should be asked to review.
+    if author.interrupted {
+        return finish(
+            log,
+            record,
+            Outcome::Rejected,
+            None,
+            Some(Refusal::Interrupted),
+            String::new(),
+        );
+    }
+
+    if author.timed_out {
+        return finish(
+            log,
+            record,
+            Outcome::Rejected,
+            None,
+            Some(Refusal::TimedOut {
+                after_secs: config.policy.timeout_secs.unwrap_or_default(),
+            }),
+            String::new(),
+        );
+    }
+
     if touched.is_empty() {
         let refusal = if author.exit_code == Some(0) {
             Refusal::NoChange
@@ -175,6 +202,20 @@ pub fn run_task(
                 routing.reviewer.id(),
             );
             worktree::commit(wt.path(), &message, &task.author)?;
+            // The commit is on the run's branch now, and everything downstream
+            // reads it from there: the diff pane, `replay`, and promotion. The
+            // checkout is redundant, and a directory per run is how a busy
+            // repository fills a disk with copies of itself.
+            //
+            // Only on success. A refused run's worktree is the evidence someone
+            // needs to see what went wrong, and deleting it would take that
+            // away at exactly the moment it matters.
+            if let Err(e) = worktree::release(repo, &wt) {
+                log.append(&Event::Error {
+                    message: format!("the worktree could not be removed: {e}"),
+                    raw: None,
+                })?;
+            }
             finish(log, record, Outcome::Approved, Some(token), None, diff)
         }
         Err(refusal) => finish(log, record, Outcome::Rejected, None, Some(refusal), diff),

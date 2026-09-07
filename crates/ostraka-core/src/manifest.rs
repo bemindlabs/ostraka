@@ -49,6 +49,7 @@ impl LegacyManifest {
             return None;
         }
         Some(GateSpec {
+            timeout_secs: None,
             checks,
             review: Default::default(),
         })

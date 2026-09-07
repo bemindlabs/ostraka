@@ -219,7 +219,18 @@ fn config_for(kind: Kind) -> String {
         );
     }
     out.push_str(
-        "[gate.review]\n\
+        "# A check that hangs otherwise hangs every run waiting on the gate.\n\
+         timeout_secs = 1800\n\n\
+         [policy]\n\
+         # Wall-clock ceiling for one agent, after which it is stopped. An agent\n\
+         # waiting on a stalled connection, or on a prompt nobody will answer,\n\
+         # otherwise waits forever and so does the fleet.\n\
+         timeout_secs = 900\n\n\
+         # Paths an agent may modify. Enforced at the gate, not by the sandbox,\n\
+         # and read from git rather than from the agent's own account of itself.\n\
+         # allowed_paths = [\"src/\"]\n\
+         # enforce_paths = true\n\n\
+         [gate.review]\n\
          # Whoever wrote a change cannot be the one who approves it.\n\
          must_differ_from_author = true\n\n\
          [worktree]\n\
@@ -300,6 +311,24 @@ mod tests {
         let parsed = ostraka_core::config::Config::parse(config).expect("parses");
         parsed.validate().expect("a generated config is usable");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_generated_config_carries_both_ceilings() {
+        // The point of writing them is that somebody finds out they exist.
+        // `policy.timeout_secs` spent this project's whole life declared and
+        // unenforced; a default nobody can see is the next version of that.
+        for kind in [Kind::Rust, Kind::Node, Kind::Python, Kind::Unknown] {
+            let config = ostraka_core::config::Config::parse(&config_for(kind)).expect("parses");
+            assert!(
+                config.policy.timeout_secs.is_some(),
+                "{kind:?} has no agent ceiling"
+            );
+            assert!(
+                config.gate.timeout_secs.is_some(),
+                "{kind:?} has no gate ceiling"
+            );
+        }
     }
 
     #[test]

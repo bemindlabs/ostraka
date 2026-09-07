@@ -239,6 +239,7 @@ mod tests {
 
     fn token() -> MergeToken {
         let spec = ostraka_core::gate::GateSpec {
+            timeout_secs: None,
             checks: vec![ostraka_core::gate::Check {
                 name: "test".into(),
                 cmd: "true".into(),
@@ -277,6 +278,7 @@ mod tests {
         let mut r = record();
         r.checks[0].exit_code = Some(1);
         let spec = ostraka_core::gate::GateSpec {
+            timeout_secs: None,
             checks: vec![ostraka_core::gate::Check {
                 name: "test".into(),
                 cmd: "true".into(),
@@ -292,6 +294,7 @@ mod tests {
         // The record cannot show a check passing that did not exist when it was
         // written, and promoting as though it had would launder the addition.
         let spec = ostraka_core::gate::GateSpec {
+            timeout_secs: None,
             checks: vec![
                 ostraka_core::gate::Check {
                     name: "test".into(),
@@ -320,6 +323,7 @@ mod tests {
             verdict: Verdict::Approve,
         });
         let spec = ostraka_core::gate::GateSpec {
+            timeout_secs: None,
             checks: vec![ostraka_core::gate::Check {
                 name: "test".into(),
                 cmd: "true".into(),

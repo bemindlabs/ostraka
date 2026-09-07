@@ -16,9 +16,10 @@
 
 use ostraka_core::gate::{Approval, Check, CheckRecord, GateSpec};
 use ostraka_core::identity::ActorId;
+use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Proof that every required check ran and passed.
 ///
@@ -83,6 +84,16 @@ pub enum Refusal {
     },
     /// The change touched paths the project's policy does not allow.
     PolicyViolation { reason: String },
+    /// The operator stopped the run.
+    ///
+    /// Not a judgement on the change at all — nobody finished looking at it.
+    Interrupted,
+    /// The authoring agent outlived the ceiling and was killed.
+    ///
+    /// Not a rejection and not a crash: nothing was judged, and the change was
+    /// never finished. Reporting it as either would blame the work for the
+    /// clock.
+    TimedOut { after_secs: u64 },
     /// The authoring agent ran cleanly and changed nothing.
     ///
     /// A legitimate answer to a task — the work was already done, or the agent
@@ -105,8 +116,9 @@ pub fn run_checks(
     let mut records = Vec::with_capacity(spec.checks.len());
     let mut failed = Vec::new();
 
+    let ceiling = spec.timeout_secs.map(Duration::from_secs);
     for check in &spec.checks {
-        let record = run_one(check, worktree);
+        let record = run_one(check, worktree, ceiling);
         if check.required && !record.passed() {
             failed.push(check.name.clone());
         }
@@ -120,21 +132,20 @@ pub fn run_checks(
     }
 }
 
-fn run_one(check: &Check, worktree: &Path) -> CheckRecord {
+fn run_one(check: &Check, worktree: &Path, ceiling: Option<Duration>) -> CheckRecord {
     let started = Instant::now();
-    let output = Command::new("sh")
+
+    let spawned = Command::new("sh")
         .arg("-c")
         .arg(&check.cmd)
         .current_dir(worktree)
         .stdin(Stdio::null())
-        .output();
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
 
-    let (exit_code, stdout, stderr) = match output {
-        Ok(out) => (
-            out.status.code(),
-            String::from_utf8_lossy(&out.stdout).into_owned(),
-            String::from_utf8_lossy(&out.stderr).into_owned(),
-        ),
+    let (exit_code, stdout, stderr) = match spawned {
+        Ok(child) => wait_for(child, ceiling),
         // A check that could not be started has not passed. Recording the
         // failure is the point; swallowing it would be the bug.
         Err(e) => (None, String::new(), e.to_string()),
@@ -148,6 +159,77 @@ fn run_one(check: &Check, worktree: &Path) -> CheckRecord {
         stderr,
         duration_ms: started.elapsed().as_millis() as u64,
     }
+}
+
+/// Runs a check to completion, or kills it for outlasting the ceiling.
+///
+/// Both streams are read on their own threads: a check that fills a pipe buffer
+/// while this thread waits on the other one deadlocks, and a build that prints
+/// a lot is the ordinary case rather than the exotic one.
+fn wait_for(
+    mut child: std::process::Child,
+    ceiling: Option<Duration>,
+) -> (Option<i32>, String, String) {
+    fn reader(stream: Option<impl Read + Send + 'static>) -> std::sync::mpsc::Receiver<String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            if let Some(mut stream) = stream {
+                let _ = stream.read_to_string(&mut text);
+            }
+            let _ = tx.send(text);
+        });
+        rx
+    }
+
+    let out = reader(child.stdout.take());
+    let err = reader(child.stderr.take());
+
+    let killed = match ceiling {
+        None => false,
+        Some(ceiling) => {
+            let deadline = Instant::now() + ceiling;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break false,
+                    Err(_) => break false,
+                    Ok(None) => {}
+                }
+                if Instant::now() >= deadline || ostraka_adapter::interrupt::requested() {
+                    let _ = child.kill();
+                    break true;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    };
+
+    let status = child.wait().ok();
+    // After a kill, take what already arrived rather than waiting for the
+    // streams to close: killing a shell does not kill what it spawned, and a
+    // surviving grandchild holds these pipes open. Waiting for EOF here would
+    // wait on exactly the process the ceiling just stopped waiting for.
+    let collect = |rx: std::sync::mpsc::Receiver<String>| -> String {
+        if killed {
+            rx.recv_timeout(Duration::from_millis(200))
+                .unwrap_or_default()
+        } else {
+            rx.recv().unwrap_or_default()
+        }
+    };
+    let stdout = collect(out);
+    let mut stderr = collect(err);
+    if killed {
+        // Said in the record rather than left as a bare signal death, which
+        // reads like the check crashed on its own.
+        stderr.push_str(&format!(
+            "\nostraka: killed after {}s — the gate's timeout_secs\n",
+            ceiling.map(|c| c.as_secs()).unwrap_or_default()
+        ));
+    }
+    // A killed process reports no code, which is already how "did not pass" is
+    // spelled everywhere else here.
+    (status.and_then(|s| s.code()), stdout, stderr)
 }
 
 /// The gate itself: the only path to a [`MergeToken`].
@@ -239,6 +321,7 @@ mod tests {
 
     fn spec(cmds: &[(&str, &str, bool)]) -> GateSpec {
         GateSpec {
+            timeout_secs: None,
             checks: cmds
                 .iter()
                 .map(|(name, cmd, required)| Check {
@@ -249,6 +332,40 @@ mod tests {
                 .collect(),
             review: ReviewPolicy::default(),
         }
+    }
+
+    #[test]
+    fn a_check_that_hangs_is_killed_and_says_so() {
+        // A wedged test suite otherwise wedges the gate, and the gate is what
+        // every run waits on.
+        let mut spec = spec(&[("hang", "sleep 120", true)]);
+        spec.timeout_secs = Some(1);
+        let started = Instant::now();
+        let refusal = run_checks(&spec, Path::new(".")).expect_err("must refuse");
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the ceiling was not enforced"
+        );
+        match refusal {
+            Refusal::ChecksFailed { failed, records } => {
+                assert_eq!(failed, ["hang"]);
+                assert!(
+                    records[0].stderr.contains("killed after"),
+                    "a killed check read as a crash: {:?}",
+                    records[0].stderr
+                );
+            }
+            other => panic!("wrong refusal: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_check_that_finishes_inside_the_ceiling_is_untouched() {
+        let mut spec = spec(&[("quick", "echo fine", true)]);
+        spec.timeout_secs = Some(30);
+        let passed = run_checks(&spec, Path::new(".")).expect("passes");
+        assert!(passed.records()[0].passed());
+        assert!(!passed.records()[0].stderr.contains("killed"));
     }
 
     #[test]

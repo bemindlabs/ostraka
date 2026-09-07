@@ -27,6 +27,13 @@ fn default_required() -> bool {
 /// must say how it is verified rather than inherit a silent pass.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GateSpec {
+    /// Wall-clock ceiling for one check. `None` means no limit.
+    ///
+    /// Separate from the policy's ceiling on purpose: these are the project's
+    /// own commands run on the operator's behalf, and a test suite is allowed
+    /// to take longer than an agent is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub checks: Vec<Check>,
     #[serde(default)]

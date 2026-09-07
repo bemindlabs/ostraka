@@ -123,6 +123,7 @@ fn an_author_that_changed_nothing_is_reported_as_such_and_not_sent_to_a_reviewer
         Some("writer"),
         Some("reviewer"),
         &f.repo.join(".ostraka/vendor-home"),
+        None,
     )
     .unwrap();
 
@@ -145,6 +146,51 @@ fn an_author_that_changed_nothing_is_reported_as_such_and_not_sent_to_a_reviewer
 }
 
 #[test]
+fn a_run_the_operator_stopped_says_so_rather_than_blaming_the_agent() {
+    // Ctrl-C is not a verdict on the change. Reporting it as "the author could
+    // not run" would blame the work for a decision the operator made.
+    let f = fixture("interrupted");
+    let writer = agent(&f.repo, "writer", "echo working; sleep 120");
+    let reviewer = agent(&f.repo, "reviewer", &verdict("APPROVE"));
+    let routing = route::select(
+        &[writer, reviewer],
+        Some("writer"),
+        Some("reviewer"),
+        &f.repo.join(".ostraka/vendor-home"),
+        None,
+    )
+    .unwrap();
+
+    ostraka_adapter::interrupt::clear();
+    // Scoped so the signalling thread cannot outlive this test and set the
+    // flag underneath another one.
+    let report = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            ostraka_adapter::interrupt::request();
+        });
+        orchestrator::run_task(
+            &f.repo,
+            &config("true"),
+            &routing,
+            &task("do a thing", "archon"),
+            &ActorId::new("ephor"),
+            &f.repo.join(".ostraka"),
+        )
+        .expect("runs")
+    });
+    ostraka_adapter::interrupt::clear();
+
+    assert!(!report.approved());
+    assert!(report.record.approval.is_none(), "a reviewer was called");
+    assert!(
+        matches!(report.refusal, Some(Refusal::Interrupted)),
+        "wrong refusal: {:?}",
+        report.refusal
+    );
+}
+
+#[test]
 fn an_author_that_could_not_run_is_refused_in_its_own_words_without_calling_a_reviewer() {
     // A vendor out of quota and a vendor that considered the task and did
     // nothing leave the same empty worktree. Only one of them is about the
@@ -159,6 +205,7 @@ fn an_author_that_could_not_run_is_refused_in_its_own_words_without_calling_a_re
         Some("writer"),
         Some("reviewer"),
         &f.repo.join(".ostraka/vendor-home"),
+        None,
     )
     .unwrap();
 
@@ -200,6 +247,7 @@ fn an_approved_run_produces_a_token_a_commit_and_a_replayable_record() {
         Some("writer"),
         Some("reviewer"),
         &f.repo.join(".ostraka/vendor-home"),
+        None,
     )
     .unwrap();
 
@@ -252,6 +300,7 @@ fn a_failing_check_refuses_before_any_reviewer_is_consulted() {
         Some("writer"),
         Some("reviewer"),
         &f.repo.join(".ostraka/vendor-home"),
+        None,
     )
     .unwrap();
 
@@ -297,6 +346,7 @@ fn a_rejecting_reviewer_blocks_a_change_whose_checks_all_passed() {
         Some("writer"),
         Some("reviewer"),
         &f.repo.join(".ostraka/vendor-home"),
+        None,
     )
     .unwrap();
 
@@ -328,6 +378,7 @@ fn a_silent_reviewer_is_a_rejection_not_a_pass() {
         Some("writer"),
         Some("reviewer"),
         &f.repo.join(".ostraka/vendor-home"),
+        None,
     )
     .unwrap();
 
@@ -354,6 +405,7 @@ fn the_author_cannot_review_their_own_change_end_to_end() {
         Some("writer"),
         Some("reviewer"),
         &f.repo.join(".ostraka/vendor-home"),
+        None,
     )
     .unwrap();
 
