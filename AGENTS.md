@@ -93,6 +93,24 @@ a genuinely TypeScript-native surface, such as an editor extension.
 ranges; a date-shaped version fights all three. Crate versions and git tags are
 the same number.
 
+**The first release is `v3.0.0`.** Not `v0.1.0`. This is the third generation of
+one product — BWOC 1.x and 2.x preceded it, and `PHILOSOPHY.md` traces the line —
+so numbering it 3 keeps the version honest about what it continues rather than
+pretending the work started here.
+
+The cost is worth naming: to anyone meeting this on crates.io, a first published
+version of `3.0.0` implies two earlier majors they can neither find nor install,
+because the earlier generations were never public. Nobody is misled about
+stability by it — 3.0.0 promises a stable API under SemVer and that promise
+holds from the tag onward — but the number does claim a history that is not on
+the registry. Chosen deliberately, with that understood.
+
+Every version site says `3.0.0` already: the workspace, the four crate manifests
+that inherit it, and `npm/package.json`, which `check-hygiene.sh` keeps in step.
+`Formula/ostraka.rb` says `0.0.0` on purpose — it is a placeholder the release
+job rewrites once artifacts exist, and leaving it obviously wrong is how it
+stays obvious that nothing has been released.
+
 **Run records are not committed.** `.ostraka/runs/` is ignored. The audit trail
 that has to survive lives in the commit the run produces: it is authored by the
 agent that wrote it and carries the run id and both adapters as trailers. A run
