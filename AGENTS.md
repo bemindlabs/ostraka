@@ -24,6 +24,7 @@ crates/ostraka-core      domain types; no IO, no process spawning
 crates/ostraka-adapter   vendor boundary: profiles, launch, event normalization
 crates/ostraka-runtime   engine: worktrees, gate, review, run records
 crates/ostraka           the `ostraka` binary; the crate people install
+crates/ostraka-app       the `ostraka-app` desktop window; a second view
 adapters/                one TOML profile per vendor CLI — data, not code
 scripts/install.sh       the curl one-liner; downloads a released binary
 npm/                     the npm shim; downloads the same binary, ships none
@@ -166,6 +167,21 @@ zero, and one that rounds is marked as an estimate. A field may sum several
 counters: reading Claude Code's `input_tokens` alone, without the two cache
 counters beside it, reported 16 for a run that actually sent 159,460.
 
+**The desktop application is a second view, not a second product.** `ostraka-app`
+draws with `egui` in a window `eframe` opens: pure Rust, no web runtime, no
+second toolchain — which is the same condition that let `ratatui` in, and the
+reason Tauri is not the answer here. Everything it shows comes from
+`ostraka-runtime`, and its Promote button calls `promote::promote` exactly as
+the command line does, so a click cannot approve what the gate refuses. State
+lives in `state.rs` with no `egui` in it and is tested without a display; the
+drawing reads that state.
+
+It costs: a 9.7 MB binary against the command line's 2.0 MB, and the workspace
+gate now compiles a window stack. Both were measured before being accepted. The
+release builds it for four targets rather than five — a GUI cross-compiled to
+aarch64 Linux needs the arm64 window and GL libraries in a sysroot, which is not
+a flag, and the command line still ships there.
+
 **The TUI is a view, and it earns two dependencies.** `ratatui` and `crossterm`
 go in the `ostraka` crate only, with `default-features = false` — the defaults pull a
 second backend and a colour stack that cost 67 crates including wasm bindings,
@@ -194,6 +210,11 @@ the Homebrew formula and the npm shim all parse that name. Changing it breaks in
 so it changes only deliberately — and `check-hygiene.sh` now fails when the
 three files that construct or parse it stop agreeing, including when a platform
 is added to the release matrix and not to the two things that install it.
+
+**A fifth crate is a fifth name.** `ostraka-app` joins `ostraka`, `ostraka-core`,
+`ostraka-adapter` and `ostraka-runtime` on claim day. Verified free on the
+registry the day it was added, along with `ostraka-desktop`, which was the
+alternative.
 
 **Publish the workspace, not the crates.** `cargo publish -p ostraka-adapter`
 fails before the first release with `no matching package named ostraka-core

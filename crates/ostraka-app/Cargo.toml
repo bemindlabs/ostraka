@@ -1,0 +1,28 @@
+[package]
+name = "ostraka-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The Ostraka desktop application: browse and promote agent runs."
+
+[dependencies]
+ostraka-core = { workspace = true }
+ostraka-runtime = { workspace = true }
+serde_json = { workspace = true }
+# Pure Rust, and no web runtime: `glow` rather than `wgpu` keeps the dependency
+# set to what a window and a GL context need, and the default features pull a
+# second renderer and a web backend this will never use.
+eframe = { version = "0.36", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }
+egui = "0.36"
+
+[[bin]]
+name = "ostraka-app"
+path = "src/main.rs"

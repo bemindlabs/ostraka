@@ -123,6 +123,23 @@ None of these are live yet — the names are chosen and unclaimed. Every path
 above resolves the same artifact, `ostraka-<tag>-<target>.tar.gz`, and a check
 in CI refuses to let the three that parse that name disagree about it.
 
+## A window, if you prefer one
+
+```
+ostraka-app            # the same records, in a desktop window
+```
+
+The run list, the checks with their output, the events, the diff, and the token
+totals per backend — with the panes resizable and the text selectable, which is
+most of what a window buys over the terminal view. Promote is a button, and it
+goes through the same gate: it cannot approve what `ostraka promote` would
+refuse.
+
+`egui` in a window `eframe` opens — pure Rust, no web runtime, one binary per
+platform. macOS, Linux and Windows on x86-64, plus Apple silicon; the command
+line additionally ships for aarch64 Linux, where a GUI would need a cross
+sysroot of window libraries.
+
 ## How it is put together
 
 | Crate | Owns |

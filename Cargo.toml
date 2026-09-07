@@ -5,6 +5,7 @@ members = [
     "crates/ostraka-adapter",
     "crates/ostraka-runtime",
     "crates/ostraka",
+    "crates/ostraka-app",
 ]
 
 [workspace.package]

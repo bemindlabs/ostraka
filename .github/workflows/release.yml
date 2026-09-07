@@ -65,6 +65,67 @@ jobs:
             dist/*.tar.gz
             dist/*.tar.gz.sha256
 
+  # The desktop application, packaged beside the command line rather than
+  # inside it: they are separate binaries and someone may want only one.
+  #
+  # Four targets, not five. A GUI cross-compiled to aarch64 Linux needs the arm64
+  # window and GL libraries on the runner, which is a cross-sysroot rather than a
+  # flag; the command line still ships for that target. Written down rather than
+  # left to look like an oversight.
+  app:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: install the desktop build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
+            libxrandr-dev libxi-dev libgl1-mesa-dev
+
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p ostraka-app
+
+      - name: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          name="ostraka-app-${tag}-${{ matrix.target }}"
+          bin="target/${{ matrix.target }}/release/ostraka-app"
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          mkdir -p "dist/$name"
+          cp "$bin" "dist/$name/"
+          cp README.md LICENSE "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          if command -v sha256sum >/dev/null; then
+            (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          else
+            (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+
   # Homebrew needs a checksum per platform, and those exist only once the
   # artifacts are built — so the formula is pointed at a release after it, not
   # before the tag. `bump-formula.sh` refuses rather than guesses: a missing
@@ -77,7 +138,7 @@ jobs:
   # automated. The release is already published when this runs; the formula
   # lands when a person merges it.
   formula:
-    needs: build
+    needs: [build, app]
     runs-on: ubuntu-latest
     permissions:
       contents: write
