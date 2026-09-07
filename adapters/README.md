@@ -192,6 +192,16 @@ across every vendor.
   vendor's *configured* default — a relocated home falls back to the CLI's
   built-in one, which changes between releases. A run that has to be reproducible
   names its model.
+- **Codex cannot author where its own sandbox cannot start.** On a machine
+  without the user-namespace permissions bubblewrap needs — a container, a
+  locked-down CI runner — `--sandbox workspace-write` fails before any file
+  operation with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`,
+  and codex **exits zero having changed nothing**. A run therefore refuses with
+  "the author ran cleanly and changed nothing", which is the truthful reading of
+  exit zero and an empty worktree; codex's own explanation is in the run record.
+  Reproduced with the operator's untouched configuration, so it is not something
+  isolation does. Reviewing is unaffected — `--sandbox read-only` runs, and
+  codex is verified in that role under a relocated home.
 - **A relocated home accumulates.** Sessions, caches and a vendor's own memory
   store live there across runs. It is isolation from the operator, not a fresh
   sandbox each time.
