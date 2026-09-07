@@ -41,6 +41,16 @@ home_env = "CODEX_HOME"
 home_source = ".codex"
 credentials = ["auth.json"]
 
+# Whether this CLI can *write* is detectable: `codex sandbox -- true` exits 1
+# with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` on a host
+# where its sandbox cannot start, which is exactly the state in which it authors
+# nothing and exits zero anyway. It is not the default probe because a probe
+# gates the whole profile and this vendor still reviews perfectly well there —
+# trading a working reviewer for a wasted authoring call is the wrong way round.
+# Uncomment it if you route this profile as an author only.
+#
+# probe_args = ["sandbox", "--", "true"]
+
 [capabilities]
 headless = true
 streams_json = true
