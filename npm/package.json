@@ -1,0 +1,32 @@
+{
+  "name": "ostraka",
+  "version": "3.0.0",
+  "description": "Run agent fleets you can actually review.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bemindlabs/ostraka.git"
+  },
+  "homepage": "https://github.com/bemindlabs/ostraka",
+  "bin": {
+    "ostraka": "bin/ostraka.js"
+  },
+  "files": [
+    "bin/ostraka.js",
+    "scripts/install.js",
+    "README.md"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/install.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "agent",
+    "orchestration",
+    "code-review",
+    "cli"
+  ]
+}

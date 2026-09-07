@@ -105,6 +105,19 @@ the same code.
 Not done: merging itself — promotion names a branch and leaves the merge to a
 person — richer routing, and a live view of a run in progress.
 
+## Installing
+
+```
+curl -fsSL https://ostraka.sh/install | sh     # a binary, no toolchain
+brew install bemindlabs/ostraka/ostraka
+npm install -g ostraka                          # downloads the same binary
+cargo install ostraka-cli                       # builds from source
+```
+
+None of these are live yet — the names are chosen and unclaimed. Every path
+above resolves the same artifact, `ostraka-<tag>-<target>.tar.gz`, and a check
+in CI refuses to let the three that parse that name disagree about it.
+
 ## How it is put together
 
 | Crate | Owns |

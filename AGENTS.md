@@ -26,6 +26,7 @@ crates/ostraka-runtime   engine: worktrees, gate, review, run records
 crates/ostraka-cli       the `ostraka` binary
 adapters/                one TOML profile per vendor CLI — data, not code
 scripts/install.sh       the curl one-liner; downloads a released binary
+npm/                     the npm shim; downloads the same binary, ships none
 scripts/check-hygiene.sh the AGENTS.md rules a compiler cannot enforce
 Formula/ostraka.rb       Homebrew tap formula, bumped by the release workflow
 ```
@@ -171,8 +172,8 @@ rule 4 above and is not negotiable.
 
 ## Release artifacts are a contract
 
-`ostraka-<tag>-<target>.tar.gz` plus a `.sha256` sidecar. The install script and
-the Homebrew formula both parse that name. Changing it breaks installs silently,
+`ostraka-<tag>-<target>.tar.gz` plus a `.sha256` sidecar. The install script,
+the Homebrew formula and the npm shim all parse that name. Changing it breaks installs silently,
 so it changes only deliberately — and `check-hygiene.sh` now fails when the
 three files that construct or parse it stop agreeing, including when a platform
 is added to the release matrix and not to the two things that install it.
@@ -189,6 +190,16 @@ checksum per platform and those exist only once the artifacts do, so
 the default branch. It refuses rather than guesses: a missing sidecar or a
 surviving `0000…` placeholder fails the job instead of publishing a formula that
 installs nothing.
+
+**The npm package carries no binary.** `npm/` names a version, downloads the
+release artifact for the running platform, verifies the checksum published
+beside it, and hands off. The launcher is deliberately thin — anything it did
+would be the second runtime this project refuses. Publishing it is `npm publish`
+from `npm/`, by hand on claim day: there is no publish job, because one would
+need a token nobody has created and would fire on a tag before anyone had
+decided to release. `check-hygiene.sh` keeps its version equal to the crates'
+and its platform table equal to the release matrix; both drifts were confirmed
+to fail it.
 
 **`scripts/install.sh` takes `OSTRAKA_BASE_URL`.** Without it the script could
 only ever be tested by cutting a real release and watching what happened to

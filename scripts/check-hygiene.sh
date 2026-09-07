@@ -138,4 +138,24 @@ for target in $(grep -oE '^          - target: \S+' .github/workflows/release.ym
 done
 ok "every released platform is reachable from install.sh and the formula"
 
+# 6. The npm shim names a version and a platform table, and neither can be
+#    allowed to drift from the release. A package published at the wrong version
+#    downloads an artifact that does not exist; a platform the workflow builds
+#    and the table omits is an install that fails only for the people on it.
+npm_version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' npm/package.json | head -n1)
+crate_version=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -n1)
+if [ "$npm_version" != "$crate_version" ]; then
+    bad "npm/package.json is $npm_version and Cargo.toml is $crate_version"
+    note "the npm package downloads ostraka-v<its own version>-<target>.tar.gz"
+else
+    ok "the npm shim is the same version as the crates"
+fi
+
+for target in $(grep -oE '^          - target: \S+' .github/workflows/release.yml | awk '{print $3}'); do
+    if ! grep -qF "$target" npm/scripts/install.js; then
+        bad "release.yml builds $target and the npm shim cannot install it"
+    fi
+done
+ok "every released platform is reachable from the npm shim"
+
 exit $fail
