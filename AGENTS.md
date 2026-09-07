@@ -206,12 +206,15 @@ A real release bumps the version and never sees this. Every rehearsal does, and
 the dangerous direction is not the failure — it is a dry-run that *passes*
 against stale artifacts.
 
-**The formula is bumped after the build, not before the tag.** Homebrew needs a
+**The formula is bumped after the build, and lands by review.** Homebrew needs a
 checksum per platform and those exist only once the artifacts do, so
-`scripts/bump-formula.sh` runs in a second release job and commits the result to
-the default branch. It refuses rather than guesses: a missing sidecar or a
-surviving `0000…` placeholder fails the job instead of publishing a formula that
-installs nothing.
+`scripts/bump-formula.sh` runs in a second release job — which opens a pull
+request rather than pushing. A workflow committing to the default branch is an
+unreviewed merge, and principle 2 does not exempt a release for being automated.
+The tag is published either way; the formula lands when a person merges it, and
+`brew` serves the previous version until then. The script refuses rather than
+guesses: a missing sidecar or a surviving `0000…` placeholder fails the job
+instead of publishing a formula that installs nothing.
 
 **The npm package carries no binary.** `npm/` names a version, downloads the
 release artifact for the running platform, verifies the checksum published
