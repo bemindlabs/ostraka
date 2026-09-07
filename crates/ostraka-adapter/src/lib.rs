@@ -10,6 +10,7 @@
 //! is what makes a change written by one vendor reviewable by another.
 
 pub mod capability;
+pub mod environment;
 pub mod event;
 pub mod isolation;
 pub mod process;

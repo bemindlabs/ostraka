@@ -40,6 +40,12 @@ review_args = [
 ]
 
 model_args = ["--model", "{{model}}"]
+# Started with a built environment, not an inherited one, so anything this CLI
+# needs from the outside is named here. These are its authentication and its
+# endpoint: an OAuth login needs none of them and a key-based one needs the
+# first. Add your provider's variables if you run it against Bedrock or Vertex.
+inherit_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]
+
 event_format = "none"
 
 [capabilities]

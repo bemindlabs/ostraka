@@ -33,6 +33,18 @@ review_args = [
 ]
 
 model_args = ["--model", "{{model}}"]
+# This CLI keeps its login beside its configuration, and the configuration
+# directory is where XDG puts it — so an operator who moves XDG has moved the
+# login, and the name has to come through. The tokens are the documented way in
+# when there is no stored login at all.
+inherit_env = [
+    "COPILOT_GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "XDG_CONFIG_HOME",
+    "XDG_STATE_HOME",
+]
+
 event_format = "none"
 
 [capabilities]

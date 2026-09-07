@@ -56,6 +56,16 @@ pub struct Profile {
     pub probe_args: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Variables this vendor needs from the launching environment.
+    ///
+    /// A vendor process is started with a built environment, not an inherited
+    /// one — see [`crate::environment`]. Everything outside a generic
+    /// operating-system baseline is dropped, so a CLI that authenticates by
+    /// environment variable names that variable here. It belongs in the profile
+    /// rather than in the runtime for the same reason the command does: the
+    /// runtime cannot know which variable belongs to which vendor.
+    #[serde(default)]
+    pub inherit_env: Vec<String>,
     /// How this vendor is kept from reading the operator's own setup.
     ///
     /// Only for the part that no flag can reach: a CLI whose entire per-user

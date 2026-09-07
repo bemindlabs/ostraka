@@ -67,27 +67,35 @@ impl ProcessAdapter {
         &self.profile
     }
 
-    /// The environment this vendor runs with: the profile's own, plus whatever
-    /// isolation adds on top.
+    /// The environment this vendor runs with.
+    ///
+    /// Built rather than inherited: an operating-system baseline, the names the
+    /// profile asks for, the values it sets, and whatever isolation adds. See
+    /// [`crate::environment`] for why the launcher's environment does not come
+    /// along.
     ///
     /// Isolation wins by construction — the profile is refused at parse time if
     /// its `env` sets the same variable — because the isolation guarantee is
     /// structural and a stray `env` entry should not be able to undo it.
     fn environment(&self) -> Result<std::collections::BTreeMap<String, String>> {
-        let mut env = self.profile.env.clone();
-        let Some(isolation) = &self.profile.isolation else {
-            return Ok(env);
+        let isolation = match (&self.profile.isolation, &self.isolation_root) {
+            (None, _) => std::collections::BTreeMap::new(),
+            (Some(isolation), Some(root)) => isolation.provision(root, &self.profile.id)?,
+            (Some(_), None) => {
+                return Err(Error::Isolation {
+                    id: self.profile.id.clone(),
+                    message: "the profile asks for a relocated home directory and the caller \
+                              offered nowhere to put it; running anyway would read the \
+                              operator's setup"
+                        .to_string(),
+                });
+            }
         };
-        let Some(root) = &self.isolation_root else {
-            return Err(Error::Isolation {
-                id: self.profile.id.clone(),
-                message: "the profile asks for a relocated home directory and the caller offered \
-                          nowhere to put it; running anyway would read the operator's setup"
-                    .to_string(),
-            });
-        };
-        env.extend(isolation.provision(root, &self.profile.id)?);
-        Ok(env)
+        Ok(crate::environment::build(
+            &self.profile.inherit_env,
+            &self.profile.env,
+            isolation,
+        ))
     }
 }
 
@@ -97,6 +105,11 @@ impl VendorAdapter for ProcessAdapter {
     }
 
     fn probe(&self) -> Availability {
+        // Deliberately inherits the environment, unlike `launch`. A probe asks
+        // a question rather than running a task, and building an environment
+        // here would mean provisioning isolation — creating directories — as a
+        // side effect of merely listing what is installed.
+        //
         // `--version` is the one flag it is safe to assume by default: it must
         // not modify anything, and a CLI that refuses it is one we cannot reason
         // about. A profile may name a stronger question — a CLI can be on PATH
@@ -144,6 +157,9 @@ impl VendorAdapter for ProcessAdapter {
 
         let mut child = Command::new(&self.profile.command)
             .args(&args)
+            // Cleared first. `envs` alone adds to what this process inherited,
+            // which is the whole launcher environment.
+            .env_clear()
             .envs(self.environment()?)
             .current_dir(worktree)
             .stdin(Stdio::null())

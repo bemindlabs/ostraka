@@ -23,6 +23,10 @@ review_args = [
 ]
 
 model_args = ["--model", "{{model}}"]
+# Authentication that does not live in the relocated home. A subscription login
+# comes from the carried auth.json; a key-based one comes from here.
+inherit_env = ["OPENAI_API_KEY", "OPENAI_BASE_URL"]
+
 event_format = "none"
 
 # This CLI has no flag that ignores the operator's setup. Its global

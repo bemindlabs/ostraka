@@ -136,6 +136,18 @@ sits beside the repository and the trailers sit inside history: forging one is
 not enough. And it stops at a branch. Merging, pushing and opening a pull
 request are acts a person takes.
 
+**A vendor's environment is built, not inherited.** `env_clear`, then an
+operating-system baseline, then the names a profile lists in `inherit_env`, then
+its `[env]`, then isolation — later winning, isolation last because it is the
+structural guarantee. Inheriting was not a small leak: an adapter profile that
+ran `env` showed an authoring agent holding its launcher's session id, IPC
+socket and messaging token, which is a channel out of a process whose whole job
+is to write to a worktree. No vendor variable appears in `ostraka-adapter`; a
+CLI that authenticates by environment variable names that variable in its own
+profile, which is rule 1 applied to the environment. Gate checks are *not*
+scrubbed: they are the project's commands run on the operator's behalf and need
+the operator's toolchain.
+
 **The TUI is a view, and it earns two dependencies.** `ratatui` and `crossterm`
 go in `ostraka-cli` only, with `default-features = false` — the defaults pull a
 second backend and a colour stack that cost 67 crates including wasm bindings,

@@ -33,6 +33,13 @@ args = ["--print", "{{prompt}}"]
 # prompt and needs no tools at all.
 review_args = ["--print", "--read-only", "{{prompt}}"]
 
+# Variables this vendor needs from the launching environment. A vendor process
+# is started with a built environment, not an inherited one: an operating-system
+# baseline, these names, whatever `[env]` sets, and whatever isolation sets.
+# Anything else is dropped. A CLI that authenticates by environment variable
+# names that variable here, because the runtime cannot know which one is whose.
+inherit_env = ["EXAMPLE_API_KEY"]
+
 # Appended only when a run names a model, so an optional flag never becomes
 # `--model ""` — which is a different request from "use your default".
 model_args = ["--model", "{{model}}"]
@@ -181,12 +188,17 @@ across every vendor.
   repository content and arguably reproducible, but there is no way today to
   pass it through, and an MCP server reaches outside the worktree. No servers is
   the safe end of that trade.
-- **The process environment is still inherited wholesale.** Isolation covers
-  configuration directories and instruction files, not the environment. An
-  adapter profile that runs `env` showed an authoring agent inheriting its
-  launcher's `PATH`, telemetry settings, and — when the launcher was itself a
-  coding CLI — that session's own id, socket and messaging token. None of it is
-  read by the vendors here, and none of it is isolated either.
+- **The environment is built, not inherited — and the baseline is a judgement.**
+  A vendor gets `HOME`, `PATH`, `SHELL`, `TMPDIR`, the user and terminal names,
+  the locale and timezone, the proxy variables, and the handful Windows cannot
+  start a process without. Everything else is dropped unless a profile names it
+  in `inherit_env`. That baseline is generic on purpose and it is still a
+  choice: proxy settings differ between machines, so a run reaches the network
+  by a path that is not reproducible even though its behaviour is.
+- **The gate's checks are not scrubbed.** `cargo`, `pytest` and the rest are the
+  *project's* commands run on the operator's behalf, not an agent's, and they
+  need the toolchain environment the operator has. Only adapter launches get a
+  built environment.
 - **The default model is operator state.** Two machines with different vendor
   configuration run the same task on different models. Isolation removes the
   vendor's *configured* default — a relocated home falls back to the CLI's
