@@ -23,7 +23,7 @@ docs, commit messages, CLI output, log lines and error strings.
 crates/ostraka-core      domain types; no IO, no process spawning
 crates/ostraka-adapter   vendor boundary: profiles, launch, event normalization
 crates/ostraka-runtime   engine: worktrees, gate, review, run records
-crates/ostraka-cli       the `ostraka` binary
+crates/ostraka           the `ostraka` binary; the crate people install
 adapters/                one TOML profile per vendor CLI — data, not code
 scripts/install.sh       the curl one-liner; downloads a released binary
 npm/                     the npm shim; downloads the same binary, ships none
@@ -137,6 +137,12 @@ sits beside the repository and the trailers sit inside history: forging one is
 not enough. And it stops at a branch. Merging, pushing and opening a pull
 request are acts a person takes.
 
+**The binary crate is `ostraka`.** It was `ostraka-cli`, which would have made
+the install command `cargo install ostraka-cli` and left the bare name unclaimed
+and squattable — a worse outcome than the tidier directory. The package is the
+one people type. `ostraka-cli` should still be claimed on claim day, pointing
+nowhere, for the same reason.
+
 **A vendor's environment is built, not inherited.** `env_clear`, then an
 operating-system baseline, then the names a profile lists in `inherit_env`, then
 its `[env]`, then isolation — later winning, isolation last because it is the
@@ -150,7 +156,7 @@ scrubbed: they are the project's commands run on the operator's behalf and need
 the operator's toolchain.
 
 **The TUI is a view, and it earns two dependencies.** `ratatui` and `crossterm`
-go in `ostraka-cli` only, with `default-features = false` — the defaults pull a
+go in the `ostraka` crate only, with `default-features = false` — the defaults pull a
 second backend and a colour stack that cost 67 crates including wasm bindings,
 for nothing. Both are pure Rust with no runtime of their own, which is the
 condition any dependency here has to meet: the distribution advantage is a

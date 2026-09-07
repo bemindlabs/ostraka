@@ -1,5 +1,5 @@
 [package]
-name = "ostraka-cli"
+name = "ostraka"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,9 +8,6 @@ repository.workspace = true
 authors.workspace = true
 description = "Run agent fleets you can actually review."
 
-[[bin]]
-name = "ostraka"
-path = "src/main.rs"
 
 [dependencies]
 ostraka-core = { workspace = true }

@@ -111,7 +111,7 @@ person — richer routing, and a live view of a run in progress.
 curl -fsSL https://ostraka.sh/install | sh     # a binary, no toolchain
 brew install bemindlabs/ostraka/ostraka
 npm install -g ostraka                          # downloads the same binary
-cargo install ostraka-cli                       # builds from source
+cargo install ostraka                           # builds from source
 ```
 
 None of these are live yet — the names are chosen and unclaimed. Every path
@@ -125,7 +125,7 @@ in CI refuses to let the three that parse that name disagree about it.
 | `ostraka-core` | Domain types: tasks, gate specs, verdicts, run records, identity. No IO, no process spawning. |
 | `ostraka-adapter` | The vendor boundary: profiles, process launch, event normalization. |
 | `ostraka-runtime` | The engine: worktrees, gate execution, independent review, run logs. |
-| `ostraka-cli` | The `ostraka` binary. |
+| `ostraka` | The `ostraka` binary — the crate you install. |
 
 Four crates, not one per agent role. The roles are a protocol, not a deployment
 unit, and splitting them would only create a dependency cycle.

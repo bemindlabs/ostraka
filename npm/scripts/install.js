@@ -40,7 +40,7 @@ const target = TARGETS[key];
 if (!target) {
   die(
     `no released binary for ${key}. Supported: ${Object.keys(TARGETS).join(", ")}. ` +
-      `Build from source instead: cargo install --git https://github.com/bemindlabs/ostraka ostraka-cli`,
+      `Build from source instead: cargo install --git https://github.com/bemindlabs/ostraka ostraka`,
   );
 }
 
