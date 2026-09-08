@@ -2,6 +2,7 @@
 
 mod adapters;
 mod check;
+mod discover;
 mod init;
 mod init_cmd;
 mod promote;
