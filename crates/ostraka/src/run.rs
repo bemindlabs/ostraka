@@ -7,6 +7,10 @@ use ostraka_runtime::orchestrator::RunReport;
 use ostraka_runtime::progress::Watcher;
 use ostraka_runtime::{orchestrator, route};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Which run of this process the next one is.
+static NEXT_RUN: AtomicUsize = AtomicUsize::new(1);
 
 /// The identity a run is attributed to when nobody names one.
 pub const AUTHOR: &str = "author";
@@ -55,6 +59,13 @@ type Outcome = Result<bool, Box<dyn std::error::Error>>;
 ///
 /// `watcher` is handed to the orchestrator and can only be told things. A
 /// caller with a screen passes one; the command passes `None`.
+///
+/// The interrupt flag belongs to the caller. It is global because a signal is
+/// global, so a caller that starts more than one run in a process clears it
+/// between them — and clears it *before* starting the next, not from inside
+/// it: a stop asked for in the same breath as a run would otherwise be wiped
+/// by the run clearing the flag a moment later, and the run nobody wanted
+/// would carry on.
 pub fn execute(
     project: &Path,
     args: &Args,
@@ -63,12 +74,6 @@ pub fn execute(
     let config = project::load_config(project)?;
     config.validate()?;
     let profiles = project::load_profiles(project)?;
-
-    // A new run starts un-interrupted. The flag is global because a signal is
-    // global, and a process that outlives one run — the browser does — would
-    // otherwise carry a stop request from the run before into the run after,
-    // and refuse it before it had started.
-    ostraka_adapter::interrupt::clear();
 
     // Vendors that can only be isolated by relocating their home directory get
     // one here, beside the run records and ignored by git for the same reason.
@@ -86,12 +91,17 @@ pub fn execute(
     )?;
 
     let task = TaskSpec {
-        // The clock, not the process id: one process now starts more than one
-        // run, and two runs sharing a task id would collide in the records
-        // directory and in every branch name derived from it.
+        // The process, and which run of it. Two runs sharing a task id collide
+        // in the records directory and in every branch name derived from it,
+        // and both halves are needed to rule that out: the process id alone
+        // repeats now that a browser starts several runs without restarting,
+        // and the clock alone repeats because it counts in seconds and two
+        // runs fit comfortably inside one. Caught by a flow test that started
+        // two runs and found one record.
         id: format!(
-            "t{}",
-            ostraka_core::clock::now_rfc3339().replace([':', '-'], "")
+            "t{}-{}",
+            std::process::id(),
+            NEXT_RUN.fetch_add(1, Ordering::Relaxed)
         ),
         prompt: args.prompt.clone(),
         adapter: routing_author_id(&routing),

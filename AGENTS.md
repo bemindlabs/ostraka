@@ -277,10 +277,26 @@ where that is decided, and it is on the far side of `execute` either way.
 
 Quitting waits. A browser that exited while a vendor was still writing into a
 worktree would undo the thing Ctrl-C was taught to prevent, so `q` during a run
-asks it to stop and stays up until it has. Verified end to end against shell
-script vendors: a run driven from the browser streams, a stopped one records
-`Interrupted`, and quitting mid-run leaves neither an orphan process nor a run
-without a record.
+asks it to stop and stays up until it has.
+
+**The flows are tested as journeys, not as frames.** `tui::flows` drives the
+real key handler and the real drawing from the same `open` the command uses,
+and the run flows drive the real orchestrator with shell scripts for vendors —
+the same point `milestone_one` makes one crate down. A task is typed, a run
+happens, and the assertion is what ends up on the screen and in
+`.ostraka/runs/`. They caught two things no single-purpose test would have: a
+second run started in the same second as the first overwrote its record,
+because the task id had been moved to a clock that counts in seconds; and a
+stop asked for in the same breath as a run was wiped by the run clearing the
+interrupt flag behind it, which is why the flag is now cleared before the
+thread starts rather than inside it.
+
+What they stop at is the terminal. A pty is not something `std` can open and
+`script(1)` takes different arguments on every platform this releases for, so
+the boundary is `handle` and `draw`. The one thing on the far side — that a
+browser with no terminal says so rather than panicking inside a dependency — is
+asserted directly, because a test's stdout is not a terminal and that is the
+real path.
 
 **One box, sixteen colours, and one list of commands.** The screen is separated
 by space and a one-column gutter rather than by borders — a browser that boxes

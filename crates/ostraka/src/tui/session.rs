@@ -48,6 +48,11 @@ impl Session {
     /// Starts a run on a thread and returns something to watch it with.
     pub fn start(project: PathBuf, args: run::Args) -> Self {
         let prompt = args.prompt.clone();
+        // Before the thread, not inside it. A stop asked for in the same
+        // breath as the run — n, a task, enter, s — would otherwise be wiped
+        // by the worker clearing the flag a moment later, and the run nobody
+        // wanted would carry on.
+        ostraka_adapter::interrupt::clear();
         let (steps_out, steps_in) = mpsc::channel();
         let (done_out, done_in) = mpsc::channel();
 

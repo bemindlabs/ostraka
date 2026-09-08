@@ -11,6 +11,8 @@
 //! way and be broken another.
 
 mod command;
+#[cfg(test)]
+mod flows;
 mod session;
 mod theme;
 mod view;
@@ -49,16 +51,7 @@ pub fn run(project_dir: &Path) -> Outcome {
     }
 
     let records_root = project_dir.join(".ostraka");
-    let mut app = App::new(project_dir.to_path_buf(), index::list(&records_root)?);
-    // Opened somewhere that is not a project yet: say what is missing and offer
-    // to write it, rather than showing an empty list that looks like a bug.
-    //
-    // `runnable`, not `complete`: the browser asks whether this directory can
-    // be run, and `init` asks whether it has anything left to write. Those are
-    // different questions, and asking the second one put "not an Ostraka
-    // project yet" across a screen with three recorded runs behind it.
-    app.setup = Some(init::plan(project_dir)).filter(|plan| !plan.runnable());
-    load_detail(&mut app, &records_root);
+    let mut app = open(project_dir, &records_root)?;
 
     // Installs a panic hook that restores the terminal first. Without it a
     // panic leaves the operator staring at a shell with no echo and no prompt.
@@ -68,6 +61,24 @@ pub fn run(project_dir: &Path) -> Outcome {
     result?;
 
     Ok(true)
+}
+
+/// The browser as it is when it opens.
+///
+/// Separated from `run` so the flow tests start where an operator starts,
+/// rather than from an `App` assembled by hand that could drift from this one.
+fn open(project_dir: &Path, records_root: &Path) -> Result<App, Box<dyn std::error::Error>> {
+    let mut app = App::new(project_dir.to_path_buf(), index::list(records_root)?);
+    // Opened somewhere that is not a project yet: say what is missing and offer
+    // to write it, rather than showing an empty list that looks like a bug.
+    //
+    // `runnable`, not `complete`: the browser asks whether this directory can
+    // be run, and `init` asks whether it has anything left to write. Those are
+    // different questions, and asking the second one put "not an Ostraka
+    // project yet" across a screen with three recorded runs behind it.
+    app.setup = Some(init::plan(project_dir)).filter(|plan| !plan.runnable());
+    load_detail(&mut app, records_root);
+    Ok(app)
 }
 
 fn event_loop(
