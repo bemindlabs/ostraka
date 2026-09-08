@@ -553,6 +553,108 @@ fn a_refused_run_is_not_the_ground_the_next_one_stands_on() {
     d.shows("FAIL");
 }
 
+#[test]
+fn the_command_line_continues_a_run_the_way_the_browser_does() {
+    // Two paths, one pipeline — the claim `run::execute` makes in its own doc
+    // comment. The browser threads by advancing `base_ref` on approval; `--from`
+    // is that rule with a run id in front of it, so the piece of work that took
+    // a browser can be done by a script or by CI.
+    //
+    // Before it, continuing meant passing `--base-ref ostraka/<id>`: a naming
+    // convention that appears nowhere but the source.
+    let _guard = exclusive();
+    let scratch = project("cli-thread", 0);
+    let workspace = Workspace::at(scratch.path());
+
+    let first = crate::run::execute(
+        &workspace,
+        &crate::run::Args::for_task("write a file".into()),
+        None,
+    )
+    .expect("the first run completes");
+    assert!(first.approved(), "the first run was not approved");
+
+    let mut args = crate::run::Args::for_task("write it again".into());
+    args.from = Some(first.record.run_id.clone());
+    let second = crate::run::execute(&workspace, &args, None).expect("the second run completes");
+    assert!(second.approved(), "the second run was not approved");
+
+    // The proof is in git, the same proof the browser's thread test takes: the
+    // second run's branch has the first run's commit behind it.
+    let out = Command::new("git")
+        .args([
+            "log",
+            "--format=%H",
+            &format!("ostraka/{}", second.record.run_id),
+        ])
+        .current_dir(repo_of(&scratch))
+        .output()
+        .expect("git log");
+    let commits = String::from_utf8_lossy(&out.stdout).lines().count();
+    assert_eq!(commits, 3, "the chain did not build on the first run");
+}
+
+#[test]
+fn the_command_line_will_not_continue_a_refused_run() {
+    // The browser's rule, held to on the other path. Building on a change the
+    // gate would not take is a way of taking it, and the command line must not
+    // be the way around a rule the browser enforces.
+    //
+    // The failure this prevents is quiet rather than loud: a refused run *has*
+    // a branch — made before the agent started — whose head is the commit it
+    // branched from, so `--base-ref ostraka/<refused>` succeeds and starts
+    // somewhere else entirely.
+    let _guard = exclusive();
+    let scratch = project("cli-refused", 0);
+    std::fs::write(
+        scratch.path().join(".ostraka/ostraka.toml"),
+        "[gate]\nchecks = [{ name = \"check\", cmd = \"false\", required = true }]\n\n\
+         [gate.review]\nmust_differ_from_author = true\n",
+    )
+    .expect("config");
+    let workspace = Workspace::at(scratch.path());
+
+    let refused = crate::run::execute(
+        &workspace,
+        &crate::run::Args::for_task("write a file".into()),
+        None,
+    )
+    .expect("the run completes");
+    assert!(!refused.approved(), "the gate let it through");
+
+    let mut args = crate::run::Args::for_task("carry on".into());
+    args.from = Some(refused.record.run_id.clone());
+    // `RunReport` is not `Debug`, so the refusal is taken by hand rather than
+    // through `expect_err`.
+    let refusal = match crate::run::execute(&workspace, &args, None) {
+        Ok(_) => panic!("a refused run was continued"),
+        Err(e) => e,
+    };
+    let said = refusal.to_string();
+    assert!(
+        said.contains("not a base to build on"),
+        "the reason was not given: {said}"
+    );
+}
+
+#[test]
+fn continuing_a_run_nobody_recorded_says_so() {
+    let _guard = exclusive();
+    let scratch = project("cli-nosuch", 0);
+    let workspace = Workspace::at(scratch.path());
+    let mut args = crate::run::Args::for_task("carry on".into());
+    args.from = Some("t-never-happened".into());
+    let refusal = match crate::run::execute(&workspace, &args, None) {
+        Ok(_) => panic!("a run nobody recorded was continued"),
+        Err(e) => e,
+    };
+    assert!(
+        refusal.to_string().contains("no run"),
+        "{}",
+        refusal.to_string()
+    );
+}
+
 /// Rewrites the writer in a fixture into one whose context fills halfway
 /// through, which is what a token limit actually looks like from here: part of
 /// a change on disk, a non-zero exit, and the reason on stderr.

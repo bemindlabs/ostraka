@@ -81,6 +81,11 @@ enum Commands {
         #[arg(long, default_value = run::BASE_REF)]
         base_ref: String,
 
+        /// Continue a finished run: branch from what it left, not from HEAD.
+        /// Takes a run id. Only an approved run can be continued.
+        #[arg(long, conflicts_with = "base_ref", value_name = "RUN_ID")]
+        from: Option<String>,
+
         /// Model hint passed through to the adapter.
         #[arg(long)]
         model: Option<String>,
@@ -139,6 +144,7 @@ fn main() -> ExitCode {
             adapter,
             review_adapter,
             base_ref,
+            from,
             model,
         } => run::run(
             &workspace,
@@ -150,6 +156,7 @@ fn main() -> ExitCode {
                 adapter: adapter.clone(),
                 review_adapter: review_adapter.clone(),
                 base_ref: base_ref.clone(),
+                from: from.clone(),
                 model: model.clone(),
             },
             cli.json,

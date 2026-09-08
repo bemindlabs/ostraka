@@ -3,9 +3,11 @@
 use crate::workspace::Workspace;
 use ostraka_core::identity::ActorId;
 use ostraka_core::task::TaskSpec;
+use ostraka_runtime::index::{self, RunSummary};
 use ostraka_runtime::orchestrator::{Places, RunReport};
 use ostraka_runtime::progress::Watcher;
 use ostraka_runtime::{orchestrator, route};
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Which run of this process the next one is.
@@ -28,6 +30,9 @@ pub struct Args {
     pub adapter: Option<String>,
     pub review_adapter: Option<String>,
     pub base_ref: String,
+    /// A finished run to continue, by run id. Resolves to the branch that run's
+    /// commit landed on, and to the repository it was made in.
+    pub from: Option<String>,
     pub model: Option<String>,
 }
 
@@ -46,8 +51,63 @@ impl Args {
             adapter: None,
             review_adapter: None,
             base_ref: BASE_REF.to_string(),
+            from: None,
             model: None,
         }
+    }
+}
+
+/// The run `--from` names, once it is known to be one worth continuing.
+///
+/// Two refusals, and both are the browser's rule written down where the command
+/// line can be held to it. A thread advances only where a run was approved: a
+/// change the gate would not take is not a base to build on, and continuing
+/// from one would be a way of taking it after all.
+///
+/// The second refusal is the one that would not announce itself. A refused run
+/// *has* a branch — created before the agent started — whose head is the commit
+/// it branched from. `--base-ref ostraka/<refused>` therefore succeeds and
+/// silently starts from somewhere else's work, which is the failure this exists
+/// to make impossible to reach by accident.
+fn finished_run(
+    workspace: &Workspace,
+    run_id: &str,
+) -> Result<RunSummary, Box<dyn std::error::Error>> {
+    let runs = index::list(&workspace.records())?;
+    let Some(run) = runs.into_iter().find(|r| r.run_id == run_id) else {
+        return Err(format!("no run {run_id:?} is recorded in this workspace").into());
+    };
+    if !run.approved() {
+        let said = match &run.outcome {
+            Some(outcome) => format!("{outcome:?}").to_lowercase(),
+            None => "never finished".to_string(),
+        };
+        return Err(format!(
+            "run {run_id} was {said}, so there is nothing to continue from — \
+             a change the gate would not take is not a base to build on"
+        )
+        .into());
+    }
+    Ok(run)
+}
+
+/// The ref a continued run branches from.
+///
+/// Separate from [`finished_run`] because it needs the repository, and the
+/// repository is what that function is consulted to find.
+///
+/// It is also the second of two independent guards, which was measured rather
+/// than assumed: with the approval check removed, a refused run still cannot be
+/// continued, because it never made a commit for a branch head to carry. The
+/// message here can say "approved" because nothing reaches it that was not.
+fn continue_from(repo: &Path, run_id: &str) -> Result<String, Box<dyn std::error::Error>> {
+    match index::commit_branch(repo, run_id)? {
+        Some(branch) => Ok(branch),
+        None => Err(format!(
+            "run {run_id} was approved but its commit is not on a branch here; \
+             the branch it was on has been deleted"
+        )
+        .into()),
     }
 }
 
@@ -74,7 +134,30 @@ pub fn execute(
     args: &Args,
     watcher: Option<Box<dyn Watcher>>,
 ) -> Result<RunReport, Box<dyn std::error::Error>> {
-    let repo = workspace.repository(args.repository.as_deref())?;
+    // `--from` names a run, and a run is not a ref. The branch a run's commit
+    // lands on is `ostraka/<id>` — internal knowledge that was reachable only
+    // by reading the source, so continuing a piece of work meant knowing a
+    // naming convention nobody had been told.
+    let continued = args.from.as_deref().map(|id| finished_run(workspace, id));
+    let continued = continued.transpose()?;
+
+    // A run belongs to a repository. Continuing it in a different one would
+    // branch from a ref that repository has never heard of.
+    let named = continued
+        .as_ref()
+        .map(|r| r.repository.clone())
+        .or_else(|| args.repository.clone());
+    if let (Some(run), Some(asked)) = (continued.as_ref(), args.repository.as_deref()) {
+        if run.repository != asked {
+            return Err(format!(
+                "run {} was made in {:?}, not in {asked:?}",
+                run.run_id, run.repository
+            )
+            .into());
+        }
+    }
+
+    let repo = workspace.repository(named.as_deref())?;
     let config = workspace.config_for(&repo)?;
     config.validate()?;
     let profiles = workspace.profiles()?;
@@ -109,7 +192,10 @@ pub fn execute(
         prompt: args.prompt.clone(),
         adapter: routing_author_id(&routing),
         author: ActorId::new(&args.author),
-        base_ref: args.base_ref.clone(),
+        base_ref: match continued.as_ref() {
+            Some(run) => continue_from(&repo.path, &run.run_id)?,
+            None => args.base_ref.clone(),
+        },
         model: args.model.clone(),
     };
 
