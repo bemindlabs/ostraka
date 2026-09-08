@@ -83,6 +83,7 @@ ostraka init       # write the workspace layout. Overwrites nothing
 ostraka check      # validate the workspace, its profiles and its repositories
 ostraka adapters   # list adapter profiles and whether each can run here
 ostraka run "..."  # isolate, execute, gate, review, record
+ostraka run "..." --from ID   # continue an approved run instead of HEAD
 ostraka replay ID  # read a finished run back
 ostraka runs       # every run this workspace has recorded
 ostraka tui        # write tasks, watch them run, read them back
