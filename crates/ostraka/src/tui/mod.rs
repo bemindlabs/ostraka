@@ -108,6 +108,10 @@ fn open(project_dir: &Path, records_root: &Path) -> Result<App, Box<dyn std::err
     // different questions, and asking the second one put "not an Ostraka
     // project yet" across a screen with three recorded runs behind it.
     app.setup = Some(init::plan(project_dir)).filter(|plan| !plan.runnable());
+    // Asked once, here, because it is the same answer all session and because
+    // the screen that offers to set this directory up is the one that has to
+    // say what setting it up will not fix.
+    app.not_a_repository = !ostraka_runtime::worktree::is_repository(project_dir);
     load_detail(&mut app, records_root);
     Ok(app)
 }
@@ -452,6 +456,16 @@ fn dialog_key(app: &mut App, key: KeyEvent, records_root: &Path) {
             _ => {}
         },
         Some(Dialog::Agents) => agents_key(app, key.code),
+        Some(Dialog::Leaving) => {
+            let leaving = matches!(
+                key.code,
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter
+            );
+            app.close();
+            if leaving {
+                depart(app);
+            }
+        }
         // The keys dialog has nothing to type into, so any key closes it. A
         // reference someone has to work out how to dismiss is a poor reference.
         Some(Dialog::Keys) | None => app.close(),
@@ -505,8 +519,23 @@ fn start_run(app: &mut App) {
     app.thread.start(app.project.clone(), prompt);
 }
 
-/// Leaving, which waits for a run rather than abandoning one.
+/// Leaving, asked rather than assumed.
+///
+/// Quitting is not free: it can discard a task that was being written, and it
+/// can stop a run that is going. One key should not do both silently.
 fn leave(app: &mut App) {
+    // Already on the way out. Asking twice would be asking about the answer.
+    if app.leaving {
+        return;
+    }
+    app.open(Dialog::Leaving);
+}
+
+/// Going, now that it has been asked for twice.
+///
+/// Waits for a run rather than abandoning one: leaving with a vendor still
+/// writing into a worktree is the thing Ctrl-C was taught to prevent.
+fn depart(app: &mut App) {
     if app.thread.running() {
         app.thread.stop();
         app.leaving = true;
@@ -664,7 +693,32 @@ mod tests {
         handle(&mut a, control('x'), Path::new("/p/.ostraka"));
         handle(&mut a, press(KeyCode::Char('q')), Path::new("/p/.ostraka"));
         assert!(!a.leader, "the leader outlived the key that completed it");
+        assert_eq!(a.dialog, Some(Dialog::Leaving));
+        handle(&mut a, press(KeyCode::Char('y')), Path::new("/p/.ostraka"));
         assert!(a.quit);
+    }
+
+    #[test]
+    fn leaving_is_asked_before_it_happens() {
+        // Quitting is not free: it discards a task that was being written and
+        // it can stop a run. One key should not do both silently.
+        let mut a = app();
+        typed(&mut a, "a task in progress");
+        handle(&mut a, control('c'), Path::new("/p/.ostraka"));
+        assert_eq!(a.dialog, Some(Dialog::Leaving));
+        assert!(!a.quit);
+
+        handle(&mut a, press(KeyCode::Char('n')), Path::new("/p/.ostraka"));
+        assert_eq!(a.dialog, None, "answering no left the question open");
+        assert!(!a.quit, "answering no left anyway");
+        assert_eq!(
+            a.prompt, "a task in progress",
+            "the task was lost by asking"
+        );
+
+        handle(&mut a, control('c'), Path::new("/p/.ostraka"));
+        handle(&mut a, press(KeyCode::Esc), Path::new("/p/.ostraka"));
+        assert!(!a.quit, "escape left instead of staying");
     }
 
     #[test]
@@ -702,6 +756,12 @@ mod tests {
         assert_eq!(a.picked(), Some(Command::Quit));
 
         handle(&mut a, press(KeyCode::Enter), Path::new("/p/.ostraka"));
+        assert_eq!(
+            a.dialog,
+            Some(Dialog::Leaving),
+            "the palette left without asking"
+        );
+        handle(&mut a, press(KeyCode::Char('y')), Path::new("/p/.ostraka"));
         assert!(a.quit);
         assert_eq!(a.dialog, None);
     }
@@ -777,6 +837,7 @@ mod tests {
         let mut a = app();
         running(&mut a);
         handle(&mut a, control('c'), Path::new("/p/.ostraka"));
+        handle(&mut a, press(KeyCode::Char('y')), Path::new("/p/.ostraka"));
 
         assert!(!a.quit, "the browser left while a run was going");
         assert!(a.leaving);

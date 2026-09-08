@@ -26,6 +26,22 @@ impl Worktree {
 }
 
 /// Creates a worktree for a run, branching from `base_ref`.
+/// Whether this directory is somewhere git can make a worktree.
+///
+/// The whole runtime stands on `git worktree add`, so a directory that is not
+/// a repository cannot run anything — and used to say so for the first time
+/// two minutes into a run, in git's own words, after a vendor had been paid.
+/// Asked once, cheaply, by whoever is about to promise that a run will work.
+pub fn is_repository(dir: &Path) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 pub fn create(repo: &Path, base: &Path, run_id: &str, base_ref: &str) -> Result<Worktree> {
     let path = base.join(run_id);
     let branch = format!("ostraka/{run_id}");

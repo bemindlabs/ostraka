@@ -294,6 +294,28 @@ fn setting_up_a_directory_leaves_a_browser_that_can_run_something() {
 }
 
 #[test]
+fn onboarding_a_directory_that_git_has_never_heard_of_says_so_first() {
+    // The whole runtime stands on `git worktree add`. Setting up a directory
+    // git does not know about produces a perfectly valid project that cannot
+    // run anything, and it used to say so for the first time from inside a
+    // run, in git's own words, after a vendor had been paid.
+    let scratch = Scratch::new("no-git");
+    let mut d = Driver::open(scratch.path());
+
+    d.shows("not an Ostraka project yet");
+    d.shows("not a git repository");
+    d.shows("git init");
+    // And this one has no recognisable toolchain either, so the gate it would
+    // write is a placeholder. Better said before the offer is taken.
+    d.shows("fails on purpose");
+
+    // Taking the offer does not make the warning untrue, so it stays.
+    d.ctrl('x').key(KeyCode::Char('i'));
+    assert!(scratch.path().join("ostraka.toml").is_file());
+    assert!(d.app.not_a_repository);
+}
+
+#[test]
 fn a_task_typed_into_the_box_runs_and_is_recorded() {
     let _guard = exclusive();
     let scratch = project("run", 0);
@@ -490,6 +512,10 @@ fn quitting_during_a_run_waits_for_it_rather_than_walking_away() {
 
     d.typed("a task interrupted by leaving").key(KeyCode::Enter);
     d.ctrl('c');
+    // Asked first. It says what leaving costs before it costs it.
+    assert_eq!(d.app.dialog, Some(Dialog::Leaving));
+    d.shows("A run is going");
+    d.key(KeyCode::Char('y'));
 
     assert!(!d.app.quit, "the browser left while a run was going");
     assert!(d.app.leaving);

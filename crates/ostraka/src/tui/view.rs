@@ -97,6 +97,7 @@ pub enum Dialog {
     Commands,
     Runs,
     Agents,
+    Leaving,
 }
 
 /// One adapter profile, as the agents dialog shows it.
@@ -155,6 +156,9 @@ pub struct App {
     /// Present when this directory is not a project yet: what `init` would
     /// write. `None` once there is nothing left to write.
     pub setup: Option<Plan>,
+    /// Set when the directory is not somewhere git can make a worktree, which
+    /// no amount of setting up will fix. Default false: no problem known.
+    pub not_a_repository: bool,
     pub dialog: Option<Dialog>,
     /// What has been typed into the command palette.
     pub query: String,
@@ -197,6 +201,7 @@ impl App {
             follow: true,
             status: None,
             setup: None,
+            not_a_repository: false,
             dialog: None,
             query: String::new(),
             pick: 0,
@@ -369,6 +374,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Dialog::Commands) => render_palette(frame, app, screen),
         Some(Dialog::Runs) => render_runs(frame, app, screen),
         Some(Dialog::Agents) => render_agents(frame, app, screen),
+        Some(Dialog::Leaving) => render_leaving(frame, app, screen),
         None => {}
     }
 
@@ -903,7 +909,96 @@ fn render_setup(frame: &mut Frame, app: &App, area: Rect) {
     lines.push(dim(
         "Nothing already on disk is overwritten. `ostraka init` does the same.".to_string(),
     ));
+
+    // What setting up will not fix, said before the offer is taken rather than
+    // by a run failing later in somebody else's words.
+    for (mark, said) in warnings(app, plan) {
+        lines.push(Line::from(""));
+        // Wrapped, because these are sentences rather than labels and the one
+        // that overflows is the one explaining what will not work.
+        for (i, part) in wrap(&said, area.width.saturating_sub(4) as usize)
+            .into_iter()
+            .enumerate()
+        {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if i == 0 {
+                        format!("{mark}  ")
+                    } else {
+                        "   ".to_string()
+                    },
+                    theme::on(theme::WARN),
+                ),
+                Span::styled(part, theme::text()),
+            ]));
+        }
+    }
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// What will still be wrong after `i`.
+///
+/// Both of these used to be found out from a failed run: one from git's own
+/// words two minutes in, and one from a gate check that was written to fail on
+/// purpose and never said so anywhere the operator would look.
+fn warnings(app: &App, plan: &Plan) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    if app.not_a_repository {
+        out.push((
+            theme::FAILED,
+            "This is not a git repository. A run isolates its work in a worktree,              so `git init` here first — nothing will run until you do."
+                .to_string(),
+        ));
+    }
+    if plan.kind == crate::init::Kind::Unknown {
+        out.push((
+            "!",
+            "Ostraka could not tell how this project is verified, so the gate it              writes fails on purpose. Edit the checks in ostraka.toml before the              first task — a gate that passed everything would be worse."
+                .to_string(),
+        ));
+    }
+    out
+}
+
+/// Leaving, asked rather than assumed.
+///
+/// Quitting is not free here: it can discard a task that was being written and
+/// it can stop a run that is going. Both are worth a sentence and a key.
+fn render_leaving(frame: &mut Frame, app: &App, screen: Rect) {
+    let mut lines = vec![Line::from(Span::styled(
+        "Leave the browser?",
+        theme::bold(),
+    ))];
+    if app.thread.running() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "A run is going. Leaving asks it to stop and waits for it.",
+            theme::on(theme::WARN),
+        )));
+    }
+    if !app.prompt.trim().is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "The task in the box is not written down anywhere.",
+            theme::on(theme::WARN),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("y", theme::accent()),
+        Span::styled("  leave        ", theme::muted()),
+        Span::styled("n", theme::accent()),
+        Span::styled(" / ", theme::muted()),
+        Span::styled("esc", theme::accent()),
+        Span::styled("  stay", theme::muted()),
+    ]));
+
+    let area = theme::centred(screen, 66, lines.len() as u16 + 2);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(theme::panel(true).padding(Padding::horizontal(2))),
+        area,
+    );
 }
 
 /// Every key the screen answers to, in one place someone can read.
@@ -1498,6 +1593,51 @@ mod tests {
             "{out}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn setting_up_says_what_setting_up_will_not_fix() {
+        // Both of these used to be found out from a failed run: one in git's
+        // own words two minutes in, and one from a gate check written to fail
+        // on purpose that never said so anywhere anybody would look.
+        let dir = std::env::temp_dir().join(format!("ostraka-view-warn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+
+        let mut app = App::new(dir.clone(), Vec::new());
+        app.setup = Some(crate::init::plan(&dir));
+        app.not_a_repository = true;
+
+        let out = screen(&mut app, 100, 30);
+        assert!(out.contains("not a git repository"), "{out}");
+        assert!(out.contains("git init"), "{out}");
+        assert!(out.contains("fails on purpose"), "{out}");
+        assert!(out.contains("before the first task"), "{out}");
+
+        // A repository with a language it recognises has neither to say.
+        std::fs::write(dir.join("Cargo.toml"), "[package]\n").expect("write");
+        let mut ok = App::new(dir.clone(), Vec::new());
+        ok.setup = Some(crate::init::plan(&dir));
+        let quiet = screen(&mut ok, 100, 30);
+        assert!(!quiet.contains("not a git repository"), "{quiet}");
+        assert!(!quiet.contains("fails on purpose"), "{quiet}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_leaving_dialog_says_what_leaving_costs() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        app.open(Dialog::Leaving);
+        let bare = screen(&mut app, 100, 20);
+        assert!(bare.contains("Leave the browser?"), "{bare}");
+        assert!(bare.contains("stay"), "{bare}");
+        assert!(!bare.contains("A run is going"), "{bare}");
+
+        app.prompt = "a task half written".into();
+        working(&mut app, "something", vec![Step::Entered(Phase::Authoring)]);
+        let costly = screen(&mut app, 100, 22);
+        assert!(costly.contains("A run is going"), "{costly}");
+        assert!(costly.contains("not written down anywhere"), "{costly}");
     }
 
     #[test]

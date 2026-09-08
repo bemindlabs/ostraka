@@ -199,6 +199,29 @@ repository beside it. They are copies of `adapters/*.toml`, and
 `check-hygiene.sh` fails if the two drift — the same treatment as the gate
 written out in both `ci.yml` and `ostraka.toml`.
 
+**Onboarding says what setting up will not fix.** Reviewed by opening the
+browser in an empty directory and reading what it promised. It offered to set
+the place up and said nothing about the two things that would still be wrong
+afterwards, both of which were then discovered from a failed run.
+
+The first is git. Everything downstream stands on `git worktree add`, so a
+directory git has never heard of produces a perfectly valid project that cannot
+run anything — and said so for the first time in git's own words, from inside a
+run, after a vendor had been paid. `worktree::is_repository` is asked once, by
+`ostraka check` and by the screen that makes the offer.
+
+The second is the gate. Where `init` cannot tell how a project is verified it
+writes a check that fails on purpose, which is the right thing to write and was
+invisible: the command printed a note afterwards and the browser printed
+nothing at all. Both warnings now sit under the offer, before the key that
+takes it, and they stay afterwards because taking the offer does not make them
+untrue.
+
+**Leaving is asked, not assumed.** Quitting can discard a task that was being
+written and can stop a run that is going, and one key should not do both
+silently. The dialog says which of the two applies. Already on the way out, it
+does not ask again — asking twice would be asking about the answer.
+
 **`init` asks whether anything is left to write; the browser asks whether this
 runs.** Two questions, and they are not the same one. `Plan::complete` is the
 first and `Plan::runnable` — a config, and at least one profile beside it — is

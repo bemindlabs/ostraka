@@ -134,7 +134,8 @@ the author.
 half the width of the screen to show something you read once in a while. Opening
 one gives it a screen of its own — what it was for, which check failed and what
 it printed, what the reviewer said, the diff read from the commit, and `p` to
-promote it. `?` lists every key.
+promote it. `?` lists every key, and `q` asks before it leaves —
+quitting can discard the task in the box and stop a run that is going.
 
 Regions are divided by rules rather than by space alone, and colour carries
 meaning rather than decoration: the runtime is muted, the author is the accent,
