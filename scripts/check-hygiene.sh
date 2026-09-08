@@ -177,4 +177,27 @@ for template in crates/ostraka/templates/*.toml; do
 done
 ok "the profiles init writes are the ones this repository ships"
 
+# 8. A relative link in a file this repository ships must resolve inside this
+#    repository. The README footer pointed at PHILOSOPHY.md for a release while
+#    the file lived one directory up in the workspace — fine on the machine that
+#    wrote it, a 404 for every visitor, and invisible to every other check here.
+#    Clone-and-read is the only way that surfaces, so it is checked instead.
+missing=0
+for doc in README.md AGENTS.md PHILOSOPHY.md adapters/README.md; do
+    [ -f "$doc" ] || continue
+    dir=$(dirname "$doc")
+    # Markdown links and bare hrefs, minus anything with a scheme or an anchor.
+    for link in $(grep -oE '\]\([^)]+\)|href="[^"]+"' "$doc" \
+                  | sed -E 's/^\]\(//; s/\)$//; s/^href="//; s/"$//' \
+                  | grep -vE '^(https?:|mailto:|#)' \
+                  | sed -E 's/#.*$//' | sort -u); do
+        [ -n "$link" ] || continue
+        if [ ! -e "$dir/$link" ]; then
+            bad "$doc links to $link, which does not exist in this repository"
+            missing=1
+        fi
+    done
+done
+[ "$missing" -eq 0 ] && ok "every relative link in the shipped docs resolves"
+
 exit $fail
