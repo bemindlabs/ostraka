@@ -43,6 +43,7 @@ pub enum Command {
     ClosePane,
     NextDetail,
     Promote,
+    Prune,
     Reload,
     Setup,
     Keys,
@@ -52,7 +53,7 @@ pub enum Command {
 impl Command {
     /// In the order the palette offers them: what someone reaches for most,
     /// first.
-    pub const ALL: [Command; 17] = [
+    pub const ALL: [Command; 18] = [
         Command::NewRun,
         Command::Stop,
         Command::Fix,
@@ -66,6 +67,7 @@ impl Command {
         Command::ClosePane,
         Command::NextDetail,
         Command::Promote,
+        Command::Prune,
         Command::Reload,
         Command::Setup,
         Command::Keys,
@@ -87,6 +89,7 @@ impl Command {
             Command::ClosePane => "close this pane",
             Command::NextDetail => "next section",
             Command::Promote => "promote run",
+            Command::Prune => "prune worktrees",
             Command::Reload => "reload runs",
             Command::Setup => "set up this directory",
             Command::Keys => "keys",
@@ -110,6 +113,7 @@ impl Command {
             Command::ClosePane => "X",
             Command::NextDetail => "tab",
             Command::Promote => "p",
+            Command::Prune => "u",
             Command::Reload => "r",
             Command::Setup => "i",
             Command::Keys => "?",
@@ -137,6 +141,9 @@ impl Command {
             Command::ClosePane => 'c',
             Command::NextDetail => 'd',
             Command::Promote => 'p',
+            // `p` is taken and prune is the second thing on this row; `u` is
+            // in the word and free.
+            Command::Prune => 'u',
             Command::Reload => 'r',
             Command::Setup => 'i',
             Command::Keys => 'h',
@@ -159,6 +166,11 @@ impl Command {
             Command::ClosePane => "close this line of work",
             Command::NextDetail => "checks, then events, then the diff",
             Command::Promote => "give an approved run a branch; merges nothing",
+            // No mention of branches here. The dialog says what is kept, at the
+            // moment it matters; saying it in a one-line description makes
+            // "branch" match this as well as promoting, and somebody typing that
+            // word wants the other one.
+            Command::Prune => "clear the worktrees finished runs left behind",
             Command::Reload => "read the run records again",
             Command::Setup => "write the files a project needs to be run",
             Command::Keys => "every key this screen answers to",
@@ -186,6 +198,7 @@ impl Command {
             Command::ClosePane => "close",
             Command::NextDetail => "detail",
             Command::Promote => "promote",
+            Command::Prune => "prune",
             Command::Reload => "reload",
             Command::Setup => "init",
             Command::Keys => "keys",

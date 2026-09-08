@@ -446,6 +446,18 @@ fn perform(app: &mut App, command: Command, records_root: &Path) {
                 .position(|r| Some(&r.name) == app.repository().map(|c| &c.name))
                 .unwrap_or(0);
         }
+        Command::Prune => {
+            // The list is taken now and held, so the keystroke that removes
+            // acts on what was actually shown rather than on whatever the disk
+            // looks like a moment later.
+            match crate::prune::leftovers(&app.workspace) {
+                Ok(found) => {
+                    app.leftovers = found;
+                    app.open(Dialog::Prune);
+                }
+                Err(e) => app.status = Some(format!("could not look: {e}")),
+            }
+        }
         Command::Agents => {
             app.agents = agents(&app.workspace);
             app.open(Dialog::Agents);
@@ -566,6 +578,7 @@ fn dialog_key(app: &mut App, key: KeyEvent, records_root: &Path) {
         Some(Dialog::Fix) => fix_key(app, key.code),
         Some(Dialog::Settings) => settings_key(app, key.code),
         Some(Dialog::Repos) => repos_key(app, key.code, records_root),
+        Some(Dialog::Prune) => prune_key(app, key.code),
         Some(Dialog::Leaving) => {
             let leaving = matches!(
                 key.code,
@@ -814,6 +827,33 @@ fn work_in(app: &mut App, repo: crate::workspace::Repository) {
 }
 
 /// Keys while the agents are being chosen.
+/// Keys while the leftovers are on screen.
+///
+/// **`y` is the only key that removes anything.** Enter and escape both close
+/// the dialog and take nothing with them, which is what somebody pressing
+/// either of them meant — enter is how the other dialogs are dismissed, and a
+/// destructive one is the worst place to make that keystroke mean something
+/// new.
+///
+/// An earlier version of this comment said "`y` and nothing else", which read
+/// as though enter were unhandled and invited the question of whether it might
+/// remove. It cannot.
+fn prune_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Char('y') if !app.leftovers.is_empty() => {
+            let (removed, failed) = crate::prune::remove(&app.leftovers);
+            app.leftovers.clear();
+            app.status = Some(match failed.first() {
+                Some(said) => said.clone(),
+                None => format!("removed {removed} worktree(s); branches and records untouched"),
+            });
+            app.close();
+        }
+        KeyCode::Esc | KeyCode::Enter => app.close(),
+        _ => {}
+    }
+}
+
 fn agents_key(app: &mut App, code: KeyCode) {
     let count = app.agents.len();
     match code {
