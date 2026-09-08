@@ -267,6 +267,7 @@ mod tests {
             prompt: prompt.to_string(),
             author: ActorId::new("archon"),
             adapter: "claude-code".to_string(),
+            repository: "only".to_string(),
             reviewer: Some(ActorId::new("ephor")),
             outcome,
             checks_passed: 1,

@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "3.0.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -18,9 +18,9 @@ description = "Run agent fleets you can actually review."
 authors = ["bemindlabs"]
 
 [workspace.dependencies]
-ostraka-core = { path = "crates/ostraka-core", version = "3.0.0" }
-ostraka-adapter = { path = "crates/ostraka-adapter", version = "3.0.0" }
-ostraka-runtime = { path = "crates/ostraka-runtime", version = "3.0.0" }
+ostraka-core = { path = "crates/ostraka-core", version = "1.0.0" }
+ostraka-adapter = { path = "crates/ostraka-adapter", version = "1.0.0" }
+ostraka-runtime = { path = "crates/ostraka-runtime", version = "1.0.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"

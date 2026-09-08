@@ -28,6 +28,29 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// What kind of project a workspace is for.
+    ///
+    /// Read from the repository it holds rather than from the workspace, which
+    /// has no source in it. A workspace with nothing cloned into it yet, or
+    /// with several that disagree, gets the gate that fails on purpose — which
+    /// is the right answer to "I cannot tell".
+    pub fn of_workspace(root: &Path) -> Self {
+        let repositories = root.join("repositories");
+        let mut kinds: Vec<Kind> = std::fs::read_dir(&repositories)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .map(|p| Self::detect(&p))
+            .collect();
+        kinds.dedup();
+        match kinds.as_slice() {
+            [one] => *one,
+            _ => Self::Unknown,
+        }
+    }
+
     pub fn detect(project: &Path) -> Self {
         if project.join("Cargo.toml").is_file() {
             Self::Rust
@@ -62,11 +85,26 @@ pub enum Action {
     AlreadyThere,
 }
 
+/// What a file is to the project, which decides who has to care it is missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// Without this there is no workspace. `.ostraka/ostraka.toml`.
+    Config,
+    /// A directory the layout needs, with nothing in it yet.
+    Place,
+    /// One vendor profile. A project needs at least one; which one is a choice.
+    Profile,
+    /// Keeps a run's working evidence out of history. Its absence is untidy,
+    /// not broken.
+    Ignore,
+}
+
 #[derive(Debug, Clone)]
 pub struct Planned {
     pub path: PathBuf,
     pub contents: String,
     pub action: Action,
+    pub role: Role,
 }
 
 #[derive(Debug, Clone)]
@@ -77,18 +115,35 @@ pub struct Plan {
 }
 
 impl Plan {
-    /// True when there is nothing left to do.
+    /// True when there is nothing left to do. What `init` asks.
     pub fn complete(&self) -> bool {
         self.files.iter().all(|f| f.action == Action::AlreadyThere)
     }
+
+    /// True when this directory can be run as it stands.
+    ///
+    /// Deliberately weaker than `complete`, and it is the question the browser
+    /// asks. A project with a config and a profile runs, whether or not its
+    /// `.gitignore` has picked up the two lines `init` also offers — and
+    /// answering "this directory is not an Ostraka project yet" across a
+    /// screen that has runs to show gets it plainly wrong. This repository's
+    /// own `.gitignore` names four paths under `.ostraka/` rather than the
+    /// directory, which is how that was found.
+    pub fn runnable(&self) -> bool {
+        self.files
+            .iter()
+            .any(|f| f.role == Role::Config && f.action == Action::AlreadyThere)
+            && has_a_profile(&self.project)
+    }
 }
 
-/// The three profiles this repository ships, as `init` will write them.
+/// The profiles this repository ships, as `init` will write them.
 ///
 /// Kept here rather than read from disk because the binary is installed on its
 /// own; a profile someone has to fetch separately is a profile they will not
 /// have.
-pub const TEMPLATES: [(&str, &str); 3] = [
+pub const TEMPLATES: [(&str, &str); 4] = [
+    ("agy.toml", include_str!("../templates/agy.toml")),
     (
         "claude-code.toml",
         include_str!("../templates/claude-code.toml"),
@@ -101,18 +156,42 @@ pub const TEMPLATES: [(&str, &str); 3] = [
 ];
 
 /// Lines that keep a run's working evidence out of history.
-const IGNORED: [&str; 2] = ["/.ostraka/", "/worktrees/"];
+/// Lines that keep a run's working evidence out of history.
+///
+/// The subdirectories rather than `/.ostraka/` itself, because the
+/// configuration and the adapter profiles live in there too and those are
+/// meant to be committed — a workspace's agreement about how runs are made is
+/// not working evidence.
+const IGNORED: [&str; 5] = [
+    "/.ostraka/runs/",
+    "/.ostraka/worktrees/",
+    "/.ostraka/cache/",
+    "/.ostraka/secrets/",
+    "/.ostraka/vendor-home/",
+];
 
 pub fn plan(project: &Path) -> Plan {
-    let kind = Kind::detect(project);
-    let mut files = vec![planned(project, "ostraka.toml", config_for(kind))];
+    let kind = Kind::of_workspace(project);
+    let mut files = vec![planned(
+        project,
+        ".ostraka/ostraka.toml",
+        config_for(kind),
+        Role::Config,
+    )];
 
     for (name, contents) in TEMPLATES {
         files.push(planned(
             project,
-            &format!("adapters/{name}"),
+            &format!(".ostraka/adapters/{name}"),
             contents.to_string(),
+            Role::Profile,
         ));
+    }
+    // The two directories the layout is about. A repository is cloned into the
+    // first; the second is linked into every worktree, so what an agent works
+    // out along the way survives the run that worked it out.
+    for place in ["repositories", "notes"] {
+        files.push(planned(project, place, String::new(), Role::Place));
     }
     files.push(gitignore(project));
 
@@ -123,7 +202,25 @@ pub fn plan(project: &Path) -> Plan {
     }
 }
 
-fn planned(project: &Path, relative: &str, contents: String) -> Planned {
+/// Whether `adapters/` holds a profile of any name.
+///
+/// Asked of the directory rather than of the plan, and the difference is the
+/// whole point: a plan lists the profiles `init` would write, so a
+/// project that brought its own under other names has every planned profile
+/// missing while being perfectly able to run. Reading that as "not set up yet"
+/// put the opening screen over a working project — and then a stray keystroke
+/// on that screen wrote profiles into it that nobody had asked for.
+fn has_a_profile(project: &Path) -> bool {
+    std::fs::read_dir(project.join(".ostraka/adapters"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .any(|e| e.path().extension().is_some_and(|kind| kind == "toml"))
+        })
+        .unwrap_or(false)
+}
+
+fn planned(project: &Path, relative: &str, contents: String, role: Role) -> Planned {
     let path = project.join(relative);
     let action = if path.exists() {
         Action::AlreadyThere
@@ -134,6 +231,7 @@ fn planned(project: &Path, relative: &str, contents: String) -> Planned {
         path,
         contents,
         action,
+        role,
     }
 }
 
@@ -155,6 +253,7 @@ fn gitignore(project: &Path) -> Planned {
             path,
             contents: String::new(),
             action: Action::AlreadyThere,
+            role: Role::Ignore,
         };
     }
 
@@ -171,6 +270,7 @@ fn gitignore(project: &Path) -> Planned {
         } else {
             Action::Append
         },
+        role: Role::Ignore,
     }
 }
 
@@ -284,6 +384,11 @@ pub fn apply(plan: &Plan, force: bool) -> std::io::Result<Vec<PathBuf>> {
         };
         match doing {
             Action::AlreadyThere => continue,
+            // A place is a directory with nothing in it: `repositories/` for
+            // what is worked on, `notes/` for what is worked out.
+            Action::Create if file.role == Role::Place => {
+                std::fs::create_dir_all(&file.path)?;
+            }
             Action::Create => {
                 if let Some(parent) = file.path.parent() {
                     std::fs::create_dir_all(parent)?;
@@ -321,7 +426,8 @@ mod tests {
     #[test]
     fn a_rust_project_gets_the_checks_a_rust_project_needs() {
         let dir = scratch();
-        std::fs::write(dir.join("Cargo.toml"), "[package]\n").expect("write");
+        std::fs::create_dir_all(dir.join("repositories/work")).expect("repository");
+        std::fs::write(dir.join("repositories/work/Cargo.toml"), "[package]\n").expect("write");
         let plan = plan(&dir);
         assert_eq!(plan.kind, Kind::Rust);
         let config = &plan.files[0].contents;
@@ -355,6 +461,72 @@ mod tests {
         // unrunnable gate is worse than not detecting it.
         let config = ostraka_core::config::Config::parse(&config_for(Kind::Node)).expect("parses");
         assert_eq!(config.worktree.link, ["node_modules"]);
+    }
+
+    #[test]
+    fn a_project_whose_gitignore_covers_the_ground_differently_is_still_runnable() {
+        // This repository's own `.gitignore` names four paths under `.ostraka/`
+        // rather than the directory, written before `init` existed. `init` is
+        // right that the line it offers is not there, and the browser was
+        // wrong to read that as a directory nobody had set up yet.
+        let dir = scratch();
+        std::fs::create_dir_all(dir.join("repositories/work")).expect("repository");
+        std::fs::write(dir.join("repositories/work/Cargo.toml"), "[package]\n").expect("write");
+        apply(&plan(&dir), false).expect("applies");
+        std::fs::write(
+            dir.join(".gitignore"),
+            "/target\n/worktrees/\n/.ostraka/runs/\n/.ostraka/vendor-home/\n",
+        )
+        .expect("rewrite");
+
+        let plan = plan(&dir);
+        assert!(!plan.complete(), "init should still offer the missing line");
+        assert!(plan.runnable(), "a configured project read as unconfigured");
+    }
+
+    #[test]
+    fn a_directory_with_nothing_in_it_is_neither_complete_nor_runnable() {
+        let dir = scratch();
+        let plan = plan(&dir);
+        assert!(!plan.complete());
+        assert!(!plan.runnable());
+    }
+
+    #[test]
+    fn a_project_that_brought_its_own_adapter_profiles_is_runnable() {
+        // The plan wants its own profiles by name. A project with one profile
+        // under a name of its own has none of them, and runs perfectly well —
+        // reading that as "not set up yet" is how the opening screen ended up
+        // over a working project, with a stray key on it writing three
+        // profiles nobody had asked for.
+        let dir = scratch();
+        std::fs::create_dir_all(dir.join(".ostraka")).expect("ostraka");
+        std::fs::write(dir.join(".ostraka/ostraka.toml"), "# mine\n").expect("write");
+        std::fs::create_dir_all(dir.join(".ostraka/adapters")).expect("adapters");
+        std::fs::write(dir.join(".ostraka/adapters/mine.toml"), "id = \"mine\"\n").expect("write");
+
+        let plan = plan(&dir);
+        assert!(plan.runnable(), "{:?}", plan.files);
+        assert!(!plan.complete(), "init should still offer its own");
+    }
+
+    #[test]
+    fn an_empty_adapters_directory_is_not_a_profile() {
+        let dir = scratch();
+        std::fs::create_dir_all(dir.join(".ostraka")).expect("ostraka");
+        std::fs::write(dir.join(".ostraka/ostraka.toml"), "# mine\n").expect("write");
+        std::fs::create_dir_all(dir.join(".ostraka/adapters")).expect("adapters");
+        assert!(!plan(&dir).runnable());
+    }
+
+    #[test]
+    fn a_config_with_no_profile_beside_it_is_not_runnable_yet() {
+        // Half-configured is the case the opening screen exists for: there is
+        // a config, and nothing it can invoke.
+        let dir = scratch();
+        std::fs::create_dir_all(dir.join(".ostraka")).expect("ostraka");
+        std::fs::write(dir.join(".ostraka/ostraka.toml"), "# mine\n").expect("write");
+        assert!(!plan(&dir).runnable());
     }
 
     #[test]
@@ -399,14 +571,19 @@ mod tests {
     #[test]
     fn applying_writes_the_files_and_they_are_readable_afterwards() {
         let dir = scratch();
-        std::fs::write(dir.join("Cargo.toml"), "[package]\n").expect("write");
+        std::fs::create_dir_all(dir.join("repositories/work")).expect("repository");
+        std::fs::write(dir.join("repositories/work/Cargo.toml"), "[package]\n").expect("write");
         let written = apply(&plan(&dir), false).expect("applies");
-        assert_eq!(written.len(), 5, "{written:?}");
-        assert!(dir.join("ostraka.toml").is_file());
-        assert!(dir.join("adapters/codex.toml").is_file());
+        // Six, not seven: the fixture made repositories/ to put a Cargo.toml
+        // in, and a place that is already there is left alone.
+        assert_eq!(written.len(), 7, "{written:?}");
+        assert!(dir.join(".ostraka/ostraka.toml").is_file());
+        assert!(dir.join(".ostraka/adapters/codex.toml").is_file());
         assert!(dir.join(".gitignore").is_file());
+        assert!(dir.join("notes").is_dir(), "notes were not made");
+        assert!(dir.join("repositories").is_dir());
 
-        let text = std::fs::read_to_string(dir.join("ostraka.toml")).expect("reads");
+        let text = std::fs::read_to_string(dir.join(".ostraka/ostraka.toml")).expect("reads");
         ostraka_core::config::Config::parse(&text)
             .expect("parses")
             .validate()
@@ -428,14 +605,15 @@ mod tests {
     fn a_half_configured_project_is_completed_rather_than_reset() {
         // Someone's hand-written ostraka.toml is theirs. Init fills the gaps.
         let dir = scratch();
-        std::fs::write(dir.join("ostraka.toml"), "# mine\n").expect("write");
+        std::fs::create_dir_all(dir.join(".ostraka")).expect("ostraka");
+        std::fs::write(dir.join(".ostraka/ostraka.toml"), "# mine\n").expect("write");
         let written = apply(&plan(&dir), false).expect("applies");
         assert!(!written.iter().any(|p| p.ends_with("ostraka.toml")));
         assert_eq!(
-            std::fs::read_to_string(dir.join("ostraka.toml")).expect("reads"),
+            std::fs::read_to_string(dir.join(".ostraka/ostraka.toml")).expect("reads"),
             "# mine\n"
         );
-        assert!(dir.join("adapters/codex.toml").is_file());
+        assert!(dir.join(".ostraka/adapters/codex.toml").is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -454,7 +632,7 @@ mod tests {
     #[test]
     fn a_gitignore_that_already_covers_it_is_left_alone() {
         let dir = scratch();
-        std::fs::write(dir.join(".gitignore"), "/.ostraka/\n/worktrees/\n").expect("write");
+        std::fs::write(dir.join(".gitignore"), "/.ostraka/runs/\n/.ostraka/worktrees/\n/.ostraka/cache/\n/.ostraka/secrets/\n/.ostraka/vendor-home/\n").expect("write");
         let plan = plan(&dir);
         let ignore = plan
             .files

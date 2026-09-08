@@ -7,6 +7,7 @@
 
 use ostraka_adapter::Profile;
 use ostraka_core::config::Config;
+use ostraka_core::gate::Verdict;
 use ostraka_core::identity::ActorId;
 use ostraka_core::record::Outcome;
 use ostraka_core::task::TaskSpec;
@@ -99,6 +100,12 @@ fn config(check_cmd: &str) -> Config {
     .expect("valid config")
 }
 
+/// Where a fixture's run happens: the repository is the fixture, and the
+/// worktrees and records sit beside it as they do in a workspace.
+fn places(f: &Fixture) -> (PathBuf, PathBuf) {
+    (f.repo.join("worktrees"), f.repo.join(".ostraka"))
+}
+
 fn task(prompt: &str, author: &str) -> TaskSpec {
     TaskSpec {
         id: "t1".into(),
@@ -108,6 +115,73 @@ fn task(prompt: &str, author: &str) -> TaskSpec {
         base_ref: "HEAD".into(),
         model: None,
     }
+}
+
+#[test]
+fn what_is_linked_into_a_worktree_is_not_part_of_the_change() {
+    // Found by a real vendor run: the notes directory is linked into every
+    // worktree, `git status` reported the symlink as something the agent had
+    // added, and it was committed with the work and shown to a reviewer as
+    // part of the change. A link is scaffolding, not a change.
+    let f = fixture("linked");
+    std::fs::create_dir_all(f.repo.join("notes")).expect("notes");
+    std::fs::write(f.repo.join("notes/earlier.md"), "what was worked out").expect("write");
+
+    let writer = agent(&f.repo, "writer", "echo new > added.txt");
+    let reviewer = agent(&f.repo, "reviewer", &verdict("APPROVE"));
+    let routing = route::select(
+        &[writer, reviewer],
+        Some("writer"),
+        Some("reviewer"),
+        &f.repo.join(".ostraka/vendor-home"),
+        None,
+    )
+    .unwrap();
+
+    let (worktrees, records) = places(&f);
+    let notes = f.repo.join("notes");
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: Some(&notes),
+    };
+    let report = orchestrator::run_task(
+        &places,
+        &config("true"),
+        &routing,
+        &task("add a file", "archon"),
+        &ActorId::new("ephor"),
+        None,
+    )
+    .expect("runs");
+
+    assert!(report.approved(), "{:?}", report.refusal);
+    // The diff the reviewer was handed, and the commit that was made.
+    assert!(report.diff.contains("added.txt"), "{}", report.diff);
+    assert!(
+        !report.diff.contains("notes"),
+        "the link was shown to a reviewer as part of the change:\n{}",
+        report.diff
+    );
+
+    let out = Command::new("git")
+        .args([
+            "show",
+            "--name-only",
+            "--format=",
+            &format!("ostraka/{}", report.record.run_id),
+        ])
+        .current_dir(&f.repo)
+        .output()
+        .expect("git runs");
+    let committed = String::from_utf8_lossy(&out.stdout);
+    assert!(committed.contains("added.txt"), "{committed}");
+    assert!(
+        !committed.contains("notes"),
+        "the link was committed:\n{committed}"
+    );
 }
 
 #[test]
@@ -127,13 +201,21 @@ fn an_author_that_changed_nothing_is_reported_as_such_and_not_sent_to_a_reviewer
     )
     .unwrap();
 
+    let (worktrees, records) = places(&f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+    };
     let report = orchestrator::run_task(
-        &f.repo,
+        &places,
         &config("true"),
         &routing,
         &task("add a test that is already there", "archon"),
         &ActorId::new("ephor"),
-        &f.repo.join(".ostraka"),
+        None,
     )
     .expect("runs");
 
@@ -162,6 +244,14 @@ fn a_run_the_operator_stopped_says_so_rather_than_blaming_the_agent() {
     .unwrap();
 
     ostraka_adapter::interrupt::clear();
+    let (worktrees, records) = places(&f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+    };
     // Scoped so the signalling thread cannot outlive this test and set the
     // flag underneath another one.
     let report = std::thread::scope(|scope| {
@@ -170,12 +260,12 @@ fn a_run_the_operator_stopped_says_so_rather_than_blaming_the_agent() {
             ostraka_adapter::interrupt::request();
         });
         orchestrator::run_task(
-            &f.repo,
+            &places,
             &config("true"),
             &routing,
             &task("do a thing", "archon"),
             &ActorId::new("ephor"),
-            &f.repo.join(".ostraka"),
+            None,
         )
         .expect("runs")
     });
@@ -209,13 +299,21 @@ fn an_author_that_could_not_run_is_refused_in_its_own_words_without_calling_a_re
     )
     .unwrap();
 
+    let (worktrees, records) = places(&f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+    };
     let report = orchestrator::run_task(
-        &f.repo,
+        &places,
         &config("true"),
         &routing,
         &task("change something", "archon"),
         &ActorId::new("ephor"),
-        &f.repo.join(".ostraka"),
+        None,
     )
     .expect("runs");
 
@@ -251,14 +349,21 @@ fn an_approved_run_produces_a_token_a_commit_and_a_replayable_record() {
     )
     .unwrap();
 
-    let records = f.repo.join(".ostraka");
+    let (worktrees, records) = places(&f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+    };
     let report = orchestrator::run_task(
-        &f.repo,
+        &places,
         &config("true"),
         &routing,
         &task("add a file", "archon"),
         &ActorId::new("ephor"),
-        &records,
+        None,
     )
     .expect("run completes");
 
@@ -304,13 +409,21 @@ fn a_failing_check_refuses_before_any_reviewer_is_consulted() {
     )
     .unwrap();
 
+    let (worktrees, records) = places(&f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+    };
     let report = orchestrator::run_task(
-        &f.repo,
+        &places,
         &config("exit 1"),
         &routing,
         &task("break it", "archon"),
         &ActorId::new("ephor"),
-        &f.repo.join(".ostraka"),
+        None,
     )
     .expect("run completes");
 
@@ -350,13 +463,21 @@ fn a_rejecting_reviewer_blocks_a_change_whose_checks_all_passed() {
     )
     .unwrap();
 
+    let (worktrees, records) = places(&f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+    };
     let report = orchestrator::run_task(
-        &f.repo,
+        &places,
         &config("true"),
         &routing,
         &task("do too much", "archon"),
         &ActorId::new("ephor"),
-        &f.repo.join(".ostraka"),
+        None,
     )
     .expect("run completes");
 
@@ -382,13 +503,21 @@ fn a_silent_reviewer_is_a_rejection_not_a_pass() {
     )
     .unwrap();
 
+    let (worktrees, records) = places(&f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+    };
     let report = orchestrator::run_task(
-        &f.repo,
+        &places,
         &config("true"),
         &routing,
         &task("say nothing", "archon"),
         &ActorId::new("ephor"),
-        &f.repo.join(".ostraka"),
+        None,
     )
     .expect("run completes");
 
@@ -410,13 +539,21 @@ fn the_author_cannot_review_their_own_change_end_to_end() {
     .unwrap();
 
     // Same identity on both sides: the reviewing adapter differs, the actor does not.
+    let (worktrees, records) = places(&f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+    };
     let report = orchestrator::run_task(
-        &f.repo,
+        &places,
         &config("true"),
         &routing,
         &task("approve myself", "archon"),
         &ActorId::new("archon"),
-        &f.repo.join(".ostraka"),
+        None,
     )
     .expect("run completes");
 
@@ -425,4 +562,228 @@ fn the_author_cannot_review_their_own_change_end_to_end() {
         Some(Refusal::SelfApproval { ref actor }) => assert_eq!(actor.as_str(), "archon"),
         other => panic!("expected a self-approval refusal, got {other:?}"),
     }
+}
+
+// --- running out of tokens ------------------------------------------------
+//
+// A vendor that exhausts its context window does not stop politely. It exits
+// non-zero, sometimes after having written part of what it was asked for, and
+// what it says about why is on stderr. These pin down what happens then.
+
+/// A vendor that also reports what it spent, the way a shipped profile does.
+fn counting_agent(repo: &Path, id: &str, body: &str) -> Profile {
+    let path = repo.join(format!("{id}.sh"));
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    Profile::parse(&format!(
+        r#"
+        id = "{id}"
+        command = "{}"
+        args = ["{{{{prompt}}}}"]
+
+        [usage]
+        stream = "stderr"
+        shape = "text"
+        total = "tokens used"
+        "#,
+        path.display()
+    ))
+    .expect("valid profile")
+}
+
+/// Runs a pair against one task and hands back the report.
+fn run_pair(
+    f: &Fixture,
+    writer: Profile,
+    reviewer: Profile,
+    prompt: &str,
+) -> orchestrator::RunReport {
+    let routing = route::select(
+        &[writer, reviewer],
+        Some("writer"),
+        Some("reviewer"),
+        &f.repo.join(".ostraka/vendor-home"),
+        None,
+    )
+    .unwrap();
+    let (worktrees, records) = places(f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+    };
+    orchestrator::run_task(
+        &places,
+        &config("true"),
+        &routing,
+        &task(prompt, "archon"),
+        &ActorId::new("ephor"),
+        None,
+    )
+    .expect("runs")
+}
+
+#[test]
+fn an_author_that_ran_out_of_context_halfway_is_refused_rather_than_reviewed() {
+    // The dangerous shape of running out of tokens, and the one this used to
+    // get wrong: the vendor had already written part of the change when its
+    // context filled, so the worktree is not empty and the exit code is not
+    // zero. That half-written change was gated, reviewed and approved.
+    //
+    // A context window running out is a stop like any other. Only who stopped
+    // it differs, and half a change is not a change anybody should be asked to
+    // review — which is what a killed author has always been told.
+    let f = fixture("out-of-context");
+    let writer = agent(
+        &f.repo,
+        "writer",
+        "echo 'half a change' > added.txt\n\
+         echo 'Error: prompt is too long: 210000 tokens > 200000 maximum' >&2\n\
+         exit 1",
+    );
+    // Approving. Reaching it at all is the failure this test is about.
+    let reviewer = agent(&f.repo, "reviewer", &verdict("APPROVE"));
+
+    let report = run_pair(&f, writer, reviewer, "write a long thing");
+
+    assert!(!report.approved(), "a half-written change was approved");
+    assert!(
+        report.record.approval.is_none(),
+        "a reviewer was asked about half a change"
+    );
+    match report.refusal {
+        Some(Refusal::AuthorFailed { code, diagnostics }) => {
+            assert_eq!(code, "1");
+            assert!(
+                diagnostics.is_some_and(|d| d.contains("prompt is too long")),
+                "the vendor's own account of why was discarded"
+            );
+        }
+        other => panic!("wrong refusal: {other:?}"),
+    }
+
+    // And what it did write is still there. A refused run keeps its worktree
+    // because that is the evidence, and this is exactly the run where somebody
+    // wants to see how far it got before it ran out.
+    let left = std::fs::read_dir(f.repo.join("worktrees"))
+        .expect("a worktrees directory")
+        .filter_map(|e| e.ok())
+        .find(|e| e.path().join("added.txt").is_file());
+    assert!(left.is_some(), "the evidence was thrown away");
+}
+
+#[test]
+fn a_reviewer_that_ran_out_of_context_is_a_rejection_in_its_own_words() {
+    // Fail safe, and say why. A reviewer that ran out of context and one that
+    // read the change and disliked it are the same exit code from here, and
+    // only one of them is about the change.
+    let f = fixture("reviewer-out");
+    let writer = agent(&f.repo, "writer", "echo new > added.txt");
+    let reviewer = agent(
+        &f.repo,
+        "reviewer",
+        "echo 'Error: prompt is too long: 210000 tokens > 200000 maximum' >&2; exit 1",
+    );
+
+    let report = run_pair(&f, writer, reviewer, "change something");
+
+    assert!(
+        !report.approved(),
+        "a reviewer that never read it approved it"
+    );
+    match report.record.approval.map(|a| a.verdict) {
+        Some(Verdict::Reject { reason }) => {
+            assert!(reason.contains("could not run"), "{reason}");
+            assert!(
+                reason.contains("prompt is too long"),
+                "the reviewer's reason was discarded: {reason}"
+            );
+        }
+        other => panic!("wrong verdict: {other:?}"),
+    }
+}
+
+#[test]
+fn a_reviewer_cut_off_before_its_verdict_is_a_rejection() {
+    // The quiet shape: the vendor exits zero, having said something sensible
+    // and stopped mid-sentence with the verdict line still unwritten. Nothing
+    // here is an error; there is simply no answer, and no answer is not yes.
+    let f = fixture("reviewer-cut");
+    let writer = agent(&f.repo, "writer", "echo new > added.txt");
+    let reviewer = agent(
+        &f.repo,
+        "reviewer",
+        "echo 'The change adds a file and the test covers it, so I think it is'\n\
+         exit 0",
+    );
+
+    let report = run_pair(&f, writer, reviewer, "change something");
+
+    assert!(!report.approved(), "a truncated answer read as approval");
+    assert!(
+        matches!(
+            report.record.approval.map(|a| a.verdict),
+            Some(Verdict::Reject { .. })
+        ),
+        "a reviewer that never got to its verdict must be a rejection"
+    );
+}
+
+#[test]
+fn a_reviewer_that_answered_twice_is_a_rejection() {
+    // What a retry after a context error looks like from here: the vendor
+    // answered, hit the limit, started again, and both answers came out. Two
+    // verdicts is not one verdict, and picking either would be picking.
+    let f = fixture("reviewer-twice");
+    let writer = agent(&f.repo, "writer", "echo new > added.txt");
+    let reviewer = agent(
+        &f.repo,
+        "reviewer",
+        "marker=$(printf '%s' \"$1\" | grep -o 'VERDICT-[0-9a-f]*:' | head -1)\n\
+         echo \"$marker REJECT: ran out of room\"\n\
+         echo \"$marker APPROVE\"",
+    );
+
+    let report = run_pair(&f, writer, reviewer, "change something");
+
+    assert!(!report.approved());
+    match report.record.approval.map(|a| a.verdict) {
+        Some(Verdict::Reject { reason }) => {
+            assert!(reason.contains("more than one"), "{reason}");
+        }
+        other => panic!("wrong verdict: {other:?}"),
+    }
+}
+
+#[test]
+fn what_a_run_spent_is_recorded_even_when_it_ran_out() {
+    // The run that ran out of tokens is the one somebody most wants the number
+    // for. Usage is read from what the vendor said before it stopped, and it
+    // said it on the way out.
+    let f = fixture("spent");
+    let writer = counting_agent(
+        &f.repo,
+        "writer",
+        "echo 'tokens used 210000' >&2\n\
+         echo 'Error: prompt is too long' >&2\n\
+         exit 1",
+    );
+    let reviewer = agent(&f.repo, "reviewer", &verdict("APPROVE"));
+
+    let report = run_pair(&f, writer, reviewer, "write a long thing");
+
+    assert!(!report.approved());
+    let spent = report
+        .record
+        .usage
+        .iter()
+        .find(|u| u.adapter == "writer")
+        .expect("the author's usage was not recorded");
+    assert_eq!(spent.total, Some(210_000));
 }

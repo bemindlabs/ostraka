@@ -5,6 +5,7 @@
 //! [`crate::gate::MergeToken`], which this module cannot construct.
 
 use crate::gate::{self, MergeToken, Refusal};
+use crate::progress::{Phase, Watcher};
 use crate::record::RunLog;
 use crate::review;
 use crate::route::Routing;
@@ -34,21 +35,48 @@ impl RunReport {
     }
 }
 
+/// Where the parts of a run live.
+///
+/// Three directories that used to be one: a run is made *in* a repository,
+/// *beside* a set of worktrees, and *recorded* somewhere that may be neither.
+/// Deriving the second two from the first assumed a workspace holding exactly
+/// one repository, which is the assumption this replaces — and passing them
+/// explicitly means the layout is decided by whoever knows it rather than
+/// rebuilt from a convention in here.
+pub struct Places<'a> {
+    /// The repository the change is made in.
+    pub repo: &'a Path,
+    /// Where worktrees are created.
+    pub worktrees: &'a Path,
+    /// Where run records are written.
+    pub records: &'a Path,
+    /// The name this repository is known by, for the record.
+    pub name: &'a str,
+    /// The workspace's notes, linked into the worktree so what an agent works
+    /// out survives the run. `None` where there are none.
+    pub notes: Option<&'a Path>,
+}
+
 /// Runs one task through the whole pipeline.
 ///
-/// `records_root` is where run logs are written — `.ostraka/` by convention.
 /// The worktree is left in place on completion so the diff can be inspected;
 /// removing it is the caller's decision, not this function's.
+///
+/// `watcher` is told what is happening while it happens, for a caller that has
+/// a screen to keep up to date. It cannot change any of it: see
+/// [`crate::progress`]. `None` behaves exactly as this function always has.
 pub fn run_task(
-    repo: &Path,
+    places: &Places<'_>,
     config: &Config,
     routing: &Routing,
     task: &TaskSpec,
     reviewer_identity: &ActorId,
-    records_root: &Path,
+    watcher: Option<Box<dyn Watcher>>,
 ) -> Result<RunReport> {
+    let repo = places.repo;
     let run_id = format!("{}-{}", task.id, now_rfc3339().replace([':', '-'], ""));
-    let mut log = RunLog::create(records_root, &run_id)?;
+    let mut log = RunLog::create(places.records, &run_id)?.watched_by(watcher);
+    log.enter(Phase::Isolating);
 
     let mut record = RunRecord {
         run_id: run_id.clone(),
@@ -56,6 +84,7 @@ pub fn run_task(
         prompt: task.prompt.clone(),
         author: task.author.clone(),
         adapter: routing.author.id().to_string(),
+        repository: places.name.to_string(),
         started_at: now_rfc3339(),
         finished_at: None,
         checks: Vec::new(),
@@ -65,20 +94,17 @@ pub fn run_task(
     };
 
     // 1. Isolate. Work is a diff on disk before it is anything else.
-    let wt = worktree::create(
-        repo,
-        &repo.join(&config.worktree.base),
-        &run_id,
-        &task.base_ref,
-    )?;
+    let wt = worktree::create(repo, places.worktrees, &run_id, &task.base_ref)?;
 
     // 2. Make the checkout usable. A worktree is a fresh checkout, so whatever
     //    git ignores is missing from it — and the agent needs the project's
     //    tools as much as the gate does.
+    log.enter(Phase::Preparing);
     match worktree::prepare(
         repo,
         wt.path(),
         &config.worktree,
+        places.notes,
         config.gate.timeout_secs.map(std::time::Duration::from_secs),
     ) {
         Ok(steps) => {
@@ -106,6 +132,7 @@ pub fn run_task(
 
     // 3. Execute, streaming events into the log as they arrive so an
     //    interrupted run still leaves an account of how far it got.
+    log.enter(Phase::Authoring);
     let author = drive(routing.author.as_ref(), task, wt.path(), &mut log)?;
     record.usage.extend(author.usage.clone());
 
@@ -147,17 +174,26 @@ pub fn run_task(
         );
     }
 
-    if touched.is_empty() {
-        let refusal = if author.exit_code == Some(0) {
-            Refusal::NoChange
-        } else {
-            Refusal::AuthorFailed {
-                code: author
-                    .exit_code
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "no exit code".to_string()),
-                diagnostics: author.diagnostics.clone(),
-            }
+    // An author that did not exit cleanly did not finish, and what is on disk
+    // is half of whatever it was doing. Half a change is not a change anybody
+    // should be asked to review — the same reasoning that refuses a killed
+    // author, and the same situation: a context window running out is a stop
+    // like any other, and only who stopped it differs.
+    //
+    // Being this strict costs something, and it is worth naming: a vendor that
+    // exits non-zero for a harmless reason now has finished work refused
+    // rather than reviewed. That is the safe direction and it is recoverable —
+    // a refused run keeps its worktree, the record carries the vendor's own
+    // words, and running it again is one command. The unsafe direction is not:
+    // a half-written change that happened to compile was gated, reviewed and
+    // approved, which is what this used to do.
+    if author.exit_code != Some(0) {
+        let refusal = Refusal::AuthorFailed {
+            code: author
+                .exit_code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "no exit code".to_string()),
+            diagnostics: author.diagnostics.clone(),
         };
         return finish(
             log,
@@ -165,6 +201,17 @@ pub fn run_task(
             Outcome::Rejected,
             None,
             Some(refusal),
+            String::new(),
+        );
+    }
+
+    if touched.is_empty() {
+        return finish(
+            log,
+            record,
+            Outcome::Rejected,
+            None,
+            Some(Refusal::NoChange),
             String::new(),
         );
     }
@@ -183,7 +230,10 @@ pub fn run_task(
     }
 
     // 4. Gate. These commands actually run; their output is captured.
-    let passed = match gate::run_checks(&config.gate, wt.path()) {
+    log.enter(Phase::Gating);
+    let passed = match gate::run_checks(&config.gate, wt.path(), &mut |record| {
+        log_checked(&mut log, record)
+    }) {
         Ok(p) => p,
         Err(refusal) => {
             // Keep the evidence. A failed run is the one someone will need to
@@ -205,6 +255,7 @@ pub fn run_task(
     record.checks = passed.records().to_vec();
 
     // 5. Review, by an adapter that is not the one that wrote the change.
+    log.enter(Phase::Reviewing);
     let diff = worktree::diff(wt.path())?;
     let (verdict, reviewer_usage) =
         collect_verdict(routing.reviewer.as_ref(), task, &diff, wt.path(), &mut log)?;
@@ -254,6 +305,14 @@ pub fn run_task(
     }
 }
 
+/// Reports one finished check.
+///
+/// A free function rather than a closure body so the borrow of the log inside
+/// `run_checks` stays a single obvious line.
+fn log_checked(log: &mut RunLog, record: &ostraka_core::gate::CheckRecord) {
+    log.checked(record);
+}
+
 /// Runs an adapter to completion, logging every event.
 fn drive(
     adapter: &dyn VendorAdapter,
@@ -266,10 +325,9 @@ fn drive(
         log.append(&event)?;
     }
     let outcome = session.finish();
-    // An author that failed for an external reason still produced a diff the
-    // gate will judge on its merits. Record why anyway: an empty diff whose
-    // cause is in the log is diagnosable, and one whose cause was discarded
-    // looks like an agent that simply did nothing.
+    // Recorded whether or not anything else reads it. A run that ended badly
+    // and whose cause was discarded looks like an agent that simply did
+    // nothing, and the transcript is where somebody goes to find out which.
     if let Some(diagnostics) = &outcome.diagnostics {
         log.append(&Event::Error {
             message: format!("author exited abnormally: {diagnostics}"),

@@ -26,6 +26,38 @@ impl Worktree {
 }
 
 /// Creates a worktree for a run, branching from `base_ref`.
+/// Whether this directory is somewhere git can make a worktree.
+///
+/// The whole runtime stands on `git worktree add`, so a directory that is not
+/// a repository cannot run anything — and used to say so for the first time
+/// two minutes into a run, in git's own words, after a vendor had been paid.
+/// Asked once, cheaply, by whoever is about to promise that a run will work.
+pub fn is_repository(dir: &Path) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Whether this repository has a commit to branch from.
+///
+/// `git worktree add <path> HEAD` on a repository nobody has committed to
+/// fails with `invalid reference: HEAD`, which is the second half of the same
+/// problem `is_repository` catches the first half of: `git init` alone is not
+/// enough to run in.
+pub fn has_a_commit(repo: &Path) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(repo)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 pub fn create(repo: &Path, base: &Path, run_id: &str, base_ref: &str) -> Result<Worktree> {
     let path = base.join(run_id);
     let branch = format!("ostraka/{run_id}");
@@ -44,6 +76,51 @@ pub fn create(repo: &Path, base: &Path, run_id: &str, base_ref: &str) -> Result<
         )));
     }
     Ok(Worktree { path, branch })
+}
+
+/// Keeps a linked name out of git's sight, in this worktree only.
+///
+/// A link is not part of the change. Left visible, `git status` reports it as
+/// something the agent added, so it counts as a touched path, it is committed
+/// with the work, and a reviewer is shown a symlink nobody asked for — which
+/// is what happened the first time a real vendor ran against a workspace with
+/// notes in it.
+///
+/// Written to the worktree's own exclude file rather than to a `.gitignore`:
+/// that file belongs to the repository and is not this to edit. A failure here
+/// is not worth failing the run over — the worst case is the link showing up
+/// in a diff, which is where this started.
+fn exclude(worktree: &Path, name: &str) {
+    let Ok(out) = Command::new("git")
+        .args(["rev-parse", "--git-path", "info/exclude"])
+        .current_dir(worktree)
+        .output()
+    else {
+        return;
+    };
+    if !out.status.success() {
+        return;
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if path.is_empty() {
+        return;
+    }
+    let path = worktree.join(path);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    if existing.lines().any(|line| line.trim() == name) {
+        return;
+    }
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(file, "{name}");
+    }
 }
 
 /// What went wrong getting a worktree ready to work in.
@@ -67,12 +144,24 @@ pub fn prepare(
     project: &Path,
     worktree: &Path,
     config: &ostraka_core::config::WorktreeConfig,
+    notes: Option<&Path>,
     ceiling: Option<std::time::Duration>,
 ) -> std::result::Result<Vec<String>, SetupProblem> {
     let mut done = Vec::new();
 
-    for name in &config.link {
-        let source = project.join(name);
+    // The workspace's notes, linked rather than copied and rather than
+    // configured. An agent writing here writes into the real directory, so
+    // what it worked out survives a refusal — and because the link points out
+    // of the checkout, none of it lands in the diff a reviewer judges. Notes
+    // are what was learned; the diff is what was changed.
+    let linked: Vec<(String, PathBuf)> = notes
+        .map(|path| ("notes".to_string(), path.to_path_buf()))
+        .into_iter()
+        .chain(config.link.iter().map(|n| (n.clone(), project.join(n))))
+        .collect();
+
+    for (name, source) in linked {
+        let name = &name;
         let target = worktree.join(name);
         if !source.exists() {
             // Said plainly rather than left to surface as an unrunnable check.
@@ -103,6 +192,7 @@ pub fn prepare(
                 reason: format!("could not link {} into the worktree: {e}", source.display()),
             });
         }
+        exclude(worktree, name);
         done.push(format!("link {name}"));
     }
 
@@ -348,6 +438,7 @@ mod tests {
             &dir.join("wt"),
             &prep_config(&["node_modules"], None),
             None,
+            None,
         )
         .expect("prepares");
 
@@ -356,6 +447,58 @@ mod tests {
             std::fs::read_to_string(dir.join("wt/node_modules/marker")).expect("reads"),
             "here"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_workspaces_notes_reach_every_worktree_without_being_configured() {
+        // What an agent works out along the way should survive the run that
+        // worked it out — including a refused one, which is the run whose
+        // notes are worth the most.
+        let dir = scratch("notes");
+        std::fs::create_dir_all(dir.join("notes")).expect("notes");
+        std::fs::create_dir_all(dir.join("project")).expect("project");
+        std::fs::write(dir.join("notes/earlier.md"), "what was worked out").expect("write");
+
+        let done = prepare(
+            &dir.join("project"),
+            &dir.join("wt"),
+            &prep_config(&[], None),
+            Some(&dir.join("notes")),
+            None,
+        )
+        .expect("prepares");
+
+        assert_eq!(done, ["link notes"]);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("wt/notes/earlier.md")).expect("reads"),
+            "what was worked out"
+        );
+
+        // Written through the link, so it lands in the workspace rather than
+        // in a checkout that is about to be thrown away.
+        std::fs::write(dir.join("wt/notes/during.md"), "what was learned").expect("write");
+        assert!(
+            dir.join("notes/during.md").is_file(),
+            "the note stayed in the worktree"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_worktree_without_notes_is_prepared_anyway() {
+        // A workspace nobody has taken notes in is not a broken workspace.
+        let dir = scratch("no-notes");
+        std::fs::create_dir_all(dir.join("project")).expect("project");
+        let done = prepare(
+            &dir.join("project"),
+            &dir.join("wt"),
+            &prep_config(&[], None),
+            None,
+            None,
+        )
+        .expect("prepares");
+        assert!(done.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -369,6 +512,7 @@ mod tests {
             &dir.join("project"),
             &dir.join("wt/deep/deeper"),
             &prep_config(&["node_modules"], None),
+            None,
             None,
         )
         .expect("prepares");
@@ -384,6 +528,7 @@ mod tests {
             &dir.join("project"),
             &dir.join("wt"),
             &prep_config(&["node_modules"], None),
+            None,
             None,
         )
         .expect_err("must refuse");
@@ -404,6 +549,7 @@ mod tests {
             &dir.join("wt"),
             &prep_config(&["vendor"], None),
             None,
+            None,
         )
         .expect("prepares");
         assert!(
@@ -421,6 +567,7 @@ mod tests {
             &dir.join("wt"),
             &prep_config(&[], Some("echo no registry >&2; exit 1")),
             None,
+            None,
         )
         .expect_err("must refuse");
         assert_eq!(problem.step, "setup");
@@ -436,6 +583,7 @@ mod tests {
             &dir.join("wt"),
             &prep_config(&[], Some("pwd > where")),
             None,
+            None,
         )
         .expect("prepares");
         let ran_in = std::fs::read_to_string(dir.join("wt/where")).expect("reads");
@@ -450,6 +598,7 @@ mod tests {
             &dir.join("project"),
             &dir.join("wt"),
             &prep_config(&[], None),
+            None,
             None,
         )
         .expect("prepares");

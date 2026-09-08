@@ -41,7 +41,11 @@ fn is_contained(path: &str) -> bool {
 }
 
 fn default_worktree_base() -> String {
-    "worktrees".to_string()
+    // Under the directory ostraka owns, and resolved against the workspace
+    // rather than against a repository: worktrees belong to the runtime, not
+    // to the thing being worked on, and a checkout of somebody's repository is
+    // not somewhere to leave copies of it.
+    ".ostraka/worktrees".to_string()
 }
 
 // Written out rather than derived: a derived Default would give `base` an empty
@@ -145,14 +149,14 @@ mod tests {
         cfg.validate().expect("valid");
         assert_eq!(cfg.gate.checks.len(), 1);
         assert!(cfg.gate.review.must_differ_from_author);
-        assert_eq!(cfg.worktree.base, "worktrees");
+        assert_eq!(cfg.worktree.base, ".ostraka/worktrees");
     }
 
     #[test]
     fn an_absent_worktree_table_still_yields_a_usable_base() {
         let cfg = Config::parse(SAMPLE).expect("parses");
-        assert_eq!(cfg.worktree.base, "worktrees");
-        assert_eq!(WorktreeConfig::default().base, "worktrees");
+        assert_eq!(cfg.worktree.base, ".ostraka/worktrees");
+        assert_eq!(WorktreeConfig::default().base, ".ostraka/worktrees");
     }
 
     #[test]

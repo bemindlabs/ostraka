@@ -9,16 +9,24 @@
 //! promotion reads it from there; removing a checkout is reversible, removing
 //! the branch would not be.
 
+use crate::workspace::Workspace;
 use ostraka_runtime::{index, worktree};
-use std::path::Path;
 
 type Outcome = Result<bool, Box<dyn std::error::Error>>;
 
-pub fn run(project: &Path, apply: bool, json: bool) -> Outcome {
-    let config = crate::project::load_config(project)?;
-    let base = project.join(&config.worktree.base);
-    let worktrees = worktree::list(project, &base)?;
-    let runs = index::list(&project.join(".ostraka"))?;
+pub fn run(workspace: &Workspace, apply: bool, json: bool) -> Outcome {
+    let config = workspace.config()?;
+    let base = workspace.worktrees(&config);
+    // Worktrees are the workspace's, and every repository that has any is
+    // asked: a checkout belongs to the repository it was made from, and git
+    // will only list it from there.
+    let mut worktrees: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    for repo in workspace.repositories() {
+        for path in worktree::list(&repo.path, &base)? {
+            worktrees.push((repo.path.clone(), path));
+        }
+    }
+    let runs = index::list(&workspace.records())?;
 
     // A worktree whose run is still unfinished is one that may be in use.
     // Nothing here should race a run that is happening right now.
@@ -28,9 +36,9 @@ pub fn run(project: &Path, apply: bool, json: bool) -> Outcome {
         .map(|r| r.run_id.as_str())
         .collect();
 
-    let removable: Vec<&std::path::PathBuf> = worktrees
+    let removable: Vec<&(std::path::PathBuf, std::path::PathBuf)> = worktrees
         .iter()
-        .filter(|path| {
+        .filter(|(_, path)| {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             !unfinished.iter().any(|id| *id == name)
         })
@@ -41,7 +49,7 @@ pub fn run(project: &Path, apply: bool, json: bool) -> Outcome {
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "worktrees": worktrees.len(),
-                "removable": removable.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                "removable": removable.iter().map(|(_, p)| p.display().to_string()).collect::<Vec<_>>(),
                 "kept_because_unfinished": unfinished,
                 "applied": apply,
             }))?
@@ -58,8 +66,8 @@ pub fn run(project: &Path, apply: bool, json: bool) -> Outcome {
     if !apply {
         if !json {
             println!("{} worktree(s) can be removed:", removable.len());
-            for path in &removable {
-                let name = path.strip_prefix(project).unwrap_or(path);
+            for (_, path) in &removable {
+                let name = path.strip_prefix(&workspace.root).unwrap_or(path);
                 println!("  {}", name.display());
             }
             println!("\nBranches and run records are untouched either way.");
@@ -69,8 +77,8 @@ pub fn run(project: &Path, apply: bool, json: bool) -> Outcome {
     }
 
     let mut removed = 0usize;
-    for path in &removable {
-        match worktree::release_path(project, path) {
+    for (repo, path) in &removable {
+        match worktree::release_path(repo, path) {
             Ok(()) => removed += 1,
             Err(e) => eprintln!("could not remove {}: {e}", path.display()),
         }

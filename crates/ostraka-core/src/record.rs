@@ -86,6 +86,13 @@ pub struct RunRecord {
     pub prompt: String,
     pub author: ActorId,
     pub adapter: String,
+    /// Which repository the change was made in.
+    ///
+    /// Defaulted, because a run recorded before a workspace could hold more
+    /// than one was made in the only one there was, and a record that will not
+    /// read back is a record that is gone.
+    #[serde(default)]
+    pub repository: String,
     pub started_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<String>,

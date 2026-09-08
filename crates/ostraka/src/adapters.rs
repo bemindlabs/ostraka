@@ -1,14 +1,14 @@
 //! `ostraka adapters` — what can actually run on this machine.
 
-use crate::project;
+use crate::workspace::Workspace;
 use ostraka_adapter::process::ProcessAdapter;
 use ostraka_adapter::{Availability, VendorAdapter};
-use std::path::Path;
 
 type Outcome = Result<bool, Box<dyn std::error::Error>>;
 
-pub fn run(project_dir: &Path, json: bool) -> Outcome {
-    let mut rows: Vec<(String, Availability)> = project::load_profiles(project_dir)?
+pub fn run(workspace: &Workspace, json: bool) -> Outcome {
+    let mut rows: Vec<(String, Availability)> = workspace
+        .profiles()?
         .into_iter()
         .map(|p| {
             let adapter = ProcessAdapter::new(p);

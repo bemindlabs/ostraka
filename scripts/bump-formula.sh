@@ -2,7 +2,7 @@
 #
 # Point the Homebrew formula at a release.
 #
-#   scripts/bump-formula.sh v3.0.0 dist/
+#   scripts/bump-formula.sh v1.0.0 dist/
 #
 # The second argument is a directory holding the release's `.sha256` sidecars,
 # named exactly as the release workflow packages them. Homebrew needs a checksum
