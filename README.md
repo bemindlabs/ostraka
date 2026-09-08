@@ -12,7 +12,7 @@ own checks have run and an agent that did not write the change has approved it.
 
 ## Status
 
-**3.0 — early, and it runs.** A task goes end to end: isolated worktree, an
+**1.0 — early, and it runs.** A task goes end to end: isolated worktree, an
 agent writes, the project's checks actually execute, a *different* agent
 reviews, and the result is a replayable record.
 

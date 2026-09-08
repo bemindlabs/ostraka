@@ -127,20 +127,24 @@ a genuinely TypeScript-native surface, such as an editor extension.
 ranges; a date-shaped version fights all three. Crate versions and git tags are
 the same number.
 
-**The first release is `v3.0.0`.** Not `v0.1.0`. This is the third generation of
-one product — BWOC 1.x and 2.x preceded it, and `PHILOSOPHY.md` traces the line —
-so numbering it 3 keeps the version honest about what it continues rather than
-pretending the work started here.
+**The first release is `v1.0.0`.** It was `v3.0.0` for most of this project's
+life, and the reason it is not any more is the cost that decision named for
+itself: to anyone meeting this on crates.io, a first published version of 3.0.0
+implies two earlier majors they can neither find nor install. BWOC 1.x and 2.x
+did precede it and `PHILOSOPHY.md` traces the line, but that lineage is a story
+this repository tells, not a range a resolver can reason about — and a registry
+is read by resolvers. The number should describe what is published rather than
+what came before it.
 
-The cost is worth naming: to anyone meeting this on crates.io, a first published
-version of `3.0.0` implies two earlier majors they can neither find nor install,
-because the earlier generations were never public. Nobody is misled about
-stability by it — 3.0.0 promises a stable API under SemVer and that promise
-holds from the tag onward — but the number does claim a history that is not on
-the registry. Chosen deliberately, with that understood.
+Nothing about the lineage is disowned by the change. The philosophy document
+still says what preceded this and why; what stops is the version number making a
+claim about registries that the registries cannot show.
 
-Every version site says `3.0.0` already: the workspace, the four crate manifests
-that inherit it, and `npm/package.json`, which `check-hygiene.sh` keeps in step.
+SemVer's promise holds from the tag onward either way: 1.0.0 is a stable API
+under SemVer, and that is the only thing a version number is obliged to mean.
+
+Every version site says `1.0.0`: the workspace, the four crate manifests that
+inherit it, and `npm/package.json`, which `check-hygiene.sh` keeps in step.
 `Formula/ostraka.rb` says `0.0.0` on purpose — it is a placeholder the release
 job rewrites once artifacts exist, and leaving it obviously wrong is how it
 stays obvious that nothing has been released.
