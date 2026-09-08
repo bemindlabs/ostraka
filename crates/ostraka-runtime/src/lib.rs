@@ -4,6 +4,7 @@
 //! here and so does the gate, deliberately: see [`gate::MergeToken`] for why
 //! they must not be separated.
 
+pub mod author;
 pub mod gate;
 pub mod index;
 pub mod orchestrator;

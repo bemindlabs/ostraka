@@ -140,6 +140,33 @@ pub struct SetupProblem {
 /// Runs before the agent, not merely before the gate. An agent that cannot run
 /// the project's own tools cannot see what it broke, which is how a run ends
 /// with the agent having changed nothing and nobody knowing why.
+/// Whether the workspace's notes reached this worktree as a link.
+///
+/// The fact the author prompt turns on, and it cannot be read off the
+/// configuration. `[worktree]` naming notes is an intention; a repository that
+/// tracks its own `notes/` keeps it, because [`prepare`] leaves what the
+/// checkout brought rather than replacing it. Asking the config would then
+/// tell an agent that a directory the repository owns is not part of the
+/// repository, and invite it to write into the diff it is about to be judged
+/// on.
+///
+/// A symlink is not enough on its own: a repository may track one under that
+/// name. The property the sentence rests on is that it points *out* of the
+/// checkout, so that is what is checked.
+pub fn notes_linked(worktree: &Path) -> bool {
+    let path = worktree.join("notes");
+    let Ok(meta) = std::fs::symlink_metadata(&path) else {
+        return false;
+    };
+    if !meta.file_type().is_symlink() {
+        return false;
+    }
+    match (std::fs::read_link(&path), worktree.canonicalize()) {
+        (Ok(target), Ok(root)) => !target.starts_with(&root),
+        _ => false,
+    }
+}
+
 pub fn prepare(
     project: &Path,
     worktree: &Path,
