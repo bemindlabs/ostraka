@@ -33,6 +33,19 @@ impl Found {
     }
 }
 
+/// What to say about an availability, in one place.
+///
+/// The command line and the browser print this side by side often enough that
+/// two copies would be noticed only after they had already disagreed — and a
+/// new `Availability` variant is exactly the change that would make them.
+pub fn describe(availability: &Availability) -> String {
+    match availability {
+        Availability::Ready { version } => version.clone().unwrap_or_default(),
+        Availability::NotFound { command } => format!("{command} not found on PATH"),
+        Availability::Unusable { reason } => reason.clone(),
+    }
+}
+
 /// Every shipped profile whose id is not among `configured`, probed.
 ///
 /// Probing costs a process launch each, so this is for the commands that are

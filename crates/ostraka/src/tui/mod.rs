@@ -69,11 +69,17 @@ pub fn run(workspace: &Workspace) -> Outcome {
 ///
 /// Probing runs every vendor's binary, so it happens when somebody asks to
 /// see the list rather than when the browser opens.
+/// What this browser can offer to write with, configured or merely installed.
+///
+/// A workspace with no `adapters/` used to answer this with an empty list,
+/// which reads as "there are no agents" and is never what is true — the CLIs
+/// this binary knows how to drive are usually sitting on the PATH already. The
+/// command line stopped saying that; the browser was still saying it.
 fn agents(workspace: &Workspace) -> Vec<Agent> {
     use ostraka_adapter::{VendorAdapter, process::ProcessAdapter};
-    let Ok(profiles) = workspace.profiles() else {
-        return Vec::new();
-    };
+    let profiles = workspace.profiles().unwrap_or_default();
+    let ids: Vec<String> = profiles.iter().map(|p| p.id.clone()).collect();
+
     let mut agents: Vec<Agent> = profiles
         .into_iter()
         .map(|profile| {
@@ -82,17 +88,28 @@ fn agents(workspace: &Workspace) -> Vec<Agent> {
             Agent {
                 id: adapter.id().to_string(),
                 ready: availability.is_ready(),
-                note: match availability {
-                    ostraka_adapter::Availability::Ready { version } => version.unwrap_or_default(),
-                    ostraka_adapter::Availability::NotFound { command } => {
-                        format!("{command} not found on PATH")
-                    }
-                    ostraka_adapter::Availability::Unusable { reason } => reason,
-                },
+                note: crate::discover::describe(&availability),
+                configured: true,
             }
         })
         .collect();
     agents.sort_by(|a, b| a.id.cmp(&b.id));
+
+    // Installed and unwritten, after the configured ones: what the workspace
+    // agreed to comes first, and what it could agree to follows. Only the ones
+    // that answered — an absent CLI offered as a choice is a choice that fails
+    // when it is taken.
+    agents.extend(
+        crate::discover::unconfigured(&ids)
+            .into_iter()
+            .filter(|f| f.ready())
+            .map(|f| Agent {
+                id: f.id,
+                ready: true,
+                note: crate::discover::describe(&f.availability),
+                configured: false,
+            }),
+    );
     agents
 }
 
@@ -798,19 +815,57 @@ fn work_in(app: &mut App, repo: crate::workspace::Repository) {
 
 /// Keys while the agents are being chosen.
 fn agents_key(app: &mut App, code: KeyCode) {
-    let ids: Vec<String> = app.agents.iter().map(|a| a.id.clone()).collect();
-    let here = ids.get(app.pick).cloned();
+    let count = app.agents.len();
     match code {
         KeyCode::Esc | KeyCode::Enter => app.close(),
-        KeyCode::Down => app.pick = (app.pick + 1).min(ids.len().saturating_sub(1)),
+        KeyCode::Down => app.pick = (app.pick + 1).min(count.saturating_sub(1)),
         KeyCode::Up => app.pick = app.pick.saturating_sub(1),
-        KeyCode::Char('a') => app.thread_mut().adapter = here,
-        KeyCode::Char('r') => app.thread_mut().review_adapter = here,
+        KeyCode::Char('a') => {
+            if let Some(id) = adopt(app) {
+                app.thread_mut().adapter = Some(id);
+            }
+        }
+        KeyCode::Char('r') => {
+            if let Some(id) = adopt(app) {
+                app.thread_mut().review_adapter = Some(id);
+            }
+        }
         KeyCode::Char('x') => {
             app.thread_mut().adapter = None;
             app.thread_mut().review_adapter = None;
         }
         _ => {}
+    }
+}
+
+/// Names the highlighted agent, writing its profile first where the workspace
+/// has none.
+///
+/// Choosing an agent the workspace has not agreed to would otherwise set a
+/// name the run cannot resolve — the routing reads `adapters/`, and being
+/// offered something that fails when it is taken is worse than not being
+/// offered it. Writing the profile is the agreement, and it is the same bytes
+/// `init` ships.
+///
+/// A failure to write is said and nothing is chosen: a status line naming the
+/// reason is a better outcome than a selection that will fail later somewhere
+/// less obviously connected to this keystroke.
+fn adopt(app: &mut App) -> Option<String> {
+    let agent = app.agents.get(app.pick)?;
+    let id = agent.id.clone();
+    if agent.configured {
+        return Some(id);
+    }
+    match crate::init::write_profile(&app.workspace, &id) {
+        Ok(()) => {
+            app.status = Some(format!("wrote adapters/{id}.toml"));
+            app.agents = agents(&app.workspace);
+            Some(id)
+        }
+        Err(e) => {
+            app.status = Some(format!("could not write adapters/{id}.toml: {e}"));
+            None
+        }
     }
 }
 
@@ -1435,11 +1490,13 @@ mod tests {
                 id: "writer".into(),
                 ready: true,
                 note: String::new(),
+                configured: true,
             },
             view::Agent {
                 id: "reader".into(),
                 ready: true,
                 note: String::new(),
+                configured: true,
             },
         ];
         a.open(Dialog::Agents);
