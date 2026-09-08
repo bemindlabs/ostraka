@@ -228,21 +228,32 @@ mod tests {
 
         while !remedy.done() && !remedy.failed {
             remedy.take_step(&dir);
-            // An author is needed for the commit and this machine may have
-            // none configured, which is a real failure worth reporting rather
-            // than one to work around.
-            if remedy.failed {
-                assert!(
-                    remedy.said.is_some_and(|s| s.contains("author")
-                        || s.contains("ident")
-                        || s.contains("email")),
-                    "unexpected failure"
-                );
-                std::fs::remove_dir_all(&dir).ok();
-                return;
+            // The commit step needs an identity, and a machine may have none —
+            // which is every runner this has. Giving the repository one as soon
+            // as it exists is the difference between a test about the steps and
+            // a test about the machine.
+            //
+            // It used to assert that a failure mentioned the author and then
+            // return, so on any machine without a git identity everything below
+            // never ran. A test that passes by leaving is a test that passes.
+            if dir.join(".git").is_dir() {
+                for (key, value) in [
+                    ("user.email", "test@example.invalid"),
+                    ("user.name", "test"),
+                ] {
+                    let _ = std::process::Command::new("git")
+                        .args(["config", key, value])
+                        .current_dir(&dir)
+                        .output();
+                }
             }
         }
 
+        assert!(
+            !remedy.failed,
+            "a step failed: {:?}",
+            remedy.said.as_deref()
+        );
         assert!(remedy.done());
         assert!(
             Remedy::diagnose(&dir).is_none(),
