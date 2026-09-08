@@ -1796,6 +1796,13 @@ fn render_prune(frame: &mut Frame, app: &App, screen: Rect) {
         theme::rule(width.saturating_sub(6)),
     ];
 
+    // From the width this dialog actually got, not a number that happens to fit
+    // the terminal it was written on: `width` is already `84.min(screen)`, so a
+    // narrower screen would have overflowed a fixed 70 and a wider one would
+    // have cut paths it had room for. Two for the indent, four for the frame
+    // and its padding.
+    let room = width.saturating_sub(6) as usize;
+
     if app.leftovers.is_empty() {
         lines.push(dim("nothing to prune".to_string()));
     } else {
@@ -1808,7 +1815,7 @@ fn render_prune(frame: &mut Frame, app: &App, screen: Rect) {
                 .to_string();
             lines.push(Line::from(vec![
                 Span::styled("  ", theme::text()),
-                Span::styled(truncate(&shown, 70), theme::text()),
+                Span::styled(truncate(&shown, room.saturating_sub(2)), theme::text()),
             ]));
         }
         lines.push(Line::from(""));

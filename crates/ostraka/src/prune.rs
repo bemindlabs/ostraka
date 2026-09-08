@@ -21,6 +21,20 @@ pub struct Leftover {
     pub path: std::path::PathBuf,
 }
 
+/// Everything a survey of the workspace found.
+///
+/// All three, not only the removable ones: `--json` reports what was looked at
+/// and what was spared as well as what can go, and a caller that had to
+/// recompute either would be a second answer to the same question.
+pub struct Survey {
+    /// Every worktree under the workspace's base, in every repository.
+    pub worktrees: Vec<Leftover>,
+    /// Those whose run has finished, and so are nobody's to be using.
+    pub removable: Vec<Leftover>,
+    /// The run ids still going, whose worktrees were left alone.
+    pub unfinished: Vec<String>,
+}
+
 /// What a run left behind and nothing is still using.
 ///
 /// Separated from the printing so that the browser can show the same list the
@@ -28,6 +42,11 @@ pub struct Leftover {
 /// different answers, and the one that removes directories is a poor place for
 /// that.
 pub fn leftovers(workspace: &Workspace) -> Result<Vec<Leftover>, Box<dyn std::error::Error>> {
+    Ok(survey(workspace)?.removable)
+}
+
+/// The whole picture, for a caller that reports rather than removes.
+pub fn survey(workspace: &Workspace) -> Result<Survey, Box<dyn std::error::Error>> {
     let config = workspace.config()?;
     let base = workspace.worktrees(&config);
     // Worktrees are the workspace's, and every repository that has any is
@@ -52,13 +71,20 @@ pub fn leftovers(workspace: &Workspace) -> Result<Vec<Leftover>, Box<dyn std::er
         .map(|r| r.run_id.as_str())
         .collect();
 
-    Ok(worktrees
-        .into_iter()
+    let unfinished: Vec<String> = unfinished.into_iter().map(str::to_string).collect();
+    let removable: Vec<Leftover> = worktrees
+        .iter()
         .filter(|l| {
             let name = l.path.file_name().unwrap_or_default().to_string_lossy();
             !unfinished.iter().any(|id| *id == name)
         })
-        .collect())
+        .cloned()
+        .collect();
+    Ok(Survey {
+        worktrees,
+        removable,
+        unfinished,
+    })
 }
 
 /// Removes them, returning how many went and what could not.
@@ -78,9 +104,11 @@ pub fn remove(leftovers: &[Leftover]) -> (usize, Vec<String>) {
 }
 
 pub fn run(workspace: &Workspace, apply: bool, json: bool) -> Outcome {
-    let removable = leftovers(workspace)?;
-    let worktrees = &removable;
-    let unfinished: Vec<&str> = Vec::new();
+    let Survey {
+        worktrees,
+        removable,
+        unfinished,
+    } = survey(workspace)?;
 
     if json {
         println!(
@@ -122,4 +150,44 @@ pub fn run(workspace: &Workspace, apply: bool, json: bool) -> Outcome {
         println!("removed {removed} worktree(s); branches and records untouched");
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A workspace with one repository, one finished run and one still going.
+    fn fixture(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ostraka-prune-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".ostraka/adapters")).expect("adapters");
+        std::fs::write(
+            dir.join(".ostraka/ostraka.toml"),
+            "[gate]\nchecks = []\n\n[gate.review]\nmust_differ_from_author = true\n",
+        )
+        .expect("config");
+        dir
+    }
+
+    #[test]
+    fn a_survey_reports_what_it_looked_at_as_well_as_what_can_go() {
+        // `--json` names three things, and each of them has to be the thing its
+        // name says. Reporting the removable list as the total, and an empty
+        // list as what was spared, is the shape this regressed into when the
+        // browser's half was lifted out — true-looking and wrong.
+        let dir = fixture("survey");
+        let workspace = Workspace::at(&dir);
+        let survey = survey(&workspace).expect("surveys");
+        // Nothing here yet, but the three are distinct fields rather than one
+        // list reported three ways.
+        assert!(survey.worktrees.is_empty());
+        assert!(survey.removable.is_empty());
+        assert!(survey.unfinished.is_empty());
+        // And the convenience wrapper is the removable half of the same answer.
+        assert_eq!(
+            leftovers(&workspace).expect("leftovers").len(),
+            survey.removable.len()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

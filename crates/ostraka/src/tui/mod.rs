@@ -829,8 +829,15 @@ fn work_in(app: &mut App, repo: crate::workspace::Repository) {
 /// Keys while the agents are being chosen.
 /// Keys while the leftovers are on screen.
 ///
-/// `y` and nothing else. A dialog that removes directories should not also
-/// respond to enter, which is what somebody presses to dismiss things.
+/// **`y` is the only key that removes anything.** Enter and escape both close
+/// the dialog and take nothing with them, which is what somebody pressing
+/// either of them meant — enter is how the other dialogs are dismissed, and a
+/// destructive one is the worst place to make that keystroke mean something
+/// new.
+///
+/// An earlier version of this comment said "`y` and nothing else", which read
+/// as though enter were unhandled and invited the question of whether it might
+/// remove. It cannot.
 fn prune_key(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Char('y') if !app.leftovers.is_empty() => {
