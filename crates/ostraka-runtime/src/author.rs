@@ -66,8 +66,19 @@ pub fn author_prompt(task: &str, notes: bool, skills: bool) -> String {
     // `skills/` is the workspace's word to a run, not a run's to edit. Said
     // rather than enforced: the link is a link, and a sentence that claimed it
     // was read-only would be a sentence the filesystem contradicts.
+    //
+    // Where to write instead is named only where it exists. Sending an author
+    // to `notes/` in a worktree that has none is inventing a location, which is
+    // the failure the whole "only what is true" rule is about — and it was
+    // there, because the sentence said "Notes" where the test looked for
+    // "`notes/`".
     if skills {
-        said.push_str("\nLeave `skills/` as you found it. Notes are where a run writes.\n");
+        said.push_str("\nLeave `skills/` as you found it.");
+        said.push_str(if notes {
+            " `notes/` is where a run writes.\n"
+        } else {
+            "\n"
+        });
     }
     said
 }
@@ -159,10 +170,22 @@ mod tests {
     }
 
     #[test]
-    fn each_directory_is_described_only_where_it_was_linked() {
+    fn each_directory_is_named_only_where_it_was_linked() {
+        // By word rather than by formatting. The first version of this looked
+        // for "`notes/`" and missed a sentence that said "Notes" — which sent
+        // an author to a directory the worktree did not have.
         let only_notes = author_prompt("t", true, false);
-        assert!(!only_notes.contains("`skills/`"), "{only_notes}");
+        assert!(
+            !only_notes.to_lowercase().contains("skills"),
+            "{only_notes}"
+        );
         let only_skills = author_prompt("t", false, true);
-        assert!(!only_skills.contains("`notes/`"), "{only_skills}");
+        assert!(
+            !only_skills.to_lowercase().contains("notes"),
+            "{only_skills}"
+        );
+        // Both, where both are there.
+        let both = author_prompt("t", true, true);
+        assert!(both.to_lowercase().contains("skills") && both.to_lowercase().contains("notes"));
     }
 }

@@ -88,8 +88,11 @@ impl Workspace {
     ///
     /// The counterpart to `notes/` and the opposite direction of travel. Notes
     /// are what runs worked out and wrote down; skills are what people wrote
-    /// down for runs to follow. Both are the workspace's, both are linked into
-    /// every worktree, and neither is part of the change a reviewer judges.
+    /// down for runs to follow. Both belong to the workspace and neither is
+    /// part of the change a reviewer judges — and each is linked into a
+    /// worktree only where the workspace has one, which is why the pair of
+    /// `_if_present` accessors exists and why an author is told about whichever
+    /// of them actually arrived.
     ///
     /// A workspace directory rather than a vendor one on purpose. Every CLI
     /// here has some private notion of skills or plugins, kept in a home
