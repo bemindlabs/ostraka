@@ -148,6 +148,58 @@ impl Workspace {
         }
     }
 
+    /// Starts a repository here, for work that is not cloned from anywhere.
+    ///
+    /// A workspace is often opened before there is anything in it, and not
+    /// every piece of work begins as somebody else's repository. This is the
+    /// half of "nothing to work on yet" that the browser can do something
+    /// about: cloning needs a URL only the operator knows, and starting one
+    /// needs a name.
+    ///
+    /// Only `git init`. The commit a worktree needs to branch from is left to
+    /// the guided fix, which already asks before it commits and already
+    /// reports git's own words when there is no author configured.
+    pub fn start_repository(&self, name: &str) -> Loaded<Repository> {
+        let name = name.trim();
+        // A name is one path segment. Anything else reaches out of the
+        // directory it is supposed to be creating something in, and a browser
+        // that made a repository two levels up because somebody typed a slash
+        // would be a browser nobody should leave open.
+        if name.is_empty() {
+            return Err("a repository needs a name".into());
+        }
+        if name.starts_with('.') || name.contains(std::path::is_separator) || name.contains("..") {
+            return Err(format!("{name:?} is not a name a directory can have").into());
+        }
+
+        let path = self.repositories_dir().join(name);
+        if path.exists() {
+            return Err(format!("{name} is already here").into());
+        }
+        std::fs::create_dir_all(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+
+        let out = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&path)
+            .output()
+            .map_err(|e| format!("git init: {e}"))?;
+        if !out.status.success() {
+            // Cleaned up rather than left as a directory that looks like a
+            // repository and is not.
+            let _ = std::fs::remove_dir(&path);
+            return Err(format!(
+                "git init failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )
+            .into());
+        }
+
+        Ok(Repository {
+            name: name.to_string(),
+            path,
+        })
+    }
+
     /// How this repository is run: its own answer where it has one.
     pub fn config_for(&self, repo: &Repository) -> Loaded<Config> {
         let theirs = repo.path.join("ostraka.toml");
@@ -282,6 +334,46 @@ mod tests {
             complaint.contains("clone what you want worked on"),
             "{complaint}"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_repository_can_be_started_here_rather_than_cloned() {
+        // Not every piece of work begins as somebody else's repository, and
+        // this is the half of "nothing to work on yet" the browser can do.
+        let (dir, ws) = workspace("start", &[]);
+        let made = ws.start_repository("fresh").expect("starts one");
+
+        assert_eq!(made.name, "fresh");
+        assert!(made.path.join(".git").is_dir(), "git never heard of it");
+        assert_eq!(ws.repositories(), vec![made]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_new_repository_is_left_needing_the_commit_a_worktree_branches_from() {
+        // Left to the guided fix, which asks before it commits and reports
+        // git's own words when there is no author configured.
+        let (dir, ws) = workspace("half", &[]);
+        let made = ws.start_repository("fresh").expect("starts one");
+        assert!(!ostraka_runtime::worktree::has_a_commit(&made.path));
+        assert!(ostraka_runtime::worktree::is_repository(&made.path));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_name_is_refused_rather_than_obeyed() {
+        // A browser that made a repository two levels up because somebody
+        // typed a slash is a browser nobody should leave open.
+        let (dir, ws) = workspace("names", &[]);
+        for bad in ["", "   ", "../escape", "a/b", ".hidden"] {
+            assert!(ws.start_repository(bad).is_err(), "{bad:?} was accepted");
+        }
+        assert!(!dir.parent().expect("a parent").join("escape").exists());
+
+        // And a name already taken is not quietly reused.
+        ws.start_repository("taken").expect("starts one");
+        assert!(ws.start_repository("taken").is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 

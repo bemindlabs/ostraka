@@ -86,6 +86,23 @@ of worktrees, and is *recorded* somewhere that may be neither, and deriving the
 second two from the first was the assumption that a workspace held exactly one
 repository.
 
+**A workspace can start a repository, and stops at `git init`.** "Nothing to
+work on yet" has two halves and only one of them needs the operator: cloning
+needs a URL nobody here knows, and starting needs a name. `w` then `n` takes
+one. It does not make the first commit — that is the guided fix's step, which
+already asks before it commits whatever is lying in a directory and already
+reports git's own words when there is no author configured, and duplicating it
+would be a second place for that to go wrong.
+
+A name is one path segment. A slash, a leading dot or a `..` is refused rather
+than obeyed: a browser that made a repository two levels up because somebody
+typed a slash is a browser nobody should leave open.
+
+**What is in the way is said on the work screen, not only on the setup one.**
+The setup screen is gone the moment setting up is done, which used to leave a
+workspace that was configured, had nowhere to run anything, and said so only if
+you pressed enter and found out.
+
 **How a project is verified is that project's business.** A workspace holding a
 Rust repository and a Node one cannot have one gate between them, so a
 repository's own `ostraka.toml` wins entirely where it has one and the

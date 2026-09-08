@@ -421,6 +421,7 @@ fn perform(app: &mut App, command: Command, records_root: &Path) {
         Command::Runs => app.open(Dialog::Runs),
         Command::Repos => {
             app.open(Dialog::Repos);
+            app.editing = None;
             app.pick = app
                 .workspace
                 .repositories()
@@ -732,25 +733,58 @@ fn fix_key(app: &mut App, code: KeyCode) {
 /// Keys while the repository is being chosen.
 fn repos_key(app: &mut App, code: KeyCode, records_root: &Path) {
     let repositories = app.workspace.repositories();
+
+    // Naming a new one. Cloning needs a URL only the operator knows; starting
+    // one needs a name, which is a thing this screen can take.
+    if let Some(name) = app.editing.as_mut() {
+        match code {
+            KeyCode::Esc => app.editing = None,
+            KeyCode::Enter => {
+                let name = name.clone();
+                app.editing = None;
+                match app.workspace.start_repository(&name) {
+                    Ok(repo) => {
+                        work_in(app, repo);
+                        app.close();
+                    }
+                    Err(e) => app.status = Some(e.to_string()),
+                }
+            }
+            KeyCode::Backspace => {
+                name.pop();
+            }
+            KeyCode::Char(c) => name.push(c),
+            _ => {}
+        }
+        return;
+    }
+
     match code {
+        KeyCode::Char('n') => app.editing = Some(String::new()),
         KeyCode::Esc => app.close(),
         KeyCode::Down => app.pick = (app.pick + 1).min(repositories.len().saturating_sub(1)),
         KeyCode::Up => app.pick = app.pick.saturating_sub(1),
         KeyCode::Enter => {
-            if let Some(repo) = repositories.get(app.pick) {
-                app.pane_mut().repository = Some(repo.clone());
-                // A thread is a chain of runs in one repository. Moving to
-                // another one starts a new chain rather than continuing this
-                // one somewhere it was never made.
-                *app.thread_mut() = thread::Thread::default();
-                app.blocked = blocking(app).map(|r| r.problem);
-                app.status = Some(format!("working in {}", repo.name));
-                let _ = records_root;
+            if let Some(repo) = repositories.get(app.pick).cloned() {
+                work_in(app, repo);
             }
+            let _ = records_root;
             app.close();
         }
         _ => {}
     }
+}
+
+/// Moves this pane's line of work into a repository.
+///
+/// A thread is a chain of runs in one repository, so moving to another starts
+/// a new chain rather than continuing this one somewhere it was never made.
+fn work_in(app: &mut App, repo: crate::workspace::Repository) {
+    let name = repo.name.clone();
+    app.pane_mut().repository = Some(repo);
+    *app.thread_mut() = thread::Thread::default();
+    app.blocked = blocking(app).map(|r| r.problem);
+    app.status = Some(format!("working in {name}"));
 }
 
 /// Keys while the agents are being chosen.
@@ -1039,6 +1073,49 @@ mod tests {
 
     fn alt(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::ALT)
+    }
+
+    #[test]
+    fn a_repository_can_be_started_from_the_browser_when_there_is_nothing_to_clone() {
+        // A workspace is often opened before there is anything in it, and not
+        // every piece of work begins as somebody else's repository.
+        let dir = std::env::temp_dir().join(format!("ostraka-newrepo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("repositories")).expect("scratch");
+
+        let mut a = App::new(Workspace::at(&dir), Vec::new());
+        a.open(Dialog::Repos);
+        handle(&mut a, press(KeyCode::Char('n')), Path::new("/p/.ostraka"));
+        assert_eq!(a.editing.as_deref(), Some(""), "n did not ask for a name");
+
+        typed(&mut a, "fresh");
+        handle(&mut a, press(KeyCode::Enter), Path::new("/p/.ostraka"));
+
+        assert!(
+            dir.join("repositories/fresh/.git").is_dir(),
+            "nothing was started"
+        );
+        assert_eq!(a.repository().map(|r| r.name.clone()), Some("fresh".into()));
+        assert_eq!(a.dialog, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_name_the_browser_will_not_take_says_why_and_leaves_the_dialog_open() {
+        let dir = std::env::temp_dir().join(format!("ostraka-badname-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("repositories")).expect("scratch");
+
+        let mut a = App::new(Workspace::at(&dir), Vec::new());
+        a.open(Dialog::Repos);
+        handle(&mut a, press(KeyCode::Char('n')), Path::new("/p/.ostraka"));
+        typed(&mut a, "../escape");
+        handle(&mut a, press(KeyCode::Enter), Path::new("/p/.ostraka"));
+
+        assert!(a.repository().is_none());
+        assert!(a.status.is_some(), "it declined without saying why");
+        assert!(!dir.parent().expect("a parent").join("escape").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

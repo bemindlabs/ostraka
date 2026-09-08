@@ -411,6 +411,38 @@ fn a_task_in_a_repository_git_does_not_know_offers_the_steps_out_of_it() {
 }
 
 #[test]
+fn a_workspace_with_nothing_in_it_can_start_a_repository_and_work_in_it() {
+    // The whole first five minutes when there is nothing to clone: set the
+    // place up, start something, and be walked through the one thing `git
+    // init` does not do — the commit a worktree branches from.
+    let scratch = Scratch::new("start-here");
+    let mut d = Driver::open(scratch.path());
+    d.ctrl('x').key(KeyCode::Char('i'));
+    d.shows("Nothing has been cloned into");
+
+    d.ctrl('x').key(KeyCode::Char('w'));
+    assert_eq!(d.app.dialog, Some(Dialog::Repos));
+    d.shows("start one here");
+
+    d.key(KeyCode::Char('n')).typed("fresh").key(KeyCode::Enter);
+    assert!(scratch.path().join("repositories/fresh/.git").is_dir());
+    assert_eq!(
+        d.app.repository().map(|r| r.name.clone()),
+        Some("fresh".into())
+    );
+
+    // Started, not finished: a worktree needs a commit to branch from, and the
+    // guided fix is what asks before making one.
+    assert!(
+        d.app.blocked.is_some(),
+        "a repository with no commits read as ready"
+    );
+    d.ctrl('x').key(KeyCode::Char('x'));
+    d.shows("no commits");
+    d.shows("Commit what is here");
+}
+
+#[test]
 fn a_task_typed_into_the_box_runs_and_is_recorded() {
     let _guard = exclusive();
     let scratch = project("run", 0);
