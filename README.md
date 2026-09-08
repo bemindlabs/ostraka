@@ -17,11 +17,60 @@ own checks have run and an agent that did not write the change has approved it.
 > receipts that survived because the medium was cheap and durable. The record is
 > the point.
 
-**Contents** · [Status](#status) · [A workspace](#a-workspace) ·
+**Contents** · [Why](#why) · [Status](#status) · [A workspace](#a-workspace) ·
 [Installing](#installing) · [A window](#a-window-if-you-prefer-one) ·
 [How it is put together](#how-it-is-put-together) ·
 [The one invariant](#the-one-invariant-worth-reading-the-code-for) ·
 [Vendors](#vendors)
+
+## Why
+
+You already have a coding agent, and it works. The gap is not capability. It is
+that when a run finishes, the only account of what happened was written by the
+same process that did it.
+
+The agent says the tests pass. It says it touched three files. Both are output,
+not evidence, and the way you find out otherwise is by reading the whole diff —
+which is the work you were trying not to do. Ostraka's answer is to take that
+account away from the agent:
+
+**The checks run here, not in the summary.** Format, lint, test and build are
+executed as real subprocesses in the worktree. A run that claims a passing suite
+without one having run cannot produce a mergeable result. What changed is read
+from `git status` in the worktree, never from the agent's description of its own
+edits.
+
+**A reviewer with the same blind spots is not a reviewer.** Review goes to a
+different profile than the one that wrote the change, and routing prefers a
+different *binary* — a different training lineage, a different system prompt, a
+different set of things it does not think to check. The runtime will not approve
+a change whose reviewer is its author, and that is a type with no public
+constructor rather than a setting somebody can turn off.
+
+**Your checkout is not the workspace.** Every task runs in its own git worktree.
+The repository you cloned in is left the way its owner left it — no stashes, no
+half-applied edits, no branch you did not ask for.
+
+**A run does not quietly inherit you.** Left alone, an agent reads your personal
+instruction files, your MCP servers and your settings, and behaves like you — so
+the same task answers differently on someone else's machine. Each profile runs
+against its own vendor home, and the environment a vendor gets is built rather
+than inherited. Where a vendor offers no way to isolate,
+[`adapters/README.md`](adapters/README.md) names it instead of implying
+otherwise.
+
+**Nothing merges by itself.** An approved run stops at a commit inside its
+worktree. `ostraka promote` gives it a branch. Merging stays a person's act, and
+a run that never obtained a merge token cannot be promoted at all.
+
+**What happened stays readable.** Every run is a record — the streams, the check
+output, the reviewer's actual words, the verdict. `ostraka replay` reads one back
+a week later, which is when the question usually gets asked.
+
+None of this needs a fleet. One agent writing and one reviewing is the common
+case and the one Ostraka is quickest at. Running several vendors at once is the
+same machinery with more than one line of work open — a capability, not a
+prerequisite.
 
 ## Status
 
