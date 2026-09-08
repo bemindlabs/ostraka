@@ -103,6 +103,11 @@ mod tests {
     fn the_baseline_is_generic_and_names_no_vendor() {
         // The rule this file exists under. A vendor's variable belongs in that
         // vendor's profile, where adding one is a file rather than a release.
+        //
+        // Counted first: every assertion here lives inside the loop, so an
+        // empty baseline would pass this while meaning the environment is not
+        // built at all.
+        assert!(!BASELINE.is_empty(), "nothing is passed to a vendor");
         for name in BASELINE {
             let lower = name.to_lowercase();
             for vendor in [
