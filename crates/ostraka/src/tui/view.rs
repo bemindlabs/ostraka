@@ -111,6 +111,10 @@ pub struct Agent {
     pub id: String,
     pub ready: bool,
     pub note: String,
+    /// This workspace has a profile for it. A false here is a CLI that is
+    /// installed and has none — offered so that an empty list stops being the
+    /// answer to "which agents can I use", and written when one is chosen.
+    pub configured: bool,
 }
 
 pub struct App {
@@ -1792,7 +1796,10 @@ fn render_agents(frame: &mut Frame, app: &App, screen: Rect) {
     ];
 
     if app.agents.is_empty() {
-        lines.push(dim("no adapter profiles in adapters/".to_string()));
+        lines.push(dim(
+            "no adapter profiles here, and none of the ones this build ships are installed"
+                .to_string(),
+        ));
     }
     for (i, agent) in app.agents.iter().enumerate() {
         let here = i == app.pick;
@@ -1808,6 +1815,12 @@ fn render_agents(frame: &mut Frame, app: &App, screen: Rect) {
         } else {
             (theme::FAILED, theme::BAD)
         };
+        // Installed and unwritten reads differently from configured and ready:
+        // choosing it is also agreeing to it, and the row says so before the
+        // key is pressed rather than after.
+        if !agent.configured {
+            role = "not configured — choosing writes it".to_string();
+        }
         lines.push(Line::from(vec![
             Span::styled(if here { theme::CURSOR } else { " " }, theme::accent()),
             Span::styled(format!(" {mark}  "), theme::on(colour)),
@@ -2776,11 +2789,13 @@ mod tests {
                 id: "claude-code".into(),
                 ready: true,
                 note: "2.1.263".into(),
+                configured: true,
             },
             Agent {
                 id: "codex".into(),
                 ready: false,
                 note: "codex not found on PATH".into(),
+                configured: true,
             },
         ];
         app.open(Dialog::Agents);

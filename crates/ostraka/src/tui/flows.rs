@@ -655,6 +655,86 @@ fn continuing_a_run_nobody_recorded_says_so() {
     );
 }
 
+#[test]
+fn the_browser_offers_what_is_installed_and_writes_it_when_chosen() {
+    // A workspace with no `adapters/` answered "which agents can I use" with an
+    // empty list, which reads as "none" and is never what is true — the CLIs
+    // this build knows how to drive are usually on the PATH already. The
+    // command line stopped saying that; the browser was still saying it.
+    let _guard = exclusive();
+    // A workspace with profiles of its own, which is the reachable shape: with
+    // none at all the browser is on the setup screen, which writes them, and
+    // this dialog is not offered. What it could not show was a CLI sitting on
+    // the PATH that this workspace has never written a profile for.
+    let scratch = project("agents-offer", 0);
+    let dir = scratch.path();
+    let mut d = Driver::open(dir);
+
+    d.ctrl('x').key(KeyCode::Char('a'));
+    assert_eq!(d.app.dialog, Some(Dialog::Agents));
+
+    // The workspace's own come first and are marked as its own.
+    assert!(
+        d.app.agents.iter().any(|a| a.configured),
+        "the workspace's own profiles are missing from its own list"
+    );
+    // Anything offered is installed and unwritten. An absent CLI offered as a
+    // choice is a choice that fails when it is taken.
+    assert!(
+        d.app
+            .agents
+            .iter()
+            .filter(|a| !a.configured)
+            .all(|a| a.ready),
+        "something not installed was offered"
+    );
+
+    let Some(offered) = d
+        .app
+        .agents
+        .iter()
+        .find(|a| !a.configured)
+        .map(|a| a.id.clone())
+    else {
+        // Nothing this build ships is installed here, so there is nothing to
+        // offer and nothing to assert about offering it.
+        return;
+    };
+    d.shows("not configured");
+
+    // Choosing one is also agreeing to it. Without the profile the name would
+    // be set and the run could not resolve it, because routing reads
+    // `adapters/` and nothing else.
+    let at = d
+        .app
+        .agents
+        .iter()
+        .position(|a| a.id == offered)
+        .expect("listed");
+    while d.app.pick < at {
+        d.key(KeyCode::Down);
+    }
+    d.key(KeyCode::Char('a'));
+    assert_eq!(d.app.thread().adapter.as_deref(), Some(offered.as_str()));
+    assert!(
+        dir.join(format!(".ostraka/adapters/{offered}.toml"))
+            .is_file(),
+        "the profile was named but never written"
+    );
+
+    // And it is now one of the workspace's own, not an offer any more.
+    let now = d
+        .app
+        .agents
+        .iter()
+        .find(|a| a.id == offered)
+        .expect("still listed");
+    assert!(
+        now.configured,
+        "the written profile is still offered as missing"
+    );
+}
+
 /// Rewrites the writer in a fixture into one whose context fills halfway
 /// through, which is what a token limit actually looks like from here: part of
 /// a change on disk, a non-zero exit, and the reason on stderr.
