@@ -1,6 +1,13 @@
-# Ostraka
+<h1 align="center">Ostraka</h1>
 
-**Run agent fleets you can actually review.**
+<p align="center"><strong>Run agent fleets you can actually review.</strong></p>
+
+<p align="center">
+  <a href="https://github.com/bemindlabs/ostraka/actions/workflows/ci.yml"><img alt="gate" src="https://github.com/bemindlabs/ostraka/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="license" src="https://img.shields.io/badge/license-MIT-blue">
+  <img alt="rust" src="https://img.shields.io/badge/rust-1.85%2B-orange">
+  <img alt="runtime" src="https://img.shields.io/badge/runtime-none-lightgrey">
+</p>
 
 Ostraka runs coding agents from different vendors against one task, in isolated
 git worktrees, and refuses to hand back a mergeable result until the project's
@@ -10,13 +17,19 @@ own checks have run and an agent that did not write the change has approved it.
 > receipts that survived because the medium was cheap and durable. The record is
 > the point.
 
+**Contents** · [Status](#status) · [A workspace](#a-workspace) ·
+[Installing](#installing) · [A window](#a-window-if-you-prefer-one) ·
+[How it is put together](#how-it-is-put-together) ·
+[The one invariant](#the-one-invariant-worth-reading-the-code-for) ·
+[Vendors](#vendors)
+
 ## Status
 
 **1.0 — early, and it runs.** A task goes end to end: isolated worktree, an
 agent writes, the project's checks actually execute, a *different* agent
 reviews, and the result is a replayable record.
 
-```
+```console
 ostraka init       # write the workspace layout. Overwrites nothing
 ostraka check      # validate the workspace, its profiles and its repositories
 ostraka adapters   # list adapter profiles and whether each can run here
@@ -33,7 +46,7 @@ ostraka promote ID # give an approved run a branch. Merges nothing
 Ostraka works from a workspace rather than from inside the repository it is
 working on:
 
-```
+```text
 <workspace>/
   .ostraka/
     ostraka.toml      how runs are made here
@@ -76,7 +89,7 @@ holds several, `--repository` does — and the browser has a picker on `w`.
 A real run — Claude Code wrote the change, Codex reviewed it, neither knew the
 other was involved:
 
-```
+```console
 $ ostraka run "print the current date after the greeting" \
     --author archon --reviewer ephor
 run t907222-20260906T132706Z
@@ -88,7 +101,7 @@ approved — written by archon, reviewed by ephor
 The commit it leaves says who did what, because the run directory will not
 outlive the repository:
 
-```
+```text
 Author: archon <archon@ostraka.invalid>
 
     print the current date after the greeting
@@ -101,7 +114,7 @@ Author: archon <archon@ostraka.invalid>
 An approved run stops at a commit inside its worktree. `ostraka promote` gives
 that commit a branch of its own and then stops too:
 
-```
+```console
 $ ostraka promote t907222-20260906T132706Z
 promoted t907222-20260906T132706Z to promoted/t907222-20260906T132706Z (8db12c5f25b2)
   written by archon, reviewed by ephor
@@ -119,7 +132,7 @@ inside history, and a promotion needs both to say the same thing.
 write the next one; each is isolated, gated and reviewed by a different agent
 than the one that wrote it, and each starts where the last one finished.
 
-```
+```text
  ~/src/ostraka                                     on ostraka/t4821-1-20260908T0301Z
  ───────────────────────────────────────────────────────────────────────────────────
  ▌ add a wall-clock ceiling to the gate
@@ -219,7 +232,7 @@ person — richer routing, and a live view of a run in progress.
 
 ## Installing
 
-```
+```console
 curl -fsSL https://ostraka.sh/install | sh     # a binary, no toolchain
 brew install bemindlabs/ostraka/ostraka
 npm install -g ostraka                          # downloads the same binary
@@ -232,7 +245,7 @@ in CI refuses to let the three that parse that name disagree about it.
 
 ## A window, if you prefer one
 
-```
+```console
 ostraka-app            # the same records, in a desktop window
 ```
 
@@ -247,20 +260,24 @@ platform. macOS, Linux and Windows on x86-64, plus Apple silicon; the command
 line additionally ships for aarch64 Linux, where a GUI would need a cross
 sysroot of window libraries.
 
-### Projects whose dependencies are gitignored
+<details>
+<summary><b>Projects whose dependencies are gitignored</b></summary>
+
 
 A worktree is a fresh checkout, so `node_modules/`, `.venv/` and `vendor/` are
 not in it. Say what to bring:
 
 ```toml
 [worktree]
-base = "worktrees"
+base = ".ostraka/worktrees"   # under the directory ostraka owns
 link = ["node_modules"]     # symlinked in, not installed per worktree
 setup = "make deps"         # or a command, for what linking cannot express
 ```
 
 Both run before the agent starts, so it can use the project's tools too, and a
 failure is reported as a setup problem rather than as a rejected change.
+
+</details>
 
 ## How it is put together
 
@@ -307,8 +324,14 @@ pass on the next attempt.
 
 ## Working in this repository
 
-[`AGENTS.md`](AGENTS.md) — the same file every backend reads.
+[`AGENTS.md`](AGENTS.md) — the same file every backend reads, and the one place
+the rules that a compiler cannot enforce are written down.
 
 ---
 
-MIT · [bemindlabs](https://github.com/bemindlabs)
+<p align="center">
+  MIT · <a href="https://github.com/bemindlabs">bemindlabs</a> ·
+  <a href="AGENTS.md">AGENTS.md</a> ·
+  <a href="PHILOSOPHY.md">PHILOSOPHY.md</a> ·
+  <a href="adapters/README.md">adapters</a>
+</p>
