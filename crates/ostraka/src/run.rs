@@ -183,11 +183,10 @@ pub fn execute(
         Ok(routing) => routing,
         Err(e) => {
             let ids: Vec<String> = profiles.iter().map(|p| p.id.clone()).collect();
-            let found = crate::discover::unconfigured(&ids);
-            return Err(match crate::discover::suggestion(&found) {
-                Some(said) => format!("{e}\n\n{said}").into(),
-                None => Box::new(e) as Box<dyn std::error::Error>,
-            });
+            return Err(Box::new(crate::discover::NoAdapter {
+                said: e.to_string(),
+                found: crate::discover::unconfigured(&ids),
+            }));
         }
     };
 
@@ -249,7 +248,31 @@ pub fn run(workspace: &Workspace, args: &Args, json: bool) -> Outcome {
         }
     });
 
-    let report = execute(workspace, args, None)?;
+    // The command line's own step, and not the run's: `execute` is shared with
+    // the browser, which has a selector of its own and no stdin anybody is
+    // typing into. Where a run failed for want of a profile and one is
+    // installed, the operator is asked; accepting writes it and the run is
+    // tried once more, on a workspace that now declares what it uses.
+    let report = match execute(workspace, args, None) {
+        Ok(report) => report,
+        Err(e) => {
+            let Some(problem) = e.downcast_ref::<crate::discover::NoAdapter>() else {
+                return Err(e);
+            };
+            let choice = crate::offer::profiles(
+                workspace,
+                problem,
+                &mut std::io::stdin().lock(),
+                &mut std::io::stderr(),
+                !json && crate::offer::at_a_terminal(),
+            )?;
+            match choice {
+                crate::offer::Choice::Wrote => execute(workspace, args, None)?,
+                // Once. A second failure is the answer, not another question.
+                crate::offer::Choice::Declined | crate::offer::Choice::NotAsked => return Err(e),
+            }
+        }
+    };
 
     if json {
         let out = serde_json::json!({

@@ -155,6 +155,34 @@ pub const TEMPLATES: [(&str, &str); 4] = [
     ),
 ];
 
+/// Writes one shipped profile into a workspace's `adapters/`.
+///
+/// The same bytes `init` would have written, from the same list, so a profile
+/// added later is the profile that would have been there from the start. The
+/// directory is made if it is missing, because the case this exists for is a
+/// workspace that has no `adapters/` at all.
+///
+/// An existing file is left alone: whoever edited it meant to, and overwriting
+/// somebody's `[env]` block to fix a routing failure would be a poor trade.
+pub fn write_profile(workspace: &crate::workspace::Workspace, id: &str) -> std::io::Result<()> {
+    let Some((_, contents)) = TEMPLATES
+        .iter()
+        .find(|(name, _)| name.strip_suffix(".toml") == Some(id))
+    else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no profile named {id:?} is shipped"),
+        ));
+    };
+    let dir = workspace.adapters();
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{id}.toml"));
+    if path.exists() {
+        return Ok(());
+    }
+    std::fs::write(path, contents)
+}
+
 /// Lines that keep a run's working evidence out of history.
 /// Lines that keep a run's working evidence out of history.
 ///

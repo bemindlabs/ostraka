@@ -21,6 +21,7 @@ use ostraka_adapter::process::ProcessAdapter;
 use ostraka_adapter::{Availability, Profile, VendorAdapter};
 
 /// A profile this binary can write, and whether its CLI answers here.
+#[derive(Debug)]
 pub struct Found {
     pub id: String,
     pub availability: Availability,
@@ -137,3 +138,29 @@ mod tests {
         assert!(said.contains("ostraka init"), "{said}");
     }
 }
+
+/// The error a run fails with when nothing could be routed to.
+///
+/// A type rather than a sentence, so that the command line can recognise the
+/// one case worth offering a way out of without matching on wording somebody
+/// will reasonably reword. It carries what routing said, because that is still
+/// the accurate account of what was tried.
+#[derive(Debug)]
+pub struct NoAdapter {
+    pub said: String,
+    /// The installed profiles this workspace has not configured, already
+    /// probed — so that whoever offers them does not probe a second time.
+    pub found: Vec<Found>,
+}
+
+impl std::fmt::Display for NoAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.said)?;
+        if let Some(said) = suggestion(&self.found) {
+            write!(f, "\n\n{said}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for NoAdapter {}
