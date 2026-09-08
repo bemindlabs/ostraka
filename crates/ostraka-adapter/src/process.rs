@@ -182,7 +182,9 @@ impl VendorAdapter for ProcessAdapter {
             &worktree.to_string_lossy(),
         );
 
-        let mut child = Command::new(&self.profile.command)
+        let mut command = Command::new(&self.profile.command);
+        own_process_group(&mut command);
+        let mut child = command
             .args(&args)
             // Cleared first. `envs` alone adds to what this process inherited,
             // which is the whole launcher environment.
@@ -256,6 +258,57 @@ impl VendorAdapter for ProcessAdapter {
     }
 }
 
+/// Puts a vendor in a process group of its own, so its descendants can be
+/// stopped with it.
+///
+/// Killing a child does not kill what the child spawned: a shell dies and its
+/// `sleep` carries on holding the pipe. A ceiling that leaves the expensive
+/// half of a vendor running has not bounded anything.
+///
+/// It also detaches the vendor from the terminal's foreground group, so Ctrl-C
+/// no longer reaches it by accident — which is the right way round. The stop is
+/// deliberate, and it takes the whole group rather than whatever the terminal
+/// happened to signal.
+#[cfg(unix)]
+fn own_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn own_process_group(_command: &mut Command) {}
+
+/// Stops a vendor and everything it started.
+///
+/// The signal goes to the *group*, whose id is the vendor's own pid — that is
+/// what `process_group(0)` arranges above.
+///
+/// Through `libc` rather than by shelling out to `kill`, because the `kill`
+/// binaries in circulation disagree about what a leading `-` means. procps
+/// reads `-1234` as the pid 1234 and signals the leader alone, leaving standing
+/// exactly the descendants this function exists to stop, and reporting success
+/// while it does. That failure is silent, and it is the one the group signal is
+/// here to prevent.
+fn stop(child: &mut Child) {
+    signal_group(child.id());
+    // Always, and last: the group signal may not have reached anything, and a
+    // vendor ignoring TERM still has to stop.
+    let _ = child.kill();
+}
+
+/// Sends `SIGTERM` to the process group led by `pid`.
+#[cfg(unix)]
+fn signal_group(pid: u32) {
+    // SAFETY: a signal call with no memory contract of any kind. A group that
+    // has already exited answers `ESRCH`, which is the outcome being asked for.
+    unsafe {
+        libc::killpg(pid as libc::pid_t, libc::SIGTERM);
+    }
+}
+
+#[cfg(not(unix))]
+fn signal_group(_pid: u32) {}
+
 pub struct ProcessSession {
     child: Child,
     profile: Profile,
@@ -316,7 +369,7 @@ impl ProcessSession {
                     }
                     self.timed_out = expired;
                     self.interrupted = !expired;
-                    let _ = self.child.kill();
+                    stop(&mut self.child);
                     // Take what already arrived and stop. Killing a shell does
                     // not kill what it spawned, and a surviving grandchild
                     // holds this pipe open — so waiting for EOF here would wait
@@ -513,6 +566,36 @@ mod tests {
             elapsed < Duration::from_secs(20),
             "waited {elapsed:?} for a 400ms ceiling"
         );
+    }
+
+    #[test]
+    fn a_vendors_grandchildren_are_stopped_with_it() {
+        // Killing a shell does not kill its `sleep`. A ceiling that leaves the
+        // expensive half of a vendor running has not bounded anything, and a
+        // real vendor spawns children as a matter of course.
+        let _signals = exclusive();
+        let marker = std::env::temp_dir().join(format!("ostraka-pg-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        // The grandchild outlives the shell and would write the marker if it
+        // were still alive when the ceiling had long passed.
+        let script = format!(
+            "(sleep 3; touch {}) & echo started; sleep 60",
+            marker.display()
+        );
+        let adapter =
+            ProcessAdapter::new(shell_profile(&script)).within(Some(Duration::from_millis(300)));
+        let outcome = adapter
+            .launch(&spec(), Path::new("."))
+            .expect("launches")
+            .finish();
+        assert!(outcome.timed_out);
+
+        std::thread::sleep(Duration::from_secs(5));
+        assert!(
+            !marker.exists(),
+            "a grandchild outlived the vendor it belonged to"
+        );
+        let _ = std::fs::remove_file(&marker);
     }
 
     #[test]

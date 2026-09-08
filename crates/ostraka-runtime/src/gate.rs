@@ -162,7 +162,15 @@ pub fn run_command(cmd: &str, worktree: &Path, ceiling: Option<Duration>) -> Che
         required: true,
     };
 
-    let spawned = Command::new("sh")
+    let mut command = Command::new("sh");
+    // A check that spawns helpers — a test runner forking workers, a build
+    // starting a server — leaves them behind when only the shell is killed.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let spawned = command
         .arg("-c")
         .arg(&check.cmd)
         .current_dir(worktree)
@@ -186,6 +194,23 @@ pub fn run_command(cmd: &str, worktree: &Path, ceiling: Option<Duration>) -> Che
         stderr,
         duration_ms: started.elapsed().as_millis() as u64,
     }
+}
+
+/// Stops a check and everything it started.
+///
+/// The group's id is the shell's own pid, set by `process_group(0)` above.
+/// `libc` rather than a shelled-out `kill`: procps reads `-1234` as a pid, not
+/// a group, and signals the shell alone while reporting success — which leaves
+/// the workers behind that this is here to collect.
+fn stop(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    // SAFETY: a signal call with no memory contract. A group that has already
+    // exited answers `ESRCH`, which is the outcome being asked for.
+    unsafe {
+        libc::killpg(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+    // Always, and last: a check ignoring TERM still has to stop.
+    let _ = child.kill();
 }
 
 /// Runs a check to completion, or kills it for outlasting the ceiling.
@@ -223,7 +248,7 @@ fn wait_for(
                     Ok(None) => {}
                 }
                 if Instant::now() >= deadline || ostraka_adapter::interrupt::requested() {
-                    let _ = child.kill();
+                    stop(&mut child);
                     break true;
                 }
                 std::thread::sleep(Duration::from_millis(25));
@@ -384,6 +409,30 @@ mod tests {
             }
             other => panic!("wrong refusal: {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_workers_a_hung_check_started_are_stopped_with_it() {
+        // Killing the shell does not kill what it forked. A test runner's
+        // workers and a build's servers outlive the check that started them,
+        // and go on holding the ports and the CPU the ceiling was meant to
+        // release.
+        let marker = std::env::temp_dir().join(format!("ostraka-gate-pg-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let mut spec = spec(&[(
+            "forks",
+            &format!("(sleep 4; touch {}) & sleep 120", marker.display()),
+            true,
+        )]);
+        spec.timeout_secs = Some(1);
+        run_checks(&spec, Path::new("."), &mut ignore).expect_err("must refuse");
+
+        std::thread::sleep(Duration::from_secs(6));
+        assert!(
+            !marker.exists(),
+            "a worker outlived the check that started it"
+        );
+        let _ = std::fs::remove_file(&marker);
     }
 
     #[test]
