@@ -806,10 +806,13 @@ fn an_author_is_told_about_the_notes_and_the_record_is_not() {
     let writer = agent(
         &f.repo,
         "writer",
-        // Keeps the instruction it was given, proves it can read what an
-        // earlier run left, and makes a change for the gate to judge.
+        // Keeps the instruction it was given, reads what an earlier run left,
+        // and makes a change for the gate to judge. Both artefacts go into
+        // `notes/` rather than into the worktree: an approved run releases its
+        // worktree, so anything written there is gone before it can be
+        // asserted on — which is what "proves it can read" was resting on.
         "printf '%s' \"$1\" > notes/seen-prompt.txt\n\
-         cat notes/earlier.md > read-back.txt\n\
+         cat notes/earlier.md > notes/read-back.txt\n\
          echo new > added.txt",
     );
     let reviewer = agent(&f.repo, "reviewer", &verdict("APPROVE"));
@@ -857,10 +860,17 @@ fn an_author_is_told_about_the_notes_and_the_record_is_not() {
         "what the agent wrote to notes/ did not reach the workspace"
     );
 
-    // 3. The record kept what was asked, not what was sent.
+    // 3. And reading worked, which is the half the preamble asks for first.
+    //    Asserted rather than implied: the read-back is written back through
+    //    the link, so it outlives the worktree it was produced in.
+    let read_back = std::fs::read_to_string(notes.join("read-back.txt"))
+        .expect("the agent could not read what an earlier run left");
+    assert_eq!(read_back, "what an earlier run worked out");
+
+    // 4. The record kept what was asked, not what was sent.
     assert_eq!(report.record.prompt, "add a file");
 
-    // 4. And so did the commit message, which outlives the record directory.
+    // 5. And so did the commit message, which outlives the record directory.
     let out = Command::new("git")
         .args([
             "log",
@@ -879,5 +889,71 @@ fn an_author_is_told_about_the_notes_and_the_record_is_not() {
     assert!(
         !message.contains("about this worktree"),
         "the preamble reached the commit message: {message}"
+    );
+}
+
+#[test]
+fn a_repository_that_keeps_its_own_notes_is_not_told_they_are_someone_elses() {
+    // `prepare` leaves what the checkout brought: a repository tracking its own
+    // `notes/` keeps it rather than having the workspace's linked over it. The
+    // author prompt has to follow that, and asking the configuration does not —
+    // it would say the directory is "not part of this repository" about a
+    // directory the repository owns, and invite writing into the very diff the
+    // change is judged on.
+    let f = fixture("own-notes");
+    // The repository's own notes, committed, so the worktree brings them.
+    std::fs::create_dir_all(f.repo.join("notes")).expect("repo notes");
+    std::fs::write(f.repo.join("notes/design.md"), "the repository's own\n").expect("write");
+    git(&f.repo, &["add", "-A"]);
+    git(&f.repo, &["commit", "-q", "-m", "notes of its own"]);
+
+    // And a workspace notes directory, declared, as it would be for any run.
+    let workspace_notes = f.repo.join("workspace-notes");
+    std::fs::create_dir_all(&workspace_notes).expect("workspace notes");
+
+    // Kept outside the worktree, which is released on success, and outside the
+    // checkout, so it is not part of the change either.
+    let seen_at = f.repo.join("seen-prompt.txt");
+    let writer = agent(
+        &f.repo,
+        "writer",
+        &format!(
+            "printf '%s' \"$1\" > {}\necho new > added.txt",
+            seen_at.display()
+        ),
+    );
+    let reviewer = agent(&f.repo, "reviewer", &verdict("APPROVE"));
+    let routing = route::select(
+        &[writer, reviewer],
+        Some("writer"),
+        Some("reviewer"),
+        &f.repo.join(".ostraka/vendor-home"),
+        None,
+    )
+    .unwrap();
+
+    let (worktrees, records) = places(&f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: Some(&workspace_notes),
+    };
+    let report = orchestrator::run_task(
+        &places,
+        &config("true"),
+        &routing,
+        &task("add a file", "archon"),
+        &ActorId::new("ephor"),
+        None,
+    )
+    .expect("run completes");
+    assert!(report.approved(), "expected approval: {:?}", report.refusal);
+
+    let seen = std::fs::read_to_string(&seen_at).expect("the prompt the agent was given");
+    assert_eq!(
+        seen, "add a file",
+        "the author was told about notes that were never linked:\n{seen}"
     );
 }

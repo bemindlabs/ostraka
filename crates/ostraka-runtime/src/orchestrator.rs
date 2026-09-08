@@ -138,8 +138,11 @@ pub fn run_task(
     // operator's sentence and it is read again further down — by the record and
     // by the commit message — so composing in place would put this preamble in
     // both, where it is neither what was asked nor part of the audit trail.
+    // Read off the worktree rather than off the configuration. Naming notes in
+    // `[worktree]` is an intention; a repository that tracks its own `notes/`
+    // keeps it, and telling an agent otherwise would point it at the diff.
     let authoring = TaskSpec {
-        prompt: author::author_prompt(&task.prompt, places.notes.is_some()),
+        prompt: author::author_prompt(&task.prompt, worktree::notes_linked(wt.path())),
         ..task.clone()
     };
     let author = drive(routing.author.as_ref(), &authoring, wt.path(), &mut log)?;
