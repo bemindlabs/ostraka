@@ -42,6 +42,22 @@ pub fn is_repository(dir: &Path) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// Whether this repository has a commit to branch from.
+///
+/// `git worktree add <path> HEAD` on a repository nobody has committed to
+/// fails with `invalid reference: HEAD`, which is the second half of the same
+/// problem `is_repository` catches the first half of: `git init` alone is not
+/// enough to run in.
+pub fn has_a_commit(repo: &Path) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(repo)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 pub fn create(repo: &Path, base: &Path, run_id: &str, base_ref: &str) -> Result<Worktree> {
     let path = base.join(run_id);
     let branch = format!("ostraka/{run_id}");

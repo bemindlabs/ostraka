@@ -22,6 +22,7 @@
 
 use crate::init::{Action, Plan};
 use crate::tui::command::{Command, Situation};
+use crate::tui::remedy::Remedy;
 use crate::tui::theme;
 use crate::tui::thread::{Thread, Turn};
 use ostraka_core::gate::{CheckRecord, Verdict};
@@ -98,6 +99,8 @@ pub enum Dialog {
     Runs,
     Agents,
     Leaving,
+    Fix,
+    Settings,
 }
 
 /// One adapter profile, as the agents dialog shows it.
@@ -156,9 +159,15 @@ pub struct App {
     /// Present when this directory is not a project yet: what `init` would
     /// write. `None` once there is nothing left to write.
     pub setup: Option<Plan>,
-    /// Set when the directory is not somewhere git can make a worktree, which
-    /// no amount of setting up will fix. Default false: no problem known.
-    pub not_a_repository: bool,
+    /// Why a run cannot work here, when something is in the way that setting
+    /// the project up does not fix. `None` means nothing known is wrong.
+    pub blocked: Option<String>,
+    /// The steps out of it, once somebody has asked to be walked through them.
+    pub remedy: Option<Remedy>,
+    /// What this project is configured to do, read when settings are opened.
+    pub project_facts: Vec<(String, String)>,
+    /// The settings row being edited, and what has been typed into it.
+    pub editing: Option<String>,
     pub dialog: Option<Dialog>,
     /// What has been typed into the command palette.
     pub query: String,
@@ -201,7 +210,10 @@ impl App {
             follow: true,
             status: None,
             setup: None,
-            not_a_repository: false,
+            blocked: None,
+            remedy: None,
+            project_facts: Vec::new(),
+            editing: None,
             dialog: None,
             query: String::new(),
             pick: 0,
@@ -267,6 +279,7 @@ impl App {
         Situation {
             unconfigured: self.setup.is_some(),
             running: self.thread.running(),
+            blocked: self.blocked.is_some(),
         }
     }
 
@@ -326,6 +339,43 @@ impl App {
         self.prompt = history[at].clone();
     }
 
+    /// True while what is in the box is a command being picked rather than a
+    /// task being written.
+    ///
+    /// One word behind a slash. A task with a space in it is a task, however
+    /// it starts — the shape being recognised here is somebody reaching for a
+    /// command, not somebody writing a sentence.
+    pub fn slashing(&self) -> bool {
+        self.focus == Focus::Prompt
+            && self.dialog.is_none()
+            && self.prompt.starts_with('/')
+            && !self.prompt.contains(char::is_whitespace)
+    }
+
+    /// The commands the slash in the box is offering.
+    pub fn slash_matches(&self) -> Vec<Command> {
+        let word = self.prompt.trim_start_matches('/').to_lowercase();
+        let offered = Command::offered(self.situation());
+        // A word that names a command exactly is that command, not the first
+        // of everything it is a prefix of — and it is how `/help` and `/l`
+        // reach anything at all, since neither is a slug.
+        if let Some(exact) = Command::named(&word).filter(|c| offered.contains(c)) {
+            return vec![exact];
+        }
+        offered
+            .into_iter()
+            .filter(|c| {
+                word.is_empty()
+                    || c.slug().starts_with(&word)
+                    || c.name().to_lowercase().contains(&word)
+            })
+            .collect()
+    }
+
+    pub fn slash_picked(&self) -> Option<Command> {
+        self.slash_matches().get(self.pick).copied()
+    }
+
     /// How many rows the input box wants, border included.
     fn prompt_height(&self) -> u16 {
         let lines = self.prompt.lines().count().clamp(1, PROMPT_LINES);
@@ -364,6 +414,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     render_prompt(frame, app, rows[3]);
+    if app.slashing() {
+        render_slash(frame, app, rows[3]);
+    }
     frame.render_widget(
         Paragraph::new(status_bar(app, rows[4].width.saturating_sub(theme::GUTTER))),
         theme::inset(rows[4]),
@@ -375,6 +428,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Dialog::Runs) => render_runs(frame, app, screen),
         Some(Dialog::Agents) => render_agents(frame, app, screen),
         Some(Dialog::Leaving) => render_leaving(frame, app, screen),
+        Some(Dialog::Fix) => render_fix(frame, app, screen),
+        Some(Dialog::Settings) => render_settings(frame, app, screen),
         None => {}
     }
 
@@ -437,17 +492,7 @@ fn where_we_are(project: &Path) -> String {
 fn render_work(frame: &mut Frame, app: &mut App, area: Rect) {
     app.page = area.height.saturating_sub(1).max(1);
     if app.thread.is_empty() {
-        let empty = vec![
-            dim("Nothing has been asked here yet.".to_string()),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("Write a task below and press ", theme::muted()),
-                Span::styled("enter", theme::accent()),
-                Span::styled(". Each one is isolated, gated and", theme::muted()),
-            ]),
-            dim("reviewed by a different agent than the one that wrote it.".to_string()),
-        ];
-        frame.render_widget(Paragraph::new(empty), area);
+        frame.render_widget(Paragraph::new(opening(app, area.width)), area);
         return;
     }
 
@@ -458,6 +503,72 @@ fn render_work(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     app.scroll = app.scroll.min(overflow);
     frame.render_widget(Paragraph::new(lines).scroll((app.scroll, 0)), area);
+}
+
+/// What is on screen before anything has been asked in this session.
+///
+/// "Nothing has been asked here yet" is true of the thread and false of the
+/// directory, and in a repository with fifty runs behind it that reads as a
+/// browser that has lost them. What was asked here last is the context
+/// somebody opening this wants, so it is the first thing they get.
+fn opening(app: &App, width: u16) -> Vec<Line<'static>> {
+    /// Enough to recognise where the work got to, and not a second list.
+    const RECENT: usize = 5;
+
+    let mut lines = Vec::new();
+    if !app.runs.is_empty() {
+        lines.push(Line::from(Span::styled("Last asked here", theme::bold())));
+        lines.push(Line::from(""));
+        for run in app.runs.iter().take(RECENT) {
+            let (mark, colour) = marker(run.outcome);
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {mark}  "), theme::on(colour)),
+                Span::styled(format!("{:<13}", when(&run.run_id)), theme::muted()),
+                Span::styled(
+                    format!(
+                        "{:<width$}",
+                        truncate(&described(&run.prompt), width.saturating_sub(34) as usize),
+                        width = width.saturating_sub(34) as usize
+                    ),
+                    theme::text(),
+                ),
+                Span::styled(
+                    format!("  {}", outcome_word(run.outcome)),
+                    theme::on(colour),
+                ),
+            ]));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(counted(app), theme::muted()),
+            Span::styled("  \u{b7}  ", theme::muted()),
+            Span::styled("l", theme::accent()),
+            Span::styled(" looks any of them up", theme::muted()),
+        ]));
+        lines.push(Line::from(""));
+        lines.push(theme::rule(width));
+        lines.push(Line::from(""));
+    }
+
+    lines.push(Line::from(vec![
+        Span::styled("Write a task below and press ", theme::muted()),
+        Span::styled("enter", theme::accent()),
+        Span::styled(". Each one is isolated, gated and", theme::muted()),
+    ]));
+    lines.push(dim(
+        "reviewed by a different agent than the one that wrote it.".to_string(),
+    ));
+    // A chain says where the next one will start, which is the other half of
+    // "where did I get to".
+    if app.thread.continuing() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("The next one starts from ", theme::muted()),
+            Span::styled(app.thread.base_ref.clone(), theme::accent()),
+            Span::styled(".", theme::muted()),
+        ]));
+    }
+    lines
 }
 
 fn thread_lines(thread: &Thread, width: u16, tick: u64) -> Vec<Line<'static>> {
@@ -726,6 +837,157 @@ fn render_prompt(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+/// The commands a slash in the box is offering, at the box rather than in the
+/// middle of the screen.
+///
+/// Anchored where the typing is, because that is where the eye already is. The
+/// palette in the middle of the screen is for going and finding a command; this
+/// is for the one you were halfway through naming.
+fn render_slash(frame: &mut Frame, app: &App, box_area: Rect) {
+    const SHOWN: usize = 6;
+    let matches = app.slash_matches();
+    let rows = matches.len().clamp(1, SHOWN);
+    let height = rows as u16 + 2;
+    let width = box_area.width.saturating_sub(theme::GUTTER * 2);
+    if box_area.y < height {
+        return;
+    }
+    let area = Rect {
+        x: box_area.x + theme::GUTTER,
+        y: box_area.y - height,
+        width,
+        height,
+    };
+
+    let mut lines = Vec::new();
+    if matches.is_empty() {
+        lines.push(dim("no command by that name".to_string()));
+    }
+    let first = app.pick.saturating_sub(SHOWN - 1);
+    for (i, command) in matches.iter().enumerate().skip(first).take(SHOWN) {
+        let here = i == app.pick;
+        lines.push(Line::from(vec![
+            Span::styled(if here { theme::CURSOR } else { " " }, theme::accent()),
+            Span::styled(
+                format!(" /{:<12}", command.slug()),
+                if here {
+                    theme::accent().add_modifier(Modifier::BOLD)
+                } else {
+                    theme::text()
+                },
+            ),
+            Span::styled(command.about().to_string(), theme::muted()),
+        ]));
+    }
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(theme::panel(true).padding(Padding::horizontal(1))),
+        area,
+    );
+}
+
+/// What this thread and this project are set to.
+///
+/// Two halves, and the difference between them matters. The top is this
+/// thread's, changeable here and gone when the browser closes. The bottom is
+/// the project's, read from `ostraka.toml` and shown rather than edited: a
+/// gate is a thing a repository agrees on, and a screen that quietly rewrote
+/// it would be a screen that changed what everybody else's runs are judged by.
+fn render_settings(frame: &mut Frame, app: &App, screen: Rect) {
+    let width = 84u16.min(screen.width);
+    let rows = settings_rows(app);
+    let mut lines = vec![
+        Line::from(Span::styled("This thread", theme::bold())),
+        theme::rule(width.saturating_sub(6)),
+    ];
+    for (i, (name, value, editable)) in rows.iter().enumerate() {
+        let here = i == app.pick;
+        let shown = match (&app.editing, here) {
+            (Some(buffer), true) => Line::from(vec![
+                Span::styled(buffer.clone(), theme::text()),
+                Span::styled(theme::CURSOR, theme::accent()),
+            ]),
+            _ => Line::from(Span::styled(
+                value.clone(),
+                if *editable {
+                    theme::text()
+                } else {
+                    theme::muted()
+                },
+            )),
+        };
+        let mut spans = vec![
+            Span::styled(if here { theme::CURSOR } else { " " }, theme::accent()),
+            Span::styled(format!(" {name:<12}"), theme::muted()),
+        ];
+        spans.extend(shown.spans);
+        lines.push(Line::from(spans));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("This project", theme::bold())));
+    lines.push(theme::rule(width.saturating_sub(6)));
+    if app.project_facts.is_empty() {
+        lines.push(dim("no ostraka.toml here yet".to_string()));
+    }
+    for (name, value) in &app.project_facts {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {name:<12}"), theme::muted()),
+            Span::styled(
+                truncate(value, width.saturating_sub(22) as usize),
+                theme::text(),
+            ),
+        ]));
+    }
+    lines.push(dim(
+        "  set in ostraka.toml; a gate is what the repository agrees on".to_string(),
+    ));
+
+    lines.push(Line::from(""));
+    lines.push(match app.editing {
+        Some(_) => dim("enter keeps it \u{b7} esc puts it back".to_string()),
+        None => Line::from(vec![
+            Span::styled("enter", theme::accent()),
+            Span::styled("  change      ", theme::muted()),
+            Span::styled("a", theme::accent()),
+            Span::styled("  who writes and reviews      ", theme::muted()),
+            Span::styled("esc", theme::accent()),
+            Span::styled("  close", theme::muted()),
+        ]),
+    });
+
+    let area = theme::centred(screen, width, lines.len() as u16 + 2);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(theme::panel(true).padding(Padding::horizontal(2))),
+        area,
+    );
+}
+
+/// The thread's own settings: name, what it is, and whether it can be typed at.
+pub fn settings_rows(app: &App) -> Vec<(&'static str, String, bool)> {
+    let chosen = |id: &Option<String>| match id {
+        Some(id) => id.clone(),
+        None => "automatic".to_string(),
+    };
+    vec![
+        ("author", app.thread.author.clone(), true),
+        ("reviewer", app.thread.reviewer.clone(), true),
+        (
+            "model",
+            app.thread
+                .model
+                .clone()
+                .unwrap_or_else(|| "\u{2014}".into()),
+            true,
+        ),
+        ("writes", chosen(&app.thread.adapter), false),
+        ("reviews", chosen(&app.thread.review_adapter), false),
+        ("starts from", app.thread.base_ref.clone(), false),
+    ]
+}
+
 /// The bottom line: what is happening, and what it has cost.
 fn status_bar(app: &App, width: u16) -> Line<'static> {
     if let Some(status) = &app.status {
@@ -943,21 +1205,123 @@ fn render_setup(frame: &mut Frame, app: &App, area: Rect) {
 /// purpose and never said so anywhere the operator would look.
 fn warnings(app: &App, plan: &Plan) -> Vec<(&'static str, String)> {
     let mut out = Vec::new();
-    if app.not_a_repository {
+    if let Some(blocked) = &app.blocked {
         out.push((
             theme::FAILED,
-            "This is not a git repository. A run isolates its work in a worktree,              so `git init` here first — nothing will run until you do."
-                .to_string(),
+            format!("{blocked} Nothing will run until that is dealt with, and x walks through it."),
         ));
     }
     if plan.kind == crate::init::Kind::Unknown {
         out.push((
             "!",
-            "Ostraka could not tell how this project is verified, so the gate it              writes fails on purpose. Edit the checks in ostraka.toml before the              first task — a gate that passed everything would be worse."
+            "Ostraka could not tell how this project is verified, so the gate it writes \
+             fails on purpose. Edit the checks in ostraka.toml before the first task — a \
+             gate that passed everything would be worse."
                 .to_string(),
         ));
     }
     out
+}
+
+/// What is in the way, and the way out of it, one step at a time.
+///
+/// The alternative was the sentence this replaces: git's own account of the
+/// situation, from two layers down, arriving after a run had been started and
+/// a vendor paid, leaving the operator to work out what to do about it.
+fn render_fix(frame: &mut Frame, app: &App, screen: Rect) {
+    let width = 82u16.min(screen.width);
+    let Some(remedy) = &app.remedy else { return };
+    let inner = width.saturating_sub(6) as usize;
+
+    let mut lines = vec![
+        Line::from(Span::styled("Nothing will run here yet", theme::bold())),
+        theme::rule(width.saturating_sub(6)),
+    ];
+    for part in wrap(&remedy.problem, inner) {
+        lines.push(Line::from(Span::styled(part, theme::text())));
+    }
+    lines.push(Line::from(""));
+
+    for (i, step) in remedy.steps.iter().enumerate() {
+        let (mark, colour) = if i < remedy.at {
+            (theme::PASSED, theme::OK)
+        } else if i == remedy.at {
+            (theme::CURSOR, theme::ACCENT)
+        } else {
+            (" ", theme::MUTED)
+        };
+        let here = i == remedy.at;
+        lines.push(Line::from(vec![
+            Span::styled(format!("{mark} "), theme::on(colour)),
+            Span::styled(
+                format!("{}  ", i + 1),
+                if here {
+                    theme::accent()
+                } else {
+                    theme::muted()
+                },
+            ),
+            Span::styled(
+                step.said.clone(),
+                if here {
+                    theme::text().add_modifier(Modifier::BOLD)
+                } else {
+                    theme::text()
+                },
+            ),
+        ]));
+        // Only for the step about to be taken. What the others will do is not
+        // what anybody is deciding about right now.
+        if !here {
+            continue;
+        }
+        if let Some(warns) = &step.warns {
+            for part in wrap(warns, inner.saturating_sub(6)) {
+                lines.push(Line::from(vec![
+                    Span::raw("      "),
+                    Span::styled(part, theme::on(theme::WARN)),
+                ]));
+            }
+        }
+        for argv in &step.commands {
+            lines.push(Line::from(vec![
+                Span::raw("      "),
+                Span::styled(argv.join(" "), theme::accent()),
+            ]));
+        }
+    }
+
+    lines.push(Line::from(""));
+    if let Some(said) = &remedy.said {
+        for part in wrap(said, inner) {
+            lines.push(Line::from(Span::styled(part, theme::on(theme::BAD))));
+        }
+        lines.push(Line::from(""));
+    }
+    lines.push(if remedy.failed {
+        dim("esc closes this".to_string())
+    } else if remedy.done() {
+        Line::from(Span::styled(
+            "Nothing is in the way now. esc closes this.",
+            theme::on(theme::OK),
+        ))
+    } else {
+        Line::from(vec![
+            Span::styled("y", theme::accent()),
+            Span::styled("  do this step      ", theme::muted()),
+            Span::styled("s", theme::accent()),
+            Span::styled("  skip it      ", theme::muted()),
+            Span::styled("esc", theme::accent()),
+            Span::styled("  close", theme::muted()),
+        ])
+    });
+
+    let area = theme::centred(screen, width, lines.len() as u16 + 2);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(theme::panel(true).padding(Padding::horizontal(2))),
+        area,
+    );
 }
 
 /// Leaving, asked rather than assumed.
@@ -1606,11 +1970,13 @@ mod tests {
 
         let mut app = App::new(dir.clone(), Vec::new());
         app.setup = Some(crate::init::plan(&dir));
-        app.not_a_repository = true;
+        app.blocked = Some(
+            "This directory is not a git repository, so a run has nowhere to work.".to_string(),
+        );
 
         let out = screen(&mut app, 100, 30);
         assert!(out.contains("not a git repository"), "{out}");
-        assert!(out.contains("git init"), "{out}");
+        assert!(out.contains("x walks through it"), "{out}");
         assert!(out.contains("fails on purpose"), "{out}");
         assert!(out.contains("before the first task"), "{out}");
 
@@ -1621,6 +1987,109 @@ mod tests {
         let quiet = screen(&mut ok, 100, 30);
         assert!(!quiet.contains("not a git repository"), "{quiet}");
         assert!(!quiet.contains("fails on purpose"), "{quiet}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_slash_in_the_box_offers_the_commands_at_the_box() {
+        // Anchored where the typing is, because that is where the eye already
+        // is. Typing "/settings" used to start a run whose task was the word.
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        app.prompt = "/".into();
+        assert!(app.slashing());
+        let out = screen(&mut app, 100, 24);
+        assert!(out.contains("/settings"), "{out}");
+        assert!(out.contains("/runs"), "{out}");
+
+        app.prompt = "/set".into();
+        let narrowed = screen(&mut app, 100, 24);
+        assert!(narrowed.contains("/settings"), "{narrowed}");
+        assert!(!narrowed.contains("/runs"), "{narrowed}");
+        assert_eq!(app.slash_picked(), Some(Command::Settings));
+
+        // A word that is a command's own name reaches it even where the name
+        // is not its slug.
+        app.prompt = "/help".into();
+        assert_eq!(app.slash_picked(), Some(Command::Keys));
+
+        // A task is a task however it starts. The shape being recognised is
+        // one word behind a slash, not any line beginning with one.
+        app.prompt = "/tmp/x is where it goes".into();
+        assert!(!app.slashing());
+        assert!(!screen(&mut app, 100, 24).contains("/settings"));
+    }
+
+    #[test]
+    fn a_slash_that_names_nothing_says_so_rather_than_offering_everything() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        app.prompt = "/xyzzy".into();
+        assert!(screen(&mut app, 100, 24).contains("no command by that name"));
+        assert_eq!(app.slash_picked(), None);
+    }
+
+    #[test]
+    fn the_settings_show_what_is_this_threads_and_what_is_the_projects() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        app.thread.model = Some("a-model".into());
+        app.thread.adapter = Some("claude-code".into());
+        app.project_facts = vec![
+            ("gate".into(), "format, test".into()),
+            ("agent stops".into(), "900s".into()),
+        ];
+        app.open(Dialog::Settings);
+
+        let out = screen(&mut app, 100, 28);
+        assert!(out.contains("This thread"), "{out}");
+        assert!(out.contains("a-model"), "{out}");
+        assert!(out.contains("claude-code"), "{out}");
+        assert!(out.contains("This project"), "{out}");
+        assert!(out.contains("format, test"), "{out}");
+        assert!(out.contains("900s"), "{out}");
+        // The project's half is shown rather than edited, and says why.
+        assert!(out.contains("the repository agrees on"), "{out}");
+
+        // Editing a row types into it in place.
+        app.editing = Some("archon".into());
+        assert!(screen(&mut app, 100, 28).contains("archon"));
+    }
+
+    #[test]
+    fn the_fix_dialog_walks_through_the_steps_one_at_a_time() {
+        // What this replaces is a sentence: "did not finish — git worktree add
+        // failed: fatal: not a git repository". True, from two layers down,
+        // arriving after a vendor had been paid, and a dead end.
+        let dir = std::env::temp_dir().join(format!("ostraka-view-fix-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+
+        let mut app = App::new(dir.clone(), Vec::new());
+        app.remedy = crate::tui::remedy::Remedy::diagnose(&dir);
+        app.open(Dialog::Fix);
+
+        let out = screen(&mut app, 100, 30);
+        assert!(out.contains("not a git repository"), "{out}");
+        assert!(out.contains("git init"), "{out}");
+        assert!(out.contains("do this step"), "{out}");
+        // The commit warns about what it will take, and only while it is the
+        // step being decided about.
+        assert!(!out.contains("commits everything"), "{out}");
+
+        app.remedy.as_mut().expect("a remedy").at = 1;
+        let second = screen(&mut app, 100, 30);
+        assert!(second.contains("commits everything"), "{second}");
+        assert!(second.contains("git commit"), "{second}");
+
+        app.remedy.as_mut().expect("a remedy").at = 2;
+        assert!(screen(&mut app, 100, 30).contains("Nothing is in the way now"));
+
+        // And a step that failed keeps git's own words rather than a summary.
+        let remedy = app.remedy.as_mut().expect("a remedy");
+        remedy.at = 1;
+        remedy.failed = true;
+        remedy.said = Some("Author identity unknown".to_string());
+        let broken = screen(&mut app, 100, 30);
+        assert!(broken.contains("Author identity unknown"), "{broken}");
+        assert!(!broken.contains("do this step"), "{broken}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1644,8 +2113,50 @@ mod tests {
     fn an_empty_thread_says_what_to_do_rather_than_showing_nothing() {
         let mut app = App::new(PathBuf::from("/p"), Vec::new());
         let out = screen(&mut app, 100, 18);
-        assert!(out.contains("Nothing has been asked here yet"), "{out}");
+        assert!(out.contains("Write a task below"), "{out}");
         assert!(out.contains("reviewed by a different agent"), "{out}");
+        // Nothing to summarise in a directory nothing has run in.
+        assert!(!out.contains("Last asked here"), "{out}");
+    }
+
+    #[test]
+    fn opening_a_project_with_a_history_summarises_it_rather_than_ignoring_it() {
+        // "Nothing has been asked here yet" is true of the thread and false of
+        // the directory, and in a repository with a history behind it that
+        // reads as a browser that has lost it.
+        let mut app = App::new(
+            PathBuf::from("/p"),
+            (0..8)
+                .map(|i| {
+                    summary(
+                        &format!("t{i}-2026090{}T000300Z", i % 10),
+                        &format!("task number {i}"),
+                        Some(if i % 2 == 0 {
+                            Outcome::Approved
+                        } else {
+                            Outcome::Rejected
+                        }),
+                    )
+                })
+                .collect(),
+        );
+        let out = screen(&mut app, 100, 26);
+        assert!(out.contains("Last asked here"), "{out}");
+        assert!(out.contains("task number 0"), "{out}");
+        assert!(out.contains("approved"), "{out}");
+        assert!(out.contains("refused"), "{out}");
+        // Enough to recognise where the work got to, and not a second list.
+        assert!(
+            !out.contains("task number 7"),
+            "the whole history was listed:\n{out}"
+        );
+        assert!(out.contains("8 runs"), "{out}");
+        assert!(out.contains("looks any of them up"), "{out}");
+        // And what to do next is still said.
+        assert!(out.contains("Write a task below"), "{out}");
+
+        app.thread.base_ref = "ostraka/t1-20260908T000100Z".into();
+        assert!(screen(&mut app, 100, 26).contains("The next one starts from"));
     }
 
     #[test]
@@ -1922,6 +2433,14 @@ mod tests {
                     Some(Outcome::Rejected),
                 ),
             ],
+        );
+        // Something in the thread, so what is behind the dialog is a
+        // transcript rather than the opening summary of the same runs.
+        turn(
+            &mut app,
+            "working",
+            vec![Step::Entered(Phase::Authoring)],
+            None,
         );
         app.open(Dialog::Runs);
         let out = screen(&mut app, 110, 24);

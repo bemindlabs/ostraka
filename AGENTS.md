@@ -217,6 +217,48 @@ nothing at all. Both warnings now sit under the offer, before the key that
 takes it, and they stay afterwards because taking the offer does not make them
 untrue.
 
+**A problem the browser recognises comes with the steps out of it.** "did not
+finish — git worktree add failed: fatal: not a git repository" is a true
+sentence and a dead end: it is git's account from two layers down, it arrives
+after a run has been started and a vendor paid, and it leaves the operator to
+work out both that the answer is `git init` and that `git init` alone is not
+enough either, because a worktree needs a commit to branch from.
+`tui::remedy` is that knowledge as steps. It is diagnosed from the state of the
+directory rather than from the text of an error — matching English out of
+another program is how a fix stops working when that program rewords itself —
+and it does nothing on its own: one step per keypress, each one shown with the
+commands it will run before it runs them, because the second commits whatever
+is lying in the operator's directory. A step that fails keeps git's own words,
+which for a missing author identity are better than any sentence written here.
+A run in a directory that cannot host one is refused before it starts, with the
+steps offered and the task still in the box.
+
+**What was asked here last is the first thing you see.** "Nothing has been asked
+here yet" is true of the thread and false of the directory, and in a repository
+with fifty runs behind it that read as a browser that had lost them. The
+opening screen summarises the five most recent — enough to recognise where the
+work got to, and not a second list.
+
+**A slash in the box offers the commands at the box.** Typing `/settings` used
+to start a run whose task was the word "settings". The menu is anchored to the
+input rather than centred, because that is where the eye already is; the
+centred palette is for going and finding a command, this is for the one you
+were halfway through naming. One word behind a slash and nothing else: a task
+is a task however it starts.
+
+**Settings show what is this thread's and what is the repository's, and only
+change the first.** Author identity, reviewer identity and the model hint belong
+to a thread and are typed in place. The gate, the two ceilings and the worktree
+base are read from `ostraka.toml` and shown rather than edited — a gate is what
+a repository agrees on, and a screen that quietly rewrote it would change what
+everybody else's runs are judged by. Read when the settings are opened rather
+than held, because that file is one somebody edits.
+
+**A half-finished chord outranks an open dialog.** The leader is armed after a
+dialog opens, so the dialog was swallowing the letter meant to complete it and
+the leader stayed armed for ever. Chords, then the chord in progress, then what
+is open over the screen, then whoever has the keyboard.
+
 **Leaving is asked, not assumed.** Quitting can discard a task that was being
 written and can stop a run that is going, and one key should not do both
 silently. The dialog says which of the two applies. Already on the way out, it

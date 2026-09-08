@@ -289,7 +289,7 @@ fn setting_up_a_directory_leaves_a_browser_that_can_run_something() {
 
     d.ctrl('x').key(KeyCode::Char('i'));
     d.hides("not an Ostraka project yet");
-    d.shows("Nothing has been asked here yet");
+    d.shows("Write a task below");
     assert!(scratch.path().join("adapters/codex.toml").is_file());
 }
 
@@ -304,7 +304,7 @@ fn onboarding_a_directory_that_git_has_never_heard_of_says_so_first() {
 
     d.shows("not an Ostraka project yet");
     d.shows("not a git repository");
-    d.shows("git init");
+    d.shows("x walks through it");
     // And this one has no recognisable toolchain either, so the gate it would
     // write is a placeholder. Better said before the offer is taken.
     d.shows("fails on purpose");
@@ -312,7 +312,60 @@ fn onboarding_a_directory_that_git_has_never_heard_of_says_so_first() {
     // Taking the offer does not make the warning untrue, so it stays.
     d.ctrl('x').key(KeyCode::Char('i'));
     assert!(scratch.path().join("ostraka.toml").is_file());
-    assert!(d.app.not_a_repository);
+    assert!(
+        d.app.blocked.is_some(),
+        "the warning went away without the cause"
+    );
+}
+
+#[test]
+fn a_task_in_a_directory_git_does_not_know_offers_the_steps_out_of_it() {
+    // What this replaces: the run started, spent a vendor, and came back with
+    // "did not finish — git worktree add failed: fatal: not a git repository",
+    // which is true, is git's account from two layers down, and leaves the
+    // operator to work out both that the answer is `git init` and that `git
+    // init` alone is not enough either.
+    let scratch = Scratch::new("guided");
+    let mut d = Driver::open(scratch.path());
+    d.ctrl('x').key(KeyCode::Char('i'));
+
+    d.typed("write a file").key(KeyCode::Enter);
+    assert!(
+        d.app.thread.live.is_none(),
+        "a run was started with nowhere to work"
+    );
+    assert_eq!(d.app.dialog, Some(Dialog::Fix));
+    assert_eq!(d.app.prompt, "write a file", "the task was thrown away");
+    d.shows("not a git repository");
+    d.shows("git init");
+
+    // Step by step, and only when asked.
+    d.key(KeyCode::Char('y'));
+    assert!(scratch.path().join(".git").is_dir(), "step one did nothing");
+    d.shows("commits everything");
+
+    // Committing needs an author, which this machine may not have configured.
+    // Either way is a real answer: the directory is fixed, or git says why not.
+    let out = Command::new("git")
+        .args([
+            "-c",
+            "user.email=flow@example.invalid",
+            "-c",
+            "user.name=flow",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "seed",
+        ])
+        .current_dir(scratch.path())
+        .output()
+        .expect("git runs");
+    assert!(out.status.success());
+
+    d.key(KeyCode::Esc);
+    d.ctrl('x').key(KeyCode::Char('x'));
+    d.shows("nothing is in the way");
+    assert!(d.app.blocked.is_none());
 }
 
 #[test]
@@ -320,7 +373,9 @@ fn a_task_typed_into_the_box_runs_and_is_recorded() {
     let _guard = exclusive();
     let scratch = project("run", 0);
     let mut d = Driver::open(scratch.path());
-    d.shows("Nothing has been asked here yet");
+    d.shows("Write a task below");
+    // Nothing to summarise yet, which is the honest version of that sentence.
+    d.hides("Last asked here");
 
     d.task("write a file");
 
@@ -609,7 +664,10 @@ fn a_fresh_thread_goes_back_to_head() {
     d.ctrl('x').key(KeyCode::Char('f'));
     assert_eq!(d.app.thread.base_ref, "HEAD");
     assert!(d.app.thread.turns.is_empty());
-    d.shows("Nothing has been asked here yet");
+    // The thread is empty; the directory is not, and the screen says which.
+    d.shows("Write a task below");
+    d.shows("Last asked here");
+    d.shows("write a file");
 }
 
 #[test]

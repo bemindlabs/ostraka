@@ -56,6 +56,10 @@ pub struct Thread {
     pub review_adapter: Option<String>,
     /// A model hint, passed through to whichever profile takes it.
     pub model: Option<String>,
+    /// The identity a run is attributed to, and the one that reviews it. Both
+    /// end up in the commit trailers, so they are worth being able to set.
+    pub author: String,
+    pub reviewer: String,
 }
 
 impl Default for Thread {
@@ -68,6 +72,8 @@ impl Default for Thread {
             adapter: None,
             review_adapter: None,
             model: None,
+            author: run::AUTHOR.to_string(),
+            reviewer: run::REVIEWER.to_string(),
         }
     }
 }
@@ -95,6 +101,8 @@ impl Thread {
         args.adapter = self.adapter.clone();
         args.review_adapter = self.review_adapter.clone();
         args.model = self.model.clone();
+        args.author = self.author.clone();
+        args.reviewer = self.reviewer.clone();
         self.live = Some(Session::start(project, args));
     }
 

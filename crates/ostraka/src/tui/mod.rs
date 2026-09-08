@@ -13,6 +13,7 @@
 mod command;
 #[cfg(test)]
 mod flows;
+mod remedy;
 mod session;
 mod theme;
 mod thread;
@@ -108,10 +109,9 @@ fn open(project_dir: &Path, records_root: &Path) -> Result<App, Box<dyn std::err
     // different questions, and asking the second one put "not an Ostraka
     // project yet" across a screen with three recorded runs behind it.
     app.setup = Some(init::plan(project_dir)).filter(|plan| !plan.runnable());
-    // Asked once, here, because it is the same answer all session and because
-    // the screen that offers to set this directory up is the one that has to
-    // say what setting it up will not fix.
-    app.not_a_repository = !ostraka_runtime::worktree::is_repository(project_dir);
+    // Asked once, here, because the screen that offers to set this directory
+    // up is the one that has to say what setting it up will not fix.
+    app.blocked = remedy::Remedy::diagnose(project_dir).map(|r| r.problem);
     load_detail(&mut app, records_root);
     Ok(app)
 }
@@ -199,8 +199,8 @@ fn finished_run(app: &mut App, records_root: &Path, run_id: Option<String>) {
 fn handle(app: &mut App, key: KeyEvent, records_root: &Path) {
     // In the order a keystroke has to be read. The chords come first because
     // they are the way out of anywhere: a box with the keys must not be able to
-    // swallow the key that opens the commands. Then what is open over the
-    // screen, then a half-finished chord, then whoever has the keyboard.
+    // swallow the key that opens the commands. Then a half-finished chord, then
+    // what is open over the screen, then whoever has the keyboard.
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Char('k') if control => return app.open(Dialog::Commands),
@@ -212,10 +212,9 @@ fn handle(app: &mut App, key: KeyEvent, records_root: &Path) {
         _ => {}
     }
 
-    if app.dialog.is_some() {
-        dialog_key(app, key, records_root);
-        return;
-    }
+    // The leader before the dialog, because it was armed after the dialog
+    // opened. The other way round, a dialog swallowed the letter that was
+    // meant to complete the chord and the leader stayed armed for ever.
     if app.leader {
         app.leader = false;
         if let KeyCode::Char(c) = key.code {
@@ -228,13 +227,17 @@ fn handle(app: &mut App, key: KeyEvent, records_root: &Path) {
         }
         return;
     }
+    if app.dialog.is_some() {
+        dialog_key(app, key, records_root);
+        return;
+    }
 
     // Any keypress supersedes the last message. A status line that outlives
     // what it described is worse than no status line.
     app.status = None;
 
     if app.focus == Focus::Prompt {
-        prompt_key(app, key);
+        prompt_key(app, key, records_root);
     } else {
         command_key(app, key, records_root);
     }
@@ -244,13 +247,26 @@ fn handle(app: &mut App, key: KeyEvent, records_root: &Path) {
 ///
 /// The whole point of this browser is that you say what you want, so what you
 /// type is the task. Everything else is a chord or is behind escape.
-fn prompt_key(app: &mut App, key: KeyEvent) {
+fn prompt_key(app: &mut App, key: KeyEvent, records_root: &Path) {
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         // A task worth writing sometimes takes a paragraph, and a box that
         // could not hold one would push the work back out to the shell.
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => app.prompt.push('\n'),
         KeyCode::Char('j') if control => app.prompt.push('\n'),
+        KeyCode::Enter if app.slashing() => {
+            let picked = app.slash_picked();
+            app.prompt.clear();
+            app.pick = 0;
+            match picked {
+                Some(command) => perform(app, command, records_root),
+                None => app.status = Some("no command by that name".to_string()),
+            }
+        }
+        KeyCode::Up if app.slashing() => app.pick = app.pick.saturating_sub(1),
+        KeyCode::Down if app.slashing() => {
+            app.pick = (app.pick + 1).min(app.slash_matches().len().saturating_sub(1));
+        }
         KeyCode::Enter => start_run(app),
         // The task is kept. It took thought to write, and coming back to it
         // after looking something up is the normal way of working.
@@ -258,6 +274,7 @@ fn prompt_key(app: &mut App, key: KeyEvent) {
         KeyCode::Backspace => {
             app.prompt.pop();
             app.history_at = None;
+            app.pick = 0;
         }
         KeyCode::Up => app.recall(-1),
         KeyCode::Down => app.recall(1),
@@ -266,6 +283,7 @@ fn prompt_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char(c) => {
             app.prompt.push(c);
             app.history_at = None;
+            app.pick = 0;
         }
         _ => {}
     }
@@ -355,6 +373,12 @@ fn perform(app: &mut App, command: Command, records_root: &Path) {
         Command::Stop => {
             app.thread.stop();
             app.status = Some("asked the agent to stop".to_string());
+        }
+        Command::Fix => open_fix(app),
+        Command::Settings => {
+            app.project_facts = project_facts(&app.project);
+            app.editing = None;
+            app.open(Dialog::Settings);
         }
         Command::Runs => app.open(Dialog::Runs),
         Command::Agents => {
@@ -456,6 +480,8 @@ fn dialog_key(app: &mut App, key: KeyEvent, records_root: &Path) {
             _ => {}
         },
         Some(Dialog::Agents) => agents_key(app, key.code),
+        Some(Dialog::Fix) => fix_key(app, key.code),
+        Some(Dialog::Settings) => settings_key(app, key.code),
         Some(Dialog::Leaving) => {
             let leaving = matches!(
                 key.code,
@@ -469,6 +495,137 @@ fn dialog_key(app: &mut App, key: KeyEvent, records_root: &Path) {
         // The keys dialog has nothing to type into, so any key closes it. A
         // reference someone has to work out how to dismiss is a poor reference.
         Some(Dialog::Keys) | None => app.close(),
+    }
+}
+
+/// What this project is configured to do, for a screen that shows it.
+///
+/// Read when the settings are opened rather than held: `ostraka.toml` is a
+/// file somebody edits, and a browser showing what it said an hour ago would
+/// be showing the wrong thing precisely when they had just changed it.
+fn project_facts(project: &Path) -> Vec<(String, String)> {
+    let Ok(config) = project::load_config(project) else {
+        return Vec::new();
+    };
+    let said = |secs: Option<u64>| match secs {
+        Some(s) => format!("{s}s"),
+        None => "no ceiling".to_string(),
+    };
+    let mut facts = vec![(
+        "gate".to_string(),
+        config
+            .gate
+            .checks
+            .iter()
+            .map(|c| c.name.clone())
+            .collect::<Vec<_>>()
+            .join(", "),
+    )];
+    facts.push(("agent stops".to_string(), said(config.policy.timeout_secs)));
+    facts.push(("gate stops".to_string(), said(config.gate.timeout_secs)));
+    facts.push(("worktrees".to_string(), config.worktree.base.clone()));
+    facts
+}
+
+/// Keys while the settings are open.
+///
+/// The thread's own rows can be typed into; the project's cannot. A gate is
+/// what a repository agrees on, and a screen that quietly rewrote it would
+/// change what everybody else's runs are judged by.
+fn settings_key(app: &mut App, code: KeyCode) {
+    let rows = view::settings_rows(app);
+    if let Some(buffer) = app.editing.as_mut() {
+        match code {
+            KeyCode::Esc => app.editing = None,
+            KeyCode::Enter => {
+                let value = buffer.trim().to_string();
+                app.editing = None;
+                apply_setting(app, rows.get(app.pick).map(|r| r.0), value);
+            }
+            KeyCode::Backspace => {
+                buffer.pop();
+            }
+            KeyCode::Char(c) => buffer.push(c),
+            _ => {}
+        }
+        return;
+    }
+    match code {
+        KeyCode::Esc => app.close(),
+        KeyCode::Down => app.pick = (app.pick + 1).min(rows.len().saturating_sub(1)),
+        KeyCode::Up => app.pick = app.pick.saturating_sub(1),
+        KeyCode::Char('a') => {
+            app.agents = agents(&app.project);
+            app.open(Dialog::Agents);
+        }
+        KeyCode::Enter => {
+            if let Some((_, value, editable)) = rows.get(app.pick) {
+                if *editable {
+                    // Starts from what is there, because most changes are edits.
+                    app.editing = Some(if value == "\u{2014}" {
+                        String::new()
+                    } else {
+                        value.clone()
+                    });
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Puts a typed setting where it belongs.
+fn apply_setting(app: &mut App, row: Option<&'static str>, value: String) {
+    match row {
+        // An empty identity would end up in a commit trailer as nothing at
+        // all, so it is refused rather than written.
+        Some("author") if !value.is_empty() => app.thread.author = value,
+        Some("reviewer") if !value.is_empty() => app.thread.reviewer = value,
+        Some("model") => {
+            app.thread.model = (!value.is_empty()).then_some(value);
+        }
+        _ => {}
+    }
+}
+
+/// Opens the guided fix, worked out fresh: the directory may have been put
+/// right in another window since anybody last looked.
+fn open_fix(app: &mut App) {
+    app.remedy = remedy::Remedy::diagnose(&app.project);
+    app.blocked = app.remedy.as_ref().map(|r| r.problem.clone());
+    match app.remedy {
+        Some(_) => app.open(Dialog::Fix),
+        None => app.status = Some("nothing is in the way".to_string()),
+    }
+}
+
+/// Keys while the steps out of a problem are being taken.
+///
+/// One step per keypress, and only when asked for. The second of them commits
+/// whatever is lying in the operator's directory, which is not a thing to do
+/// quietly on somebody's behalf.
+fn fix_key(app: &mut App, code: KeyCode) {
+    let project = app.project.clone();
+    let Some(remedy) = app.remedy.as_mut() else {
+        app.close();
+        return;
+    };
+    match code {
+        KeyCode::Esc => {
+            app.remedy = None;
+            app.close();
+        }
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter if !remedy.done() => {
+            remedy.take_step(&project);
+            // Asked again rather than assumed: the steps are what somebody
+            // believed would work, and whether they did is a question for the
+            // directory.
+            if remedy.done() && !remedy.failed {
+                app.blocked = remedy::Remedy::diagnose(&project).map(|r| r.problem);
+            }
+        }
+        KeyCode::Char('s') if !remedy.done() => remedy.at += 1,
+        _ => {}
     }
 }
 
@@ -511,6 +668,16 @@ fn start_run(app: &mut App) {
         app.status = Some(unavailable(app, Command::NewRun));
         return;
     }
+    // Checked here rather than found out from inside the run. The run would
+    // fail at `git worktree add` two layers down, in git's own words, having
+    // already been started — and the task in the box would be gone.
+    if let Some(remedy) = remedy::Remedy::diagnose(&app.project) {
+        app.blocked = Some(remedy.problem.clone());
+        app.remedy = Some(remedy);
+        app.open(Dialog::Fix);
+        return;
+    }
+    app.blocked = None;
     app.prompt.clear();
     app.history_at = None;
     app.status = None;
@@ -731,6 +898,59 @@ mod tests {
         assert!(!a.leader);
         assert!(!a.quit);
         assert!(a.prompt.is_empty(), "the leader's letter reached the box");
+    }
+
+    #[test]
+    fn a_slash_command_typed_into_the_box_runs_the_command_not_a_task() {
+        let mut a = app();
+        typed(&mut a, "/settings");
+        assert!(a.slashing());
+        handle(&mut a, press(KeyCode::Enter), Path::new("/p/.ostraka"));
+
+        assert_eq!(a.dialog, Some(Dialog::Settings));
+        assert!(a.thread.live.is_none(), "a run was started for a command");
+        assert!(a.prompt.is_empty(), "the command was left in the box");
+    }
+
+    #[test]
+    fn a_setting_typed_into_the_thread_reaches_the_next_run() {
+        let mut a = app();
+        a.open(Dialog::Settings);
+        handle(&mut a, press(KeyCode::Enter), Path::new("/p/.ostraka"));
+        assert!(a.editing.is_some(), "enter did not open the row");
+        for _ in 0.."author".len() {
+            handle(&mut a, press(KeyCode::Backspace), Path::new("/p/.ostraka"));
+        }
+        typed(&mut a, "archon");
+        handle(&mut a, press(KeyCode::Enter), Path::new("/p/.ostraka"));
+
+        assert_eq!(a.editing, None);
+        assert_eq!(a.thread.author, "archon");
+    }
+
+    #[test]
+    fn an_identity_cannot_be_emptied_into_a_commit_trailer() {
+        let mut a = app();
+        a.open(Dialog::Settings);
+        handle(&mut a, press(KeyCode::Enter), Path::new("/p/.ostraka"));
+        for _ in 0.."author".len() {
+            handle(&mut a, press(KeyCode::Backspace), Path::new("/p/.ostraka"));
+        }
+        handle(&mut a, press(KeyCode::Enter), Path::new("/p/.ostraka"));
+        assert_eq!(a.thread.author, "author", "an identity was emptied");
+    }
+
+    #[test]
+    fn a_chord_armed_over_a_dialog_still_completes() {
+        // The other way round, the dialog swallowed the letter meant to
+        // complete the chord and the leader stayed armed for ever.
+        let mut a = app();
+        a.open(Dialog::Keys);
+        handle(&mut a, control('x'), Path::new("/p/.ostraka"));
+        assert!(a.leader);
+        handle(&mut a, press(KeyCode::Char('q')), Path::new("/p/.ostraka"));
+        assert!(!a.leader, "the leader was swallowed and stayed armed");
+        assert_eq!(a.dialog, Some(Dialog::Leaving));
     }
 
     #[test]

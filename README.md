@@ -137,6 +137,14 @@ it printed, what the reviewer said, the diff read from the commit, and `p` to
 promote it. `?` lists every key, and `q` asks before it leaves —
 quitting can discard the task in the box and stop a run that is going.
 
+Typing `/` in the box offers the commands at the box, filtered as you type;
+`/settings` shows what this thread and this project are set to. Opening a
+repository that has runs behind it summarises the last few rather than claiming
+nothing has been asked here. And where something is in the way of a run at all —
+a directory git has never heard of, a repository with no commits — the browser
+says what it is and walks through the steps out of it, one keypress at a time,
+showing each command before it runs it.
+
 Regions are divided by rules rather than by space alone, and colour carries
 meaning rather than decoration: the runtime is muted, the author is the accent,
 the gate is the colour of something being tested, the reviewer is its own. All

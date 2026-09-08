@@ -19,6 +19,9 @@ pub struct Situation {
     /// A run is going. There is one at a time — running several at once is the
     /// parallel-execution question, and it is not answered yet.
     pub running: bool,
+    /// Something outside the project's own configuration is in the way, and
+    /// the browser knows the steps out of it.
+    pub blocked: bool,
 }
 
 /// Everything the browser does, named the way a person would ask for it.
@@ -26,8 +29,10 @@ pub struct Situation {
 pub enum Command {
     NewRun,
     Stop,
+    Fix,
     Runs,
     Agents,
+    Settings,
     Fresh,
     NextPane,
     Promote,
@@ -40,11 +45,13 @@ pub enum Command {
 impl Command {
     /// In the order the palette offers them: what someone reaches for most,
     /// first.
-    pub const ALL: [Command; 11] = [
+    pub const ALL: [Command; 13] = [
         Command::NewRun,
         Command::Stop,
+        Command::Fix,
         Command::Runs,
         Command::Agents,
+        Command::Settings,
         Command::Fresh,
         Command::NextPane,
         Command::Promote,
@@ -58,8 +65,10 @@ impl Command {
         match self {
             Command::NewRun => "write a task",
             Command::Stop => "stop the run",
+            Command::Fix => "fix what is in the way",
             Command::Runs => "runs",
             Command::Agents => "agents",
+            Command::Settings => "settings",
             Command::Fresh => "start a fresh thread",
             Command::NextPane => "next pane",
             Command::Promote => "promote run",
@@ -75,8 +84,10 @@ impl Command {
         match self {
             Command::NewRun => "n",
             Command::Stop => "s",
+            Command::Fix => "x",
             Command::Runs => "l",
             Command::Agents => "a",
+            Command::Settings => ",",
             Command::Fresh => "f",
             Command::NextPane => "tab",
             Command::Promote => "p",
@@ -96,8 +107,10 @@ impl Command {
         match self {
             Command::NewRun => 'n',
             Command::Stop => 's',
+            Command::Fix => 'x',
             Command::Runs => 'l',
             Command::Agents => 'a',
+            Command::Settings => ',',
             Command::Fresh => 'f',
             Command::NextPane => 't',
             Command::Promote => 'p',
@@ -112,8 +125,10 @@ impl Command {
         match self {
             Command::NewRun => "say what the agent should do next",
             Command::Stop => "ask the running agent to stop",
+            Command::Fix => "walk through what is stopping a run from working",
             Command::Runs => "look up a run recorded here",
             Command::Agents => "choose who writes and who reviews",
+            Command::Settings => "what this thread and this project are set to",
             Command::Fresh => "forget the chain; start again from HEAD",
             Command::NextPane => "checks, then events, then the diff",
             Command::Promote => "give an approved run a branch; merges nothing",
@@ -122,6 +137,44 @@ impl Command {
             Command::Keys => "every key this screen answers to",
             Command::Quit => "leave the browser",
         }
+    }
+
+    /// The word this command answers to when it is typed rather than pressed.
+    ///
+    /// Short and unambiguous, and not derived from the name: "write a task"
+    /// and "start a fresh thread" are sentences, and a slug taken from a
+    /// sentence changes whenever somebody improves the wording.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Command::NewRun => "new",
+            Command::Stop => "stop",
+            Command::Fix => "fix",
+            Command::Runs => "runs",
+            Command::Agents => "agents",
+            Command::Settings => "settings",
+            Command::Fresh => "fresh",
+            Command::NextPane => "pane",
+            Command::Promote => "promote",
+            Command::Reload => "reload",
+            Command::Setup => "init",
+            Command::Keys => "keys",
+            Command::Quit => "quit",
+        }
+    }
+
+    /// The command a typed word names, if any.
+    ///
+    /// The box takes tasks, so a word only reaches here behind a `/` — which
+    /// is what everybody types first anyway, and typing it used to produce a
+    /// run whose task was the word "settings".
+    pub fn named(word: &str) -> Option<Command> {
+        let word = word.trim().trim_start_matches('/').to_lowercase();
+        if word == "help" || word == "?" {
+            return Some(Command::Keys);
+        }
+        Command::ALL
+            .into_iter()
+            .find(|command| command.slug() == word || command.key() == word)
     }
 
     /// The commands worth offering here and now.
@@ -140,6 +193,9 @@ impl Command {
                 Command::NewRun => !situation.running && !situation.unconfigured,
                 // Choosing between profiles needs profiles to choose between.
                 Command::Agents => !situation.unconfigured,
+                // Only where there is something the browser knows the way out
+                // of. An offer to fix nothing is an offer nobody can take.
+                Command::Fix => situation.blocked,
                 // Throwing the chain away underneath a run that is standing on
                 // it is not something to offer.
                 Command::Fresh => !situation.running,
@@ -169,6 +225,7 @@ mod tests {
     const IDLE: Situation = Situation {
         unconfigured: false,
         running: false,
+        blocked: false,
     };
 
     #[test]
@@ -222,9 +279,19 @@ mod tests {
 
     #[test]
     fn an_empty_query_offers_everything_that_makes_sense() {
-        // Everything but stopping a run that is not going, and setting up a
-        // directory that is already set up.
-        assert_eq!(Command::matching("", IDLE).len(), Command::ALL.len() - 2);
+        // Everything but stopping a run that is not going, setting up a
+        // directory that is already set up, and fixing what is not broken.
+        assert_eq!(Command::matching("", IDLE).len(), Command::ALL.len() - 3);
+    }
+
+    #[test]
+    fn fixing_is_offered_only_where_there_is_something_in_the_way() {
+        let blocked = Situation {
+            blocked: true,
+            ..IDLE
+        };
+        assert!(Command::offered(blocked).contains(&Command::Fix));
+        assert!(!Command::offered(IDLE).contains(&Command::Fix));
     }
 
     #[test]
@@ -235,6 +302,27 @@ mod tests {
         };
         assert!(!Command::offered(running).contains(&Command::Fresh));
         assert!(Command::offered(IDLE).contains(&Command::Fresh));
+    }
+
+    #[test]
+    fn a_typed_word_reaches_the_command_it_names() {
+        assert_eq!(Command::named("/settings"), Some(Command::Settings));
+        assert_eq!(Command::named("settings"), Some(Command::Settings));
+        assert_eq!(Command::named("/QUIT"), Some(Command::Quit));
+        // The keys work too, because somebody who knows `l` will type `/l`.
+        assert_eq!(Command::named("/l"), Some(Command::Runs));
+        // And the word everyone tries first.
+        assert_eq!(Command::named("/help"), Some(Command::Keys));
+        assert_eq!(Command::named("/nonsense"), None);
+    }
+
+    #[test]
+    fn every_command_has_a_slug_of_its_own() {
+        let mut slugs: Vec<&str> = Command::ALL.iter().map(|c| c.slug()).collect();
+        let count = slugs.len();
+        slugs.sort_unstable();
+        slugs.dedup();
+        assert_eq!(slugs.len(), count, "two commands share a slug");
     }
 
     #[test]
