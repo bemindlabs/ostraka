@@ -23,7 +23,7 @@ ostraka adapters   # list adapter profiles and whether each can run here
 ostraka run "..."  # isolate, execute, gate, review, record
 ostraka replay ID  # read a finished run back
 ostraka runs       # every run this project has recorded
-ostraka tui        # browse them in the terminal, and start new ones
+ostraka tui        # write tasks, watch them run, read them back
 ostraka prune      # remove worktrees finished runs left. Branches untouched
 ostraka promote ID # give an approved run a branch. Merges nothing
 ```
@@ -79,82 +79,78 @@ It refuses a run the gate refused, and it refuses one whose record and whose
 commit disagree — the record is a file beside the repository, the trailers are
 inside history, and a promotion needs both to say the same thing.
 
-`ostraka tui` is a browser over the same records — what ran, what it was for,
-which check failed and what it printed, what the reviewer said, the diff itself,
-and `p` to promote an approved one:
+`ostraka tui` is where the work happens. You write a task, watch it run, and
+write the next one; each is isolated, gated and reviewed by a different agent
+than the one that wrote it, and each starts where the last one finished.
 
 ```
- ~/src/ostraka
+ ~/src/ostraka                                     on ostraka/t4821-1-20260908T0301Z
+ ───────────────────────────────────────────────────────────────────────────────────
+ ▌ add a wall-clock ceiling to the gate
+ isolate
+ prepare
+ author
+ │ said reading crates/ostraka-runtime/src/gate.rs
+ │ done exit 0, 2 file(s)
+ gate
+ │ ✓ pass  format      126ms
+ │ ✓ pass  test       4830ms
+ review
+ │ said VERDICT-bb6aac54: APPROVE
+ ────────────────────────────────────────────── approved — nothing merged ──
+ ▌ now add a test for it
+ author  ⠹
 
-▌ ✓  09-07 03:54  Add a test for first_l…   t3354339-20260907T035406Z   approved
-▌ │  4 of 4 checks · approved
-                                            task      Add a test asserting first_line
-  ✗  09-07 02:11  Rename ActorId::name…               trims a trailing newline
-  │  3 of 4 checks · refused                author    archon (claude-code)
-                                            reviewer  ephor — approve
-
-                                            checks   events   diff
-                                            @@ -57,3 +57,33 @@ fn first_line(prompt: &str)
-                                            +#[cfg(test)]
-                                            +mod tests {
-
- ╭──────────────────────────────────────────────────────────────────────────────────────────╮
- │ /  filter runs…     ctrl-k for commands                                                  │
- ╰──────────────────────────────────────────────────────────────────────────────────────────╯
- ostraka 3.0.0  ·  2 of 7 runs    tokens  claude-code 159.5k in / 4.3k out · codex 14.7k total
+ ╭ › ───────────────────────────────────────────────────────────────────────────────╮
+ │                                                                                   │
+ ╰───────────────────────────────────────────────────────────────────────────────────╯
+ running  author  ·  8s                   tokens  claude-code 159.5k in / 4.3k out
 ```
 
-One box, and it is the input line: everything else is separated by space, so the
-place a keystroke becomes text is the one place with a border around it. The
-sixteen colours are ANSI base colours, which means the hues are the ones already
-configured in that terminal rather than a palette shipped in the binary.
+**A thread is a chain of runs, and nothing about the gate is relaxed to get
+one.** One run off `HEAD` is the right unit for reviewing a change and the wrong
+unit for doing a piece of work: the second task starts by looking at what the
+first one wrote, and off `HEAD` it cannot see it. So each run branches from the
+run before it, and the breadcrumb says which. What changes is one argument.
+
+A refused run is not built on. The chain advances only where the gate approved,
+because continuing from a change it would not take is a way of taking it. `f`
+starts a fresh thread from `HEAD`.
+
+**The box has the keys.** What you type is the task; `enter` runs it, `alt-enter`
+takes another line, and the up arrow offers back what you have asked here
+before. `esc` hands the keys back for a moment — `n` takes the box again. Every
+command is also on the `ctrl-x` leader and in the `ctrl-k` palette, and the list
+of commands is the authority for all three, so a key cannot do what the palette
+has decided not to offer.
+
+**`a` chooses who writes and who reviews.** Routing picks a pair on its own and
+is usually right — it prefers a reviewer that is a *different binary* from the
+author, which is the property that makes a review worth having. Naming one is a
+decision, and a decision is honoured; the gate still refuses a reviewer that is
+the author.
+
+**`l` looks up a run**, in a dialog rather than a column: a permanent list costs
+half the width of the screen to show something you read once in a while. Opening
+one gives it a screen of its own — what it was for, which check failed and what
+it printed, what the reviewer said, the diff read from the commit, and `p` to
+promote it. `?` lists every key.
+
+Regions are divided by rules rather than by space alone, and colour carries
+meaning rather than decoration: the runtime is muted, the author is the accent,
+the gate is the colour of something being tested, the reviewer is its own. All
+sixteen are ANSI base colours, so the hues are the ones already configured in
+that terminal.
 
 The bottom line totals tokens per backend, from what each vendor said about
 itself — a combined figure shown as a total, a rounded one marked with a tilde,
 and a backend that reports nothing left out rather than shown as zero. A message
 about what just happened takes the line while it is worth reading.
 
-`n` writes a task and runs it, and the pane beside the list becomes the run: the
-phase it is in, what the agent said, each gate check as it finishes, the
-reviewer's verdict, and how it ended. `s` asks it to stop, which records
-`Interrupted` — its own outcome, and not a verdict on the change. Quitting during
-a run asks it to stop and waits, rather than leaving a vendor writing into a
-worktree.
-
-It is the same run `ostraka run` starts. The browser calls the function the
-command calls, so the routing, the gate and the record do not depend on which
-one you used — and starting a run from a key still cannot approve one.
-
-One at a time. Several at once is the parallel-execution question, and it is not
-answered yet.
-
-```
-▌ add a wall-clock ceiling to the gate
-
-isolate
-prepare
-author
-│ said reading crates/ostraka-runtime/src/gate.rs
-│ said done
-│ done exit 0, 2 file(s)
-gate  ⠹
-│ ✓ pass  format      126ms
-│ ✓ pass  lint       5836ms
-```
-
-Tab cycles checks, events and diff, and the row above the pane names all three
-rather than a footer naming the next one. `/` filters on the task text, the run
-id or the outcome word. `ctrl-k` opens the commands by name, `ctrl-x` reaches the
-same ones as a chord, and `?` lists every key. The list of commands is the
-authority for all three, so a key cannot do what the palette has decided not to
-offer. Below about seventy columns the
-detail moves behind Enter rather than sharing a width neither pane can use. A run
-that produced no commit says so rather than showing the commit its branch happens
-to point at, which is a thing it used to do.
-
-It holds no logic of its own, so `p` cannot approve anything: promotion goes
-through the same gate as the command, and a record claiming an approval its
-commit does not corroborate is refused there as it is anywhere else.
+It holds no logic of its own, so `p` cannot approve anything and neither can
+`enter`: a task typed into the box goes through `run::execute`, which is the
+function `ostraka run` calls. Quitting during a run asks it to stop and waits,
+rather than leaving a vendor writing into a worktree.
 
 Refusals are the interesting half. A failing check never reaches the reviewer,
 a reviewer that says nothing is a rejection, and the run record keeps the check

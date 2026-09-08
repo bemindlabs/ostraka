@@ -36,6 +36,8 @@ pub const BAD: Color = Color::Red;
 pub const WARN: Color = Color::Yellow;
 /// A run that never reached a verdict, which is neither pass nor fail.
 pub const HALTED: Color = Color::Magenta;
+/// The second agent, reading what the first one wrote.
+pub const REVIEW: Color = Color::Blue;
 
 /// The bar in the left gutter marking the selected row.
 pub const CURSOR: &str = "\u{258c}";
@@ -55,6 +57,14 @@ pub const FAILED: &str = "\u{2717}";
 pub const SPINNER: [&str; 8] = [
     "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
 ];
+
+/// The line that separates one region from the next.
+///
+/// Space alone turned out not to be enough. A screen with four regions and no
+/// rules between them reads as one region with gaps in it, and the eye has to
+/// work out where the transcript stops and the input starts every time it
+/// looks. Muted, so it divides without competing.
+pub const RULE: &str = "\u{2500}";
 
 /// One column of air at the left edge, so nothing starts against the frame.
 pub const GUTTER: u16 = 1;
@@ -101,6 +111,34 @@ pub fn centred(area: Rect, width: u16, height: u16) -> Rect {
         width,
         height,
     }
+}
+
+/// A full-width divider.
+pub fn rule(width: u16) -> ratatui::text::Line<'static> {
+    ratatui::text::Line::from(ratatui::text::Span::styled(
+        RULE.repeat(width as usize),
+        muted(),
+    ))
+}
+
+/// A divider with something written into its right-hand end.
+///
+/// Used where the rule is also a heading — the top of one task in a thread,
+/// which is both "a new thing starts here" and "the last one ended like this".
+pub fn labelled_rule(width: u16, label: &str, colour: Color) -> ratatui::text::Line<'static> {
+    use ratatui::text::{Line, Span};
+    let width = width as usize;
+    let label = label.trim();
+    if label.is_empty() || width < label.chars().count() + 6 {
+        return rule(width as u16);
+    }
+    let after = 2;
+    let before = width - label.chars().count() - after - 2;
+    Line::from(vec![
+        Span::styled(RULE.repeat(before), muted()),
+        Span::styled(format!(" {label} "), on(colour)),
+        Span::styled(RULE.repeat(after), muted()),
+    ])
 }
 
 /// Moves an area in from the left by the gutter, so text has room to breathe.

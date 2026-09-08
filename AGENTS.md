@@ -298,6 +298,45 @@ browser with no terminal says so rather than panicking inside a dependency — i
 asserted directly, because a test's stdout is not a terminal and that is the
 real path.
 
+**A thread is the unit of work; a run is the unit of review.** One run off
+`HEAD` is right for judging a change and wrong for doing a piece of work,
+because the second task in any real piece of work starts by reading what the
+first one wrote and off `HEAD` it cannot see it. `tui::thread::Thread` chains
+them: each run branches from the run before it, which is one argument —
+`base_ref` — and nothing else. Every run in the chain still passes the gate and
+an independent review on its own; the chain buys continuity, not leniency.
+
+**The chain advances only through the gate.** After a refusal the next task
+starts where the refused one did. Continuing from a change the gate would not
+take is a way of taking it, and it would take it silently, which is worse than
+taking it.
+
+**The box has the keys, and the list is a dialog.** The screen someone opens
+this for is the one where they say what they want, so typing types and every
+command is a chord, a leader letter or a palette entry. A permanent list of
+runs costs half the width of the terminal to show something read once in a
+while; it is `Dialog::Runs`, and opening a run gives it a screen of its own.
+`Command::offered` is the authority for the bare keys as well as for the two
+routes that read it to draw themselves — without that, `n` during a run opened
+a box the palette had already refused, and enter would have replaced the live
+session and walked away from the thread behind it.
+
+**Regions are divided by rules, and colour means something.** Space alone was
+not enough: four regions separated by gaps read as one region with holes in it,
+and the boundary has to be re-derived every time the eye lands. Colour is
+semantic rather than decorative — the runtime muted, the author the accent, the
+gate the colour of something under test, the reviewer its own — so a transcript
+can be scanned for "what did the reviewer say" without being read. Still
+sixteen ANSI colours and no palette of our own.
+
+**Choosing the pair is offered; being allowed to is still the gate's.**
+`Dialog::Agents` sets the author and reviewer profiles for a thread, because
+routing is usually right and occasionally not, and naming one is a decision.
+The runtime is unchanged: it still refuses a reviewer that is the author, and
+`--adapter` and `--review-adapter` were already the arguments. What the browser
+adds is somewhere to see which profiles are on this machine and which of them
+answer.
+
 **One box, sixteen colours, and one list of commands.** The screen is separated
 by space and a one-column gutter rather than by borders — a browser that boxes
 every region spends a quarter of an eighty-column terminal drawing lines around

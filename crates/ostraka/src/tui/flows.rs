@@ -19,9 +19,8 @@
 //! thing on the far side of it — that a browser with no terminal says so
 //! rather than panicking somewhere inside a dependency — is asserted directly.
 
-use super::view::{App, Dialog, Focus, Typing};
+use super::view::{App, Dialog, Focus, Screen};
 use super::{handle, take_stock};
-use ostraka_runtime::progress::Phase;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -97,7 +96,7 @@ fn project(name: &str, pause: u32) -> Scratch {
          else\n\
          \x20 echo 'reading the repository'\n\
          \x20 sleep {pause}\n\
-         \x20 printf 'written by the agent\\n' > wrote.txt\n\
+         \x20 printf 'written by the agent\\n' >> wrote.txt\n\
          \x20 echo 'done'\n\
          fi\n"
     );
@@ -208,6 +207,20 @@ impl Driver {
         self
     }
 
+    /// Types a task, runs it, and waits for it to be over.
+    fn task(&mut self, text: &str) -> &mut Self {
+        let done = self.app.thread.turns.len() + 1;
+        self.typed(text).key(KeyCode::Enter);
+        self.until("the run to finish", move |app| {
+            app.thread.turns.len() == done
+        })
+    }
+
+    /// The last turn in the thread.
+    fn last(&self) -> &super::thread::Turn {
+        self.app.thread.turns.last().expect("a finished turn")
+    }
+
     fn screen(&mut self) -> String {
         let mut terminal =
             Terminal::new(TestBackend::new(self.width, self.height)).expect("test terminal");
@@ -259,7 +272,7 @@ fn a_browser_with_no_terminal_says_so_rather_than_panicking() {
 #[test]
 fn setting_up_a_directory_leaves_a_browser_that_can_run_something() {
     // The first five minutes: open somewhere that is not a project, read what
-    // would be written, take the offer, and end up somewhere `n` works.
+    // would be written, take the offer, and end up somewhere a task works.
     let scratch = Scratch::new("setup");
     std::fs::write(scratch.path().join("Cargo.toml"), "[package]\n").expect("write");
     let mut d = Driver::open(scratch.path());
@@ -267,43 +280,33 @@ fn setting_up_a_directory_leaves_a_browser_that_can_run_something() {
     d.shows("not an Ostraka project yet");
     d.shows("a Rust project");
     d.shows("i set this directory up");
+
     // Not offered here, and saying why beats a key that quietly does nothing.
-    d.key(KeyCode::Char('n'));
+    d.typed("a task this directory cannot take")
+        .key(KeyCode::Enter);
     d.shows("cannot run anything yet");
+    assert!(d.app.thread.live.is_none());
 
-    d.key(KeyCode::Char('i'));
+    d.ctrl('x').key(KeyCode::Char('i'));
     d.hides("not an Ostraka project yet");
-    d.shows("No runs yet");
+    d.shows("Nothing has been asked here yet");
     assert!(scratch.path().join("adapters/codex.toml").is_file());
-
-    // And now a task is something this directory could take.
-    d.key(KeyCode::Char('n'));
-    assert_eq!(d.app.typing, Some(Typing::Prompt));
 }
 
 #[test]
-fn a_task_typed_into_the_box_runs_and_ends_up_in_the_list() {
+fn a_task_typed_into_the_box_runs_and_is_recorded() {
     let _guard = exclusive();
     let scratch = project("run", 0);
     let mut d = Driver::open(scratch.path());
-    d.shows("No runs yet");
+    d.shows("Nothing has been asked here yet");
 
-    d.key(KeyCode::Char('n'))
-        .typed("write a file")
-        .key(KeyCode::Enter);
-
-    // The transcript replaces the empty list rather than arguing with it.
-    d.shows("write a file");
-    d.hides("No runs yet");
-
-    d.until("the run to finish", |app| {
-        app.session.as_ref().is_some_and(|s| !s.live())
-    });
+    d.task("write a file");
 
     let screen = d.screen();
-    // Every phase it went through, the agent's own words, the check that ran,
-    // the verdict, and how it ended.
+    // What was asked, every phase it went through, the agent's own words, the
+    // check that ran, the verdict, and how it ended.
     for expected in [
+        "write a file",
         "isolate",
         "prepare",
         "author",
@@ -317,13 +320,10 @@ fn a_task_typed_into_the_box_runs_and_ends_up_in_the_list() {
         assert!(screen.contains(expected), "no {expected:?} on:\n{screen}");
     }
 
-    // The record exists, the listing has it, and it is what the selection
-    // lands on when the transcript is closed.
     let run_id = d
-        .app
-        .session
+        .last()
+        .finished
         .as_ref()
-        .and_then(|s| s.finished.as_ref())
         .map(|f| f.run_id.clone())
         .expect("a finished run");
     assert!(
@@ -334,15 +334,71 @@ fn a_task_typed_into_the_box_runs_and_ends_up_in_the_list() {
             .join("record.json")
             .is_file()
     );
+    assert_eq!(d.app.runs.len(), 1);
+}
 
-    d.key(KeyCode::Esc);
-    assert!(
-        d.app.session.is_none(),
-        "escape did not close the transcript"
+#[test]
+fn the_second_task_starts_where_the_first_one_finished() {
+    // The whole reason a thread exists. Off `HEAD`, the second task cannot see
+    // what the first one wrote, and "now add a test for that" is impossible.
+    let _guard = exclusive();
+    let scratch = project("thread", 0);
+    let mut d = Driver::open(scratch.path());
+
+    assert_eq!(d.app.thread.base_ref, "HEAD");
+    d.task("write a file");
+    let first = d
+        .last()
+        .finished
+        .as_ref()
+        .map(|f| f.run_id.clone())
+        .expect("a finished run");
+    assert!(d.last().approved(), "the first run was not approved");
+    assert_eq!(d.app.thread.base_ref, format!("ostraka/{first}"));
+    // And it says so, where you are rather than buried in a menu.
+    d.shows("on ");
+
+    d.task("write it again");
+    assert_eq!(d.app.thread.turns.len(), 2);
+
+    // The proof is in git: the second run's branch has the first run's commit
+    // behind it, which is what "starting where the last one finished" means.
+    let second = d
+        .last()
+        .finished
+        .as_ref()
+        .map(|f| f.run_id.clone())
+        .expect("a second run");
+    let out = Command::new("git")
+        .args(["log", "--format=%H", &format!("ostraka/{second}")])
+        .current_dir(scratch.path())
+        .output()
+        .expect("git log");
+    let commits = String::from_utf8_lossy(&out.stdout).lines().count();
+    assert_eq!(commits, 3, "the chain did not build on the first run");
+}
+
+#[test]
+fn a_refused_run_is_not_the_ground_the_next_one_stands_on() {
+    // Building on a change the gate would not take is a way of taking it.
+    let _guard = exclusive();
+    let scratch = project("refused", 0);
+    // A gate nothing can pass.
+    std::fs::write(
+        scratch.path().join("ostraka.toml"),
+        "[gate]\nchecks = [{ name = \"check\", cmd = \"false\", required = true }]\n\n\
+         [gate.review]\nmust_differ_from_author = true\n",
+    )
+    .expect("config");
+    let mut d = Driver::open(scratch.path());
+
+    d.task("write a file");
+    assert!(!d.last().approved());
+    assert_eq!(
+        d.app.thread.base_ref, "HEAD",
+        "the chain advanced through a refusal"
     );
-    assert_eq!(d.app.current().map(|r| r.run_id.clone()), Some(run_id));
-    d.shows("1 run");
-    d.shows("write a file");
+    d.shows("FAIL");
 }
 
 #[test]
@@ -351,20 +407,14 @@ fn a_run_can_be_stopped_from_the_browser_and_is_not_called_a_verdict() {
     let scratch = project("stop", 30);
     let mut d = Driver::open(scratch.path());
 
-    d.key(KeyCode::Char('n'))
-        .typed("a task nobody wants finished")
-        .key(KeyCode::Enter);
+    d.typed("a task nobody wants finished").key(KeyCode::Enter);
     // In the same breath as starting it, which is the ordering that used to
     // lose the request to the run clearing the flag behind it.
-    d.key(KeyCode::Char('s'));
-    assert!(d.app.session.as_ref().expect("a session").stopping);
+    d.ctrl('x').key(KeyCode::Char('s'));
+    assert!(d.app.thread.live.as_ref().expect("a session").stopping);
     d.shows("stopping");
 
-    d.until("the run to stop", |app| {
-        app.session.as_ref().is_some_and(|s| !s.live())
-    });
-
-    // Its own outcome, and not a verdict on a change nobody ever saw.
+    d.until("the run to stop", |app| app.thread.turns.len() == 1);
     d.shows("stopped by the operator");
     ostraka_adapter::interrupt::clear();
 }
@@ -376,10 +426,8 @@ fn quitting_during_a_run_waits_for_it_rather_than_walking_away() {
     let scratch = project("quit", 30);
     let mut d = Driver::open(scratch.path());
 
-    d.key(KeyCode::Char('n'))
-        .typed("a task interrupted by leaving")
-        .key(KeyCode::Enter);
-    d.key(KeyCode::Char('q'));
+    d.typed("a task interrupted by leaving").key(KeyCode::Enter);
+    d.ctrl('c');
 
     assert!(!d.app.quit, "the browser left while a run was going");
     assert!(d.app.leaving);
@@ -387,7 +435,6 @@ fn quitting_during_a_run_waits_for_it_rather_than_walking_away() {
 
     d.until("the browser to leave", |app| app.quit);
 
-    // It waited long enough for the run to write itself down.
     let runs = std::fs::read_dir(scratch.path().join(".ostraka/runs"))
         .expect("a runs directory")
         .count();
@@ -396,42 +443,27 @@ fn quitting_during_a_run_waits_for_it_rather_than_walking_away() {
 }
 
 #[test]
-fn filtering_narrows_the_list_and_escape_gives_it_back() {
+fn a_run_is_looked_up_in_a_dialog_and_read_on_a_screen_of_its_own() {
     let _guard = exclusive();
-    let scratch = project("filter", 0);
+    let scratch = project("lookup", 0);
     let mut d = Driver::open(scratch.path());
+    d.task("write a file");
+    d.task("write it again");
 
-    for task in ["write a file", "rename a field"] {
-        d.key(KeyCode::Char('n')).typed(task).key(KeyCode::Enter);
-        d.until("the run to finish", |app| {
-            app.session.as_ref().is_some_and(|s| !s.live())
-        });
-        d.key(KeyCode::Esc);
-    }
-    d.shows("2 runs");
+    d.ctrl('x').key(KeyCode::Char('l'));
+    assert_eq!(d.app.dialog, Some(Dialog::Runs));
+    d.shows("write a file");
+    d.shows("enter opens it");
 
-    d.key(KeyCode::Char('/')).typed("rename");
+    // Typing in the dialog narrows it.
+    d.typed("again");
     d.shows("1 of 2 runs");
     d.hides("write a file");
 
-    d.key(KeyCode::Esc);
-    d.shows("2 runs");
-    d.shows("write a file");
-}
-
-#[test]
-fn the_panes_cycle_and_the_diff_is_the_change_that_was_made() {
-    let _guard = exclusive();
-    let scratch = project("panes", 0);
-    let mut d = Driver::open(scratch.path());
-
-    d.key(KeyCode::Char('n'))
-        .typed("write a file")
-        .key(KeyCode::Enter);
-    d.until("the run to finish", |app| {
-        app.session.as_ref().is_some_and(|s| !s.live())
-    });
-    d.key(KeyCode::Esc);
+    d.key(KeyCode::Enter);
+    assert_eq!(d.app.dialog, None);
+    assert_eq!(d.app.screen, Screen::Record);
+    assert_eq!(d.app.focus, Focus::Keys);
 
     // checks, then events, then the diff, which is read from the commit the
     // run made rather than from anything the agent said about itself.
@@ -440,8 +472,56 @@ fn the_panes_cycle_and_the_diff_is_the_change_that_was_made() {
     d.shows("reading the repository");
     d.key(KeyCode::Tab);
     d.shows("written by the agent");
-    d.key(KeyCode::Tab);
-    d.shows("check");
+
+    // And escape comes back to the work, with the box.
+    d.key(KeyCode::Esc);
+    assert_eq!(d.app.screen, Screen::Work);
+    assert_eq!(d.app.focus, Focus::Prompt);
+    assert!(!d.app.quit);
+}
+
+#[test]
+fn the_agents_dialog_names_who_writes_and_who_reviews() {
+    let _guard = exclusive();
+    let scratch = project("agents", 0);
+    let mut d = Driver::open(scratch.path());
+
+    d.ctrl('x').key(KeyCode::Char('a'));
+    assert_eq!(d.app.dialog, Some(Dialog::Agents));
+    d.shows("automatic");
+    d.shows("writer");
+    d.shows("reader");
+
+    d.key(KeyCode::Char('a'));
+    d.shows("writes");
+    assert!(d.app.thread.adapter.is_some());
+    d.key(KeyCode::Down).key(KeyCode::Char('r'));
+    assert!(d.app.thread.review_adapter.is_some());
+    assert_ne!(d.app.thread.adapter, d.app.thread.review_adapter);
+    d.key(KeyCode::Esc);
+
+    // And a run started afterwards is run by the pair that was named.
+    let author = d.app.thread.adapter.clone().expect("an author");
+    d.task("write a file");
+    assert_eq!(
+        d.app.current().map(|r| r.adapter.clone()),
+        Some(author),
+        "the named author did not write it"
+    );
+}
+
+#[test]
+fn a_fresh_thread_goes_back_to_head() {
+    let _guard = exclusive();
+    let scratch = project("fresh", 0);
+    let mut d = Driver::open(scratch.path());
+    d.task("write a file");
+    assert!(d.app.thread.continuing());
+
+    d.ctrl('x').key(KeyCode::Char('f'));
+    assert_eq!(d.app.thread.base_ref, "HEAD");
+    assert!(d.app.thread.turns.is_empty());
+    d.shows("Nothing has been asked here yet");
 }
 
 #[test]
@@ -450,82 +530,14 @@ fn the_palette_reaches_a_command_by_name_and_the_leader_by_letter() {
     std::fs::write(scratch.path().join("Cargo.toml"), "[package]\n").expect("write");
     let mut d = Driver::open(scratch.path());
 
-    // By name, typed.
     d.ctrl('k').typed("keys").key(KeyCode::Enter);
     assert_eq!(d.app.dialog, Some(Dialog::Keys));
-    d.shows("promote the selected run");
+    d.shows("promote a record");
     d.shows("ctrl-x");
     d.key(KeyCode::Esc);
 
-    // And by chord, which reaches the same command.
     d.ctrl('x').key(KeyCode::Char('h'));
     assert_eq!(d.app.dialog, Some(Dialog::Keys));
     d.key(KeyCode::Esc);
     assert_eq!(d.app.dialog, None);
-}
-
-#[test]
-fn a_narrow_terminal_moves_between_the_columns_with_enter_and_escape() {
-    let _guard = exclusive();
-    let scratch = project("narrow", 0);
-    let mut d = Driver::open(scratch.path());
-    d.key(KeyCode::Char('n'))
-        .typed("write a file")
-        .key(KeyCode::Enter);
-    d.until("the run to finish", |app| {
-        app.session.as_ref().is_some_and(|s| !s.live())
-    });
-    d.key(KeyCode::Esc);
-
-    d.width = 48;
-    assert_eq!(d.app.focus, Focus::List);
-    d.shows("write a file");
-    // The list only: two columns on forty-eight means neither can be read.
-    d.hides("author");
-
-    d.key(KeyCode::Enter);
-    assert_eq!(d.app.focus, Focus::Detail);
-    d.shows("author");
-
-    d.key(KeyCode::Esc);
-    assert_eq!(d.app.focus, Focus::List);
-    assert!(!d.app.quit, "escape left the browser instead of the pane");
-}
-
-#[test]
-fn a_second_run_cannot_be_started_over_a_live_one_by_any_route() {
-    let _guard = exclusive();
-    let scratch = project("one-at-a-time", 30);
-    let mut d = Driver::open(scratch.path());
-
-    d.key(KeyCode::Char('n'))
-        .typed("the first task")
-        .key(KeyCode::Enter);
-    let first = d.app.session.as_ref().expect("a session").prompt.clone();
-
-    d.key(KeyCode::Char('n'));
-    assert_eq!(d.app.typing, None, "the box opened over a live run");
-    d.shows("already going");
-
-    d.ctrl('x').key(KeyCode::Char('n'));
-    assert_eq!(d.app.typing, None, "the leader opened it");
-
-    d.ctrl('k').typed("new run");
-    d.shows("no command matches that");
-    d.key(KeyCode::Esc);
-
-    assert_eq!(
-        d.app.session.as_ref().expect("a session").prompt,
-        first,
-        "the live run was replaced"
-    );
-    d.until("the run to reach the author", |app| {
-        app.session.as_ref().and_then(|s| s.phase) == Some(Phase::Authoring)
-    });
-
-    d.key(KeyCode::Char('s'));
-    d.until("the run to stop", |app| {
-        app.session.as_ref().is_some_and(|s| !s.live())
-    });
-    ostraka_adapter::interrupt::clear();
 }

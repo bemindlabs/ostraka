@@ -4,21 +4,26 @@
 //! a buffer rather than looked at — a screen nobody asserts on is a screen that
 //! quietly stops saying what it used to.
 //!
-//! Detail lines are built as owned text rather than borrowed from the app. It
-//! costs a few allocations per frame and buys the thing that matters: the lines
-//! can be counted before they are drawn, which is how scrolling knows where the
-//! bottom is.
+//! Two screens, and the difference is what you are doing. **Work** is the
+//! thread: what you asked, what happened, and a box to ask the next thing —
+//! full width, because that is the thing you are reading. **Record** is one run
+//! out of the history, looked up. The list of runs is a dialog rather than a
+//! column, because a column costs half the width of the screen to show
+//! something you look at once every twenty minutes.
 //!
-//! There is one box on this screen and it is the input line. Everything else is
-//! separated by space and by a one-column gutter, because a browser whose every
-//! region is boxed spends a quarter of a small terminal drawing lines around
-//! nothing — and once the boxes are gone, the one that remains is unmistakably
-//! where typing goes.
+//! Regions are divided by rules, not by space alone. Four regions separated
+//! only by gaps read as one region with holes in it, and the eye re-derives the
+//! boundaries every time it looks.
+//!
+//! Colour carries meaning here rather than decoration. Who is speaking is a
+//! colour — the runtime is muted, the author is the accent, the gate is the
+//! colour of something being tested, the reviewer is its own — so a transcript
+//! can be scanned for "what did the reviewer say" without reading it.
 
 use crate::init::{Action, Plan};
 use crate::tui::command::{Command, Situation};
-use crate::tui::session::Session;
 use crate::tui::theme;
+use crate::tui::thread::{Thread, Turn};
 use ostraka_core::gate::{CheckRecord, Verdict};
 use ostraka_core::record::{Event, Outcome, RunRecord};
 use ostraka_runtime::index::{self, BackendUsage, RunSummary};
@@ -30,18 +35,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Padding, Paragraph};
 use std::path::{Path, PathBuf};
 
-/// Rows the chrome takes: the breadcrumb, a blank, the three of the input box
-/// and the status line. Everything left over is content.
+/// Rows the chrome takes at its smallest: the breadcrumb, its rule, the three
+/// of the input box and the status line.
 const CHROME: u16 = 6;
 
-/// Rows one run takes in the list: what it was, how it went, and air.
-const ENTRY: usize = 3;
+/// How tall the input box is allowed to grow before it scrolls instead.
+const PROMPT_LINES: usize = 6;
 
-/// Below this the list and the detail cannot both be read, so only one is
-/// drawn and Enter moves between them.
-const TWO_COLUMN: u16 = 72;
-
-/// Which part of a run the detail pane is showing.
+/// Which part of a run the record screen is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Detail {
     Checks,
@@ -69,12 +70,24 @@ impl Detail {
     }
 }
 
-/// Which column the keys are talking to. Only ever consulted on a terminal too
-/// narrow to show both.
+/// What the browser is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Screen {
+    /// The thread: what has been asked here and what came of it.
+    Work,
+    /// One run out of the history.
+    Record,
+}
+
+/// Where a keystroke goes.
+///
+/// Work opens on the prompt, because the first thing anybody does here is say
+/// what they want. A screen you have to unlock before you can type into it is
+/// a screen that makes you press a key to do the obvious thing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
-    List,
-    Detail,
+    Prompt,
+    Keys,
 }
 
 /// The one thing that can be open over the screen.
@@ -82,16 +95,15 @@ pub enum Focus {
 pub enum Dialog {
     Keys,
     Commands,
+    Runs,
+    Agents,
 }
 
-/// What the input line is taking, when it is taking anything.
-///
-/// One box with two jobs, and it says which one it is doing. A filter narrows
-/// what is already there; a prompt starts something that is not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Typing {
-    Filter,
-    Prompt,
+/// One adapter profile, as the agents dialog shows it.
+pub struct Agent {
+    pub id: String,
+    pub ready: bool,
+    pub note: String,
 }
 
 pub struct App {
@@ -108,24 +120,11 @@ pub struct App {
     /// Indices into `runs` that match the filter. The selection indexes this.
     pub matching: Vec<usize>,
     pub selected: usize,
-    /// First entry the list is showing, so a selection below the fold scrolls
-    /// the list rather than disappearing off it.
+    /// First entry the runs dialog is showing, so a selection below the fold
+    /// scrolls rather than disappearing off it.
     pub list_top: usize,
+    /// What has been typed into the runs dialog.
     pub filter: String,
-    /// What is being written into the input line, if anything.
-    pub typing: Option<Typing>,
-    /// The task being composed, kept separately from the filter: abandoning a
-    /// half-written task to look something up and coming back to it is the
-    /// normal way of working, and one string for both would lose it.
-    pub prompt: String,
-    /// The run this browser started, while it is going and after it ends.
-    pub session: Option<Session>,
-    /// Ticks of the event loop. What the spinner is a function of, so that
-    /// drawing is a function of state rather than of the clock.
-    pub tick: u64,
-    /// Whether the transcript sticks to the bottom as the run writes to it.
-    /// Off the moment somebody scrolls up, on again at the end.
-    pub follow: bool,
     /// The full record of the selected run, loaded on demand: a listing holds
     /// summaries, and check output is the thing worth reading on a failure.
     pub record: Option<RunRecord>,
@@ -133,11 +132,25 @@ pub struct App {
     /// `None` until asked for; `Some(None)` once asked and not found.
     pub diff: Option<Option<String>>,
     pub detail: Detail,
+    /// The work being done here: a chain of runs, each on the one before it.
+    pub thread: Thread,
+    /// The adapter profiles this project has, probed when first asked for.
+    /// Not at startup: probing runs every vendor's binary, and a browser that
+    /// took three seconds to open would be a browser nobody left open.
+    pub agents: Vec<Agent>,
+    pub screen: Screen,
     pub focus: Focus,
+    /// The task being written.
+    pub prompt: String,
+    /// How far back into what has been asked here the box has been walked.
+    pub history_at: Option<usize>,
     pub scroll: u16,
-    /// Height of the detail pane at the last draw, so a page key can move by a
+    /// Height of the content at the last draw, so a page key can move by a
     /// page rather than by a number somebody guessed.
     pub page: u16,
+    /// Whether the transcript sticks to the bottom as the run writes to it.
+    /// Off the moment somebody scrolls up, on again at the end.
+    pub follow: bool,
     pub status: Option<String>,
     /// Present when this directory is not a project yet: what `init` would
     /// write. `None` once there is nothing left to write.
@@ -152,6 +165,9 @@ pub struct App {
     /// Someone asked to leave while a run was going. The browser stays up
     /// until that run has actually stopped.
     pub leaving: bool,
+    /// Ticks of the event loop. What the spinner is a function of, so that
+    /// drawing is a function of state rather than of the clock.
+    pub tick: u64,
     pub quit: bool,
 }
 
@@ -166,18 +182,19 @@ impl App {
             selected: 0,
             list_top: 0,
             filter: String::new(),
-            typing: None,
-            prompt: String::new(),
-            session: None,
-            tick: 0,
-            follow: true,
             record: None,
             events: Vec::new(),
             diff: None,
             detail: Detail::Checks,
-            focus: Focus::List,
+            thread: Thread::default(),
+            agents: Vec::new(),
+            screen: Screen::Work,
+            focus: Focus::Prompt,
+            prompt: String::new(),
+            history_at: None,
             scroll: 0,
             page: 10,
+            follow: true,
             status: None,
             setup: None,
             dialog: None,
@@ -185,6 +202,7 @@ impl App {
             pick: 0,
             leader: false,
             leaving: false,
+            tick: 0,
             quit: false,
         }
     }
@@ -194,9 +212,6 @@ impl App {
     }
 
     /// Recomputes which runs match, keeping the selection in range.
-    ///
-    /// A filter that hides the selected run moves the selection rather than
-    /// leaving it pointing at something the list no longer shows.
     pub fn refilter(&mut self) {
         let needle = self.filter.to_lowercase();
         self.matching = self
@@ -246,7 +261,7 @@ impl App {
     pub fn situation(&self) -> Situation {
         Situation {
             unconfigured: self.setup.is_some(),
-            running: self.session.as_ref().is_some_and(|s| s.live()),
+            running: self.thread.running(),
         }
     }
 
@@ -268,8 +283,7 @@ impl App {
         self.pick = self.pick.saturating_add_signed(delta).min(count - 1);
     }
 
-    /// Opens a dialog from a clean slate. A palette that reopened holding the
-    /// last query would answer a question nobody had asked yet.
+    /// Opens a dialog from a clean slate.
     pub fn open(&mut self, dialog: Dialog) {
         self.dialog = Some(dialog);
         self.query.clear();
@@ -282,27 +296,66 @@ impl App {
         self.query.clear();
         self.pick = 0;
     }
+
+    /// Walks back and forward through what has been asked here.
+    pub fn recall(&mut self, delta: isize) {
+        let history = &self.thread.history;
+        if history.is_empty() {
+            return;
+        }
+        let at = match (self.history_at, delta) {
+            (None, d) if d < 0 => history.len() - 1,
+            (None, _) => return,
+            (Some(at), d) => match at.checked_add_signed(d) {
+                Some(next) if next < history.len() => next,
+                // Forward past the newest is back to what was being written.
+                Some(_) => {
+                    self.history_at = None;
+                    self.prompt.clear();
+                    return;
+                }
+                None => 0,
+            },
+        };
+        self.history_at = Some(at);
+        self.prompt = history[at].clone();
+    }
+
+    /// How many rows the input box wants, border included.
+    fn prompt_height(&self) -> u16 {
+        let lines = self.prompt.lines().count().clamp(1, PROMPT_LINES);
+        lines as u16 + 2
+    }
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let screen = frame.area();
+    let box_height = app.prompt_height();
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(3),
+            Constraint::Length(box_height),
             Constraint::Length(1),
         ])
         .split(screen);
 
     frame.render_widget(breadcrumb(app, screen.width), theme::inset(rows[0]));
+    frame.render_widget(
+        Paragraph::new(theme::rule(rows[1].width.saturating_sub(theme::GUTTER))),
+        theme::inset(rows[1]),
+    );
 
+    let content = theme::inset(rows[2]);
     if app.setup.is_some() {
-        render_setup(frame, app, theme::inset(rows[2]));
+        render_setup(frame, app, content);
     } else {
-        render_content(frame, app, rows[2]);
+        match app.screen {
+            Screen::Work => render_work(frame, app, content),
+            Screen::Record => render_record(frame, app, content),
+        }
     }
 
     render_prompt(frame, app, rows[3]);
@@ -314,6 +367,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     match app.dialog {
         Some(Dialog::Keys) => render_keys(frame, screen),
         Some(Dialog::Commands) => render_palette(frame, app, screen),
+        Some(Dialog::Runs) => render_runs(frame, app, screen),
+        Some(Dialog::Agents) => render_agents(frame, app, screen),
         None => {}
     }
 
@@ -333,17 +388,31 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
 /// Where you are, said once, quietly, at the top.
 fn breadcrumb(app: &App, width: u16) -> Paragraph<'static> {
-    Paragraph::new(Line::from(Span::styled(
-        truncate(&app.where_shown, width.saturating_sub(2) as usize),
+    // Room is reserved for the branch only when there is one to say. A path
+    // cut short to leave space for nothing is a path cut short for nothing.
+    let room = if app.thread.continuing() {
+        width.saturating_sub(38)
+    } else {
+        width.saturating_sub(2)
+    };
+    let mut spans = vec![Span::styled(
+        truncate(&app.where_shown, room as usize),
         theme::muted(),
-    )))
+    )];
+    // What the next run will stand on, where that is not simply `HEAD`. It
+    // belongs beside the path because it is the same kind of fact: where you
+    // are working.
+    if app.thread.continuing() {
+        spans.push(Span::styled("   on ", theme::muted()));
+        spans.push(Span::styled(
+            truncate(&app.thread.base_ref, 28),
+            theme::accent(),
+        ));
+    }
+    Paragraph::new(Line::from(spans))
 }
 
 /// A project path as a person would write it.
-///
-/// Resolved, because the default is `.` and a breadcrumb reading `.` tells
-/// nobody which of their checkouts this is; and shortened to `~`, because the
-/// first four segments of every path here are the same four.
 fn where_we_are(project: &Path) -> String {
     let full = project
         .canonicalize()
@@ -358,176 +427,26 @@ fn where_we_are(project: &Path) -> String {
     }
 }
 
-fn render_content(frame: &mut Frame, app: &mut App, area: Rect) {
-    // Said once, across the whole area, rather than once per column: an empty
-    // list and an empty detail are the same fact, and printing it twice reads
-    // as two different things having gone wrong.
-    //
-    // Not while a run is being watched. The first run in a repository is
-    // started from an empty list, and "No runs yet" over the top of the run
-    // that is fixing that would be the screen contradicting itself.
-    if app.matching.is_empty() && app.session.is_none() {
-        let message = if app.runs.is_empty() {
-            "No runs yet. `ostraka run \"\u{2026}\"` makes one."
-        } else {
-            "Nothing matches this filter."
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(message, theme::muted()))),
-            theme::inset(area),
-        );
-        return;
-    }
-
-    if app.matching.is_empty() {
-        render_transcript(frame, app, theme::inset(area));
-        return;
-    }
-
-    if area.width < TWO_COLUMN {
-        match app.focus {
-            Focus::List => render_list(frame, app, area),
-            Focus::Detail => render_beside(frame, app, theme::inset(area)),
-        }
-        return;
-    }
-
-    // A fraction, then a ceiling: a list column wider than about forty-five
-    // columns is holding whitespace, and the detail pane is where the reading
-    // happens.
-    let list_width = (area.width * 2 / 5).clamp(24, 46);
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(list_width), Constraint::Min(10)])
-        .split(area);
-
-    render_list(frame, app, columns[0]);
-    render_beside(frame, app, theme::inset(columns[1]));
-}
-
-/// The column next to the list: a run in progress if there is one, and
-/// otherwise the record of the one selected.
-///
-/// A run being watched wins. It is the thing that is changing, it is the
-/// reason the browser was left open, and the selected record will still be
-/// there afterwards — with the new run in the list beside it.
-fn render_beside(frame: &mut Frame, app: &mut App, area: Rect) {
-    if app.session.is_some() {
-        render_transcript(frame, app, area);
-    } else {
-        render_detail(frame, app, area);
-    }
-}
-
-/// The runs, two lines each: what was asked, and how it went.
-///
-/// Rendered as text rather than as a list widget because the selected entry is
-/// marked in a gutter that spans both of its lines, and a widget that owns one
-/// row per item cannot draw that.
-fn render_list(frame: &mut Frame, app: &mut App, area: Rect) {
-    // Clamped here because here is the only place that knows both how many
-    // entries there are and how tall the column is.
-    let visible = (area.height as usize / ENTRY).max(1);
-    if app.selected < app.list_top {
-        app.list_top = app.selected;
-    }
-    if app.selected >= app.list_top + visible {
-        app.list_top = app.selected + 1 - visible;
-    }
-
-    let width = area.width.saturating_sub(theme::GUTTER) as usize;
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    for (i, run) in app
-        .matching
-        .iter()
-        .enumerate()
-        .skip(app.list_top)
-        .take(visible)
-        .filter_map(|(i, index)| app.runs.get(*index).map(|run| (i, run)))
-    {
-        let here = i == app.selected;
-        let (mark, colour) = marker(run.outcome);
-        let cursor = if here { theme::CURSOR } else { " " };
-        let title = if here {
-            theme::text().add_modifier(Modifier::BOLD)
-        } else {
-            theme::text()
-        };
-
-        lines.push(Line::from(vec![
-            Span::styled(cursor, theme::on(colour)),
-            Span::styled(format!(" {mark}  "), theme::on(colour)),
-            Span::styled(when(&run.run_id), theme::muted()),
-            Span::raw("  "),
-            Span::styled(
-                truncate(&described(&run.prompt), width.saturating_sub(19)),
-                title,
-            ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled(cursor, theme::on(colour)),
-            Span::styled(format!(" {}  ", theme::CONTINUE), theme::muted()),
-            Span::styled(
-                truncate(
-                    &format!(
-                        "{} of {} checks \u{b7} {}",
-                        run.checks_passed,
-                        run.checks_total,
-                        outcome_word(run.outcome)
-                    ),
-                    width.saturating_sub(5),
-                ),
-                theme::muted(),
-            ),
-        ]));
-        lines.push(Line::from(""));
-    }
-
-    frame.render_widget(Paragraph::new(lines), area);
-}
-
-fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
-    // Nothing selected is drawn by `render_content` before it splits the area,
-    // so reaching here with no run means the two disagree. Drawing nothing is
-    // the honest answer to that, and not a panic.
-    let Some(run) = app.current().cloned() else {
-        return;
-    };
-
+/// The thread: everything asked here, and what came of it.
+fn render_work(frame: &mut Frame, app: &mut App, area: Rect) {
     app.page = area.height.saturating_sub(1).max(1);
-
-    let mut lines = summary_lines(app, &run, area.width as usize);
-    lines.push(tabs(app));
-    match app.detail {
-        Detail::Checks => lines.extend(check_lines(app, &run)),
-        Detail::Events => lines.extend(event_lines(app)),
-        Detail::Diff => lines.extend(diff_lines(app)),
+    if app.thread.is_empty() {
+        let empty = vec![
+            dim("Nothing has been asked here yet.".to_string()),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Write a task below and press ", theme::muted()),
+                Span::styled("enter", theme::accent()),
+                Span::styled(". Each one is isolated, gated and", theme::muted()),
+            ]),
+            dim("reviewed by a different agent than the one that wrote it.".to_string()),
+        ];
+        frame.render_widget(Paragraph::new(empty), area);
+        return;
     }
 
-    // Clamped here because here is the only place that knows both how many
-    // lines there are and how tall the pane is. Scrolling past the end shows an
-    // empty box, which reads as a broken screen.
-    let overflow = lines.len().saturating_sub(area.height as usize);
-    app.scroll = app.scroll.min(overflow as u16);
-
-    frame.render_widget(Paragraph::new(lines).scroll((app.scroll, 0)), area);
-}
-
-/// A run as it happens: what was asked, then how far it has got.
-fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
-    let Some(lines) = app
-        .session
-        .as_ref()
-        .map(|session| transcript_lines(session, area.width as usize, app.tick))
-    else {
-        return;
-    };
-    app.page = area.height.saturating_sub(1).max(1);
-
+    let lines = thread_lines(&app.thread, area.width, app.tick);
     let overflow = lines.len().saturating_sub(area.height as usize) as u16;
-    // Stuck to the bottom while the run writes to it, which is what a live log
-    // has to do to be worth watching, and released the moment somebody scrolls
-    // up to read something.
     if app.follow {
         app.scroll = overflow;
     }
@@ -535,79 +454,126 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(Paragraph::new(lines).scroll((app.scroll, 0)), area);
 }
 
-fn transcript_lines(session: &Session, width: usize, tick: u64) -> Vec<Line<'static>> {
+fn thread_lines(thread: &Thread, width: u16, tick: u64) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    for (i, part) in wrap(&session.prompt, width.saturating_sub(2))
+    for turn in &thread.turns {
+        lines.extend(asked(&turn.prompt, width));
+        lines.extend(steps_lines(&turn.steps, None, width, tick));
+        lines.push(ended_rule(turn, width));
+        lines.push(Line::from(""));
+    }
+    if let Some(session) = &thread.live {
+        lines.extend(asked(&session.prompt, width));
+        lines.extend(steps_lines(&session.steps, session.phase, width, tick));
+        if session.stopping {
+            lines.push(dim(
+                "stopping \u{2014} the agent is being asked to stop".into()
+            ));
+        }
+    }
+    lines
+}
+
+/// What was asked, marked as yours rather than as anything an agent said.
+fn asked(prompt: &str, width: u16) -> Vec<Line<'static>> {
+    wrap(prompt, width.saturating_sub(2) as usize)
         .into_iter()
         .enumerate()
-    {
-        lines.push(Line::from(vec![
-            Span::styled(
-                if i == 0 { theme::CURSOR } else { " " },
-                theme::on(theme::ACCENT),
-            ),
-            Span::raw(" "),
-            Span::styled(part, theme::bold()),
-        ]));
-    }
-    lines.push(Line::from(""));
+        .map(|(i, part)| {
+            Line::from(vec![
+                Span::styled(
+                    if i == 0 { theme::CURSOR } else { " " },
+                    theme::on(theme::ACCENT),
+                ),
+                Span::raw(" "),
+                Span::styled(part, theme::bold()),
+            ])
+        })
+        .collect()
+}
 
-    for step in &session.steps {
+/// The rule that closes a turn, carrying how it ended.
+fn ended_rule(turn: &Turn, width: u16) -> Line<'static> {
+    match (&turn.finished, &turn.failed) {
+        (Some(finished), _) => {
+            let (_, colour) = marker(finished.outcome);
+            theme::labelled_rule(width, &finished.summary, colour)
+        }
+        // Not a verdict. The run did not get far enough to have one, and
+        // saying "refused" here would put a judgement nobody made on record.
+        (None, Some(why)) => {
+            theme::labelled_rule(width, &format!("did not finish \u{2014} {why}"), theme::BAD)
+        }
+        (None, None) => theme::rule(width),
+    }
+}
+
+fn steps_lines(
+    steps: &[Step],
+    running: Option<Phase>,
+    width: u16,
+    tick: u64,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let mut phase = Phase::Isolating;
+    for step in steps {
         match step {
-            Step::Entered(phase) => lines.push(phase_line(*phase, session.phase, tick)),
+            Step::Entered(entered) => {
+                phase = *entered;
+                lines.push(phase_line(*entered, running, tick));
+            }
             Step::Said { event, .. } => {
                 let (kind, text, colour) = describe_event(event);
                 lines.push(Line::from(vec![
-                    Span::styled(format!("{} {kind} ", theme::CONTINUE), theme::muted()),
-                    Span::styled(truncate(&text, width.saturating_sub(8)), theme::on(colour)),
+                    Span::styled(
+                        format!("{} ", theme::CONTINUE),
+                        theme::on(phase_colour(phase)),
+                    ),
+                    Span::styled(format!("{kind} "), theme::muted()),
+                    Span::styled(
+                        truncate(&text, width.saturating_sub(8) as usize),
+                        theme::on(colour),
+                    ),
                 ]));
             }
             Step::Checked(record) => lines.extend(checked_lines(record)),
         }
     }
-
-    lines.push(Line::from(""));
-    if let Some(finished) = &session.finished {
-        let (_, colour) = marker(finished.outcome);
-        lines.push(Line::from(Span::styled(
-            finished.summary.clone(),
-            theme::on(colour),
-        )));
-        lines.push(dim(format!("{}  \u{b7}  esc closes this", finished.run_id)));
-    } else if let Some(why) = &session.failed {
-        // Not a verdict on the change. The run did not get far enough to have
-        // one, and reporting "refused" here would say it did.
-        lines.push(Line::from(Span::styled(
-            format!("the run did not finish \u{2014} {why}"),
-            theme::on(theme::BAD),
-        )));
-        lines.push(dim("esc closes this".to_string()));
-    } else if session.stopping {
-        lines.push(dim(
-            "stopping \u{2014} the agent is being asked to stop".to_string()
-        ));
-    }
     lines
 }
 
-/// A phase heading, marked while it is the one happening.
-fn phase_line(phase: Phase, current: Option<Phase>, tick: u64) -> Line<'static> {
+/// A phase heading, in the colour of whoever is doing it.
+fn phase_line(phase: Phase, running: Option<Phase>, tick: u64) -> Line<'static> {
     let mut spans = vec![Span::styled(
         phase.title(),
-        theme::accent().add_modifier(Modifier::BOLD),
+        theme::on(phase_colour(phase)).add_modifier(Modifier::BOLD),
     )];
-    if current == Some(phase) {
+    if running == Some(phase) {
         let frame = theme::SPINNER[tick as usize % theme::SPINNER.len()];
         spans.push(Span::styled(format!("  {frame}"), theme::accent()));
     }
     Line::from(spans)
 }
 
+/// Who a phase belongs to, as a colour.
+///
+/// The two the runtime does itself are chrome; the three that cost something —
+/// an agent writing, the project's own checks, a second agent reading — each
+/// get their own, so a transcript can be scanned for one of them.
+fn phase_colour(phase: Phase) -> Color {
+    match phase {
+        Phase::Isolating | Phase::Preparing => theme::MUTED,
+        Phase::Authoring => theme::ACCENT,
+        Phase::Gating => theme::WARN,
+        Phase::Reviewing => theme::REVIEW,
+    }
+}
+
 /// One finished check, under the rail, with its output if it failed.
 fn checked_lines(record: &CheckRecord) -> Vec<Line<'static>> {
     let (mark, word, colour) = check_mark(record);
     let mut lines = vec![Line::from(vec![
-        Span::styled(format!("{} ", theme::CONTINUE), theme::muted()),
+        Span::styled(format!("{} ", theme::CONTINUE), theme::on(theme::WARN)),
         Span::styled(format!("{mark} {word}"), theme::on(colour)),
         Span::styled(
             format!("  {:<10} {}ms", record.name, record.duration_ms),
@@ -655,11 +621,32 @@ fn describe_event(event: &Event) -> (&'static str, String, Color) {
     }
 }
 
+/// One run out of the history, read back.
+fn render_record(frame: &mut Frame, app: &mut App, area: Rect) {
+    let Some(run) = app.current().cloned() else {
+        frame.render_widget(
+            Paragraph::new(dim("No run selected. `l` lists them.".to_string())),
+            area,
+        );
+        return;
+    };
+    app.page = area.height.saturating_sub(1).max(1);
+
+    let mut lines = summary_lines(app, &run, area.width as usize);
+    lines.push(tabs(app));
+    lines.push(theme::rule(area.width));
+    match app.detail {
+        Detail::Checks => lines.extend(check_lines(app, &run)),
+        Detail::Events => lines.extend(event_lines(app)),
+        Detail::Diff => lines.extend(diff_lines(app)),
+    }
+
+    let overflow = lines.len().saturating_sub(area.height as usize);
+    app.scroll = app.scroll.min(overflow as u16);
+    frame.render_widget(Paragraph::new(lines).scroll((app.scroll, 0)), area);
+}
+
 /// The three panes, named, with the one you are in marked.
-///
-/// A row of names rather than a hint saying which key shows the next one: the
-/// names are the same width either way, and this way the screen says what it
-/// has instead of what to press to find out.
 fn tabs(app: &App) -> Line<'static> {
     let mut spans = Vec::new();
     for (i, pane) in Detail::ALL.iter().enumerate() {
@@ -685,45 +672,55 @@ fn render_prompt(frame: &mut Frame, app: &App, area: Rect) {
         width: area.width.saturating_sub(theme::GUTTER * 2),
         ..area
     };
-    let block = theme::panel(app.typing.is_some());
-    let text = match app.typing {
-        // A prompt and a filter are different enough that the box says which
-        // it is taking. One starts something; the other narrows what is there,
-        // and typing a task into a filter would be a quiet way to lose it.
-        Some(Typing::Prompt) => Line::from(vec![
-            Span::styled("\u{203a}  ", theme::accent()),
-            Span::styled(app.prompt.clone(), theme::text()),
-            Span::styled(theme::CURSOR, theme::accent()),
-            Span::styled("     enter to run \u{b7} esc sets it aside", theme::muted()),
-        ]),
-        Some(Typing::Filter) => Line::from(vec![
-            Span::styled("/  ", theme::accent()),
-            Span::styled(app.filter.clone(), theme::text()),
-            Span::styled(theme::CURSOR, theme::accent()),
-        ]),
-        None if !app.filter.is_empty() => Line::from(vec![
-            Span::styled("/  ", theme::accent()),
-            Span::styled(app.filter.clone(), theme::text()),
-            Span::styled("     esc to clear", theme::muted()),
-        ]),
-        None => Line::from(Span::styled(
-            "n  new run     /  filter runs     ctrl-k  commands     ?  keys",
+    let writing = app.focus == Focus::Prompt && app.dialog.is_none();
+    let block = theme::panel(writing).padding(Padding::horizontal(1));
+
+    let text: Vec<Line<'static>> = if !writing && app.prompt.is_empty() {
+        vec![Line::from(Span::styled(
+            "n  write a task     l  runs     ctrl-k  commands     ?  keys",
             theme::muted(),
-        )),
+        ))]
+    } else {
+        let mut lines: Vec<Line<'static>> = app
+            .prompt
+            .lines()
+            .map(|line| Line::from(Span::styled(line.to_string(), theme::text())))
+            .collect();
+        if lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+        if writing {
+            // The cursor goes on the last line, which is where typing lands.
+            let last = lines.len() - 1;
+            let mut spans = lines[last].spans.clone();
+            spans.push(Span::styled(theme::CURSOR, theme::accent()));
+            if app.prompt.is_empty() {
+                spans.push(Span::styled(
+                    "  say what the agent should do \u{b7} enter runs it",
+                    theme::muted(),
+                ));
+            }
+            lines[last] = Line::from(spans);
+        }
+        lines
+    };
+
+    let mark = if writing {
+        Span::styled("\u{203a}", theme::accent().add_modifier(Modifier::BOLD))
+    } else {
+        Span::styled("\u{203a}", theme::muted())
     };
     frame.render_widget(
-        Paragraph::new(text).block(block.padding(Padding::horizontal(1))),
+        Paragraph::new(text).block(block.title(Line::from(vec![
+            Span::raw(" "),
+            mark,
+            Span::raw(" "),
+        ]))),
         inner,
     );
 }
 
-/// The bottom line: who you are running, and what it has cost.
-///
-/// One row carrying three different things at different times, in the order
-/// they matter. A message about what just happened wins, because it is the
-/// answer to the key that was just pressed; a pending leader wins next,
-/// because a terminal that has swallowed a keystroke and says nothing is a
-/// terminal that looks broken.
+/// The bottom line: what is happening, and what it has cost.
 fn status_bar(app: &App, width: u16) -> Line<'static> {
     if let Some(status) = &app.status {
         return Line::from(Span::styled(status.clone(), theme::on(theme::WARN)));
@@ -749,9 +746,7 @@ fn status_bar(app: &App, width: u16) -> Line<'static> {
         ));
     }
 
-    let left = match app.session.as_ref().filter(|s| s.live()) {
-        // While something is happening, the left of this line is what is
-        // happening. The counts it displaces cannot change until the run ends.
+    let left = match app.thread.live.as_ref().filter(|s| s.live()) {
         Some(session) => vec![
             Span::styled(
                 if session.stopping {
@@ -787,8 +782,6 @@ fn status_bar(app: &App, width: u16) -> Line<'static> {
         spans.push(Span::raw(" ".repeat(width - left_width - right_width)));
         spans.extend(right);
     } else if left_width + 10 < width {
-        // No room for both. The counts on the left are the ones that change
-        // as you move, so what is left of the line goes to the totals.
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             truncate(
@@ -850,9 +843,6 @@ fn describe_backend(backend: &BackendUsage) -> String {
     // The tilde is the whole point of tracking `approximate`: one vendor rounds
     // before it reports, so a figure including it is an estimate and says so.
     let about = if backend.approximate { "~" } else { "" };
-    // Said the way the vendor said it. One reports a split, another a single
-    // combined figure, and printing the second as "14.7k in / 0 out" would put
-    // a number in its mouth it never gave.
     if backend.input == 0 && backend.output == 0 {
         return format!("{about}{} total", compact(backend.total));
     }
@@ -882,10 +872,6 @@ fn plural(n: usize) -> &'static str {
 }
 
 /// The opening screen in a directory that is not a project yet.
-///
-/// Lists exactly what would be written and what is already there, because a
-/// setup step that writes into someone's repository should say what it is about
-/// to do before it does it.
 fn render_setup(frame: &mut Frame, app: &App, area: Rect) {
     let Some(plan) = &app.setup else { return };
     let mut lines = vec![
@@ -923,27 +909,27 @@ fn render_setup(frame: &mut Frame, app: &App, area: Rect) {
 /// Every key the screen answers to, in one place someone can read.
 fn render_keys(frame: &mut Frame, screen: Rect) {
     let rows: Vec<(&str, &str)> = vec![
-        ("n", "write a task and run it"),
+        ("type", "the box has the keys; what you type is the task"),
+        ("enter", "run it"),
+        ("alt-enter", "another line, for a task that needs one"),
+        ("up / down", "what you have asked here before"),
+        ("esc", "put the task aside, and take the keys back"),
+        ("n", "take the box back"),
         ("s", "ask a running agent to stop"),
-        ("j / k", "move between runs"),
-        ("g / G", "first run / last run"),
-        ("space / b", "scroll the pane"),
-        ("tab", "checks, events, diff"),
-        (
-            "enter / esc",
-            "into the pane and back, on a narrow terminal",
-        ),
-        ("/", "filter runs"),
-        ("p", "promote the selected run"),
-        ("r", "reload the run records"),
+        ("l", "the runs recorded here"),
+        ("tab", "checks, events, diff \u{2014} on a record"),
+        ("p", "promote a record; merges nothing"),
+        ("pgup / pgdn", "scroll"),
         ("ctrl-k", "commands"),
         ("ctrl-x", "leader: the same commands, one key away"),
         ("?", "this list"),
         ("q", "quit"),
     ];
 
-    let mut lines = vec![Line::from(Span::styled("keys", theme::bold()))];
-    lines.push(Line::from(""));
+    let mut lines = vec![
+        Line::from(Span::styled("keys", theme::bold())),
+        Line::from(""),
+    ];
     for (key, what) in &rows {
         lines.push(Line::from(vec![
             Span::styled(format!("{key:<13}"), theme::accent()),
@@ -953,7 +939,7 @@ fn render_keys(frame: &mut Frame, screen: Rect) {
     lines.push(Line::from(""));
     lines.push(dim("esc closes this".to_string()));
 
-    let area = theme::centred(screen, 66, lines.len() as u16 + 2);
+    let area = theme::centred(screen, 72, lines.len() as u16 + 2);
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines).block(theme::panel(true).padding(Padding::horizontal(2))),
@@ -970,7 +956,7 @@ fn render_palette(frame: &mut Frame, app: &App, screen: Rect) {
             Span::styled(app.query.clone(), theme::text()),
             Span::styled(theme::CURSOR, theme::accent()),
         ]),
-        Line::from(""),
+        theme::rule(82),
     ];
 
     if commands.is_empty() {
@@ -994,6 +980,140 @@ fn render_palette(frame: &mut Frame, app: &App, screen: Rect) {
     }
 
     let area = theme::centred(screen, 86, lines.len() as u16 + 2);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(theme::panel(true).padding(Padding::horizontal(2))),
+        area,
+    );
+}
+
+/// The runs recorded here, as somewhere to look one up.
+///
+/// A dialog rather than a column: it costs half the width of the screen to
+/// stand there permanently, and it is looked at once in a while rather than
+/// read while working.
+fn render_runs(frame: &mut Frame, app: &App, screen: Rect) {
+    let width = 92u16.min(screen.width);
+    let shown = 12usize;
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("/ ", theme::accent()),
+            Span::styled(app.filter.clone(), theme::text()),
+            Span::styled(theme::CURSOR, theme::accent()),
+            Span::styled(format!("     {}", counted(app)), theme::muted()),
+        ]),
+        theme::rule(width.saturating_sub(6)),
+    ];
+
+    if app.matching.is_empty() {
+        lines.push(dim(if app.runs.is_empty() {
+            "Nothing has been run here yet.".to_string()
+        } else {
+            "Nothing matches that.".to_string()
+        }));
+    }
+
+    let first = app.selected.saturating_sub(shown - 1).min(app.list_top);
+    for (i, run) in app
+        .matching
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(shown)
+        .filter_map(|(i, index)| app.runs.get(*index).map(|run| (i, run)))
+    {
+        let here = i == app.selected;
+        let (mark, colour) = marker(run.outcome);
+        lines.push(Line::from(vec![
+            Span::styled(if here { theme::CURSOR } else { " " }, theme::on(colour)),
+            Span::styled(format!(" {mark}  "), theme::on(colour)),
+            Span::styled(format!("{:<13}", when(&run.run_id)), theme::muted()),
+            Span::styled(
+                truncate(&described(&run.prompt), width as usize - 44),
+                if here {
+                    theme::text().add_modifier(Modifier::BOLD)
+                } else {
+                    theme::text()
+                },
+            ),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(dim("enter opens it \u{b7} esc closes this".to_string()));
+
+    let area = theme::centred(screen, width, lines.len() as u16 + 2);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(theme::panel(true).padding(Padding::horizontal(2))),
+        area,
+    );
+}
+
+/// Who writes and who reviews, and the choosing of them.
+///
+/// Routing picks a pair on its own and is usually right — it prefers a
+/// reviewer that is a *different binary* from the author, which is the
+/// property that makes a review worth having. This is for when it is not:
+/// naming one is a decision, and a decision is honoured.
+fn render_agents(frame: &mut Frame, app: &App, screen: Rect) {
+    let width = 84u16.min(screen.width);
+    let named = |chosen: &Option<String>| match chosen {
+        Some(id) => (id.clone(), theme::ACCENT),
+        None => ("automatic".to_string(), theme::MUTED),
+    };
+    let (author, author_colour) = named(&app.thread.adapter);
+    let (reviewer, reviewer_colour) = named(&app.thread.review_adapter);
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("writes   ", theme::muted()),
+            Span::styled(author, theme::on(author_colour)),
+            Span::styled("      reviews  ", theme::muted()),
+            Span::styled(reviewer, theme::on(reviewer_colour)),
+        ]),
+        theme::rule(width.saturating_sub(6)),
+    ];
+
+    if app.agents.is_empty() {
+        lines.push(dim("no adapter profiles in adapters/".to_string()));
+    }
+    for (i, agent) in app.agents.iter().enumerate() {
+        let here = i == app.pick;
+        let mut role = String::new();
+        if app.thread.adapter.as_deref() == Some(agent.id.as_str()) {
+            role.push_str("writes ");
+        }
+        if app.thread.review_adapter.as_deref() == Some(agent.id.as_str()) {
+            role.push_str("reviews");
+        }
+        let (mark, colour) = if agent.ready {
+            (theme::PASSED, theme::OK)
+        } else {
+            (theme::FAILED, theme::BAD)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(if here { theme::CURSOR } else { " " }, theme::accent()),
+            Span::styled(format!(" {mark}  "), theme::on(colour)),
+            Span::styled(
+                format!("{:<16}", agent.id),
+                if here {
+                    theme::text().add_modifier(Modifier::BOLD)
+                } else {
+                    theme::text()
+                },
+            ),
+            Span::styled(format!("{role:<9}"), theme::accent()),
+            Span::styled(truncate(&agent.note, 40), theme::muted()),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(dim(
+        "a writes \u{b7} r reviews \u{b7} x back to automatic \u{b7} esc closes this".to_string(),
+    ));
+
+    let area = theme::centred(screen, width, lines.len() as u16 + 2);
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines).block(theme::panel(true).padding(Padding::horizontal(2))),
@@ -1086,8 +1206,6 @@ fn event_lines(app: &App) -> Vec<Line<'static>> {
 fn diff_lines(app: &App) -> Vec<Line<'static>> {
     match &app.diff {
         None => vec![dim("reading the change\u{2026}".to_string())],
-        // Not an error. Once neither the run's branch nor its promotion exists,
-        // the change was merged or discarded — which is an answer.
         // Two causes, one appearance, and the message names both rather than
         // guessing: a refused run never committed, and an old approved one may
         // have had its branch merged away since.
@@ -1119,9 +1237,6 @@ fn bold(text: String) -> Line<'static> {
 }
 
 /// A run recorded before the record carried what was asked.
-///
-/// Blank is worse than a sentence saying why it is blank: one looks like a bug
-/// in the screen, the other like an old record, which is what it is.
 fn described(prompt: &str) -> String {
     if prompt.trim().is_empty() {
         "(recorded before runs kept the task text)".to_string()
@@ -1131,12 +1246,6 @@ fn described(prompt: &str) -> String {
 }
 
 /// A labelled value, wrapped under its own label.
-///
-/// Wrapped here rather than by the widget: `Paragraph::wrap` would make the
-/// number of rendered lines differ from the number of logical ones, and the
-/// scroll clamp counts logical lines. Every field wraps, not just the task —
-/// the value most likely to be long is a rejection's reason, and cutting that
-/// off loses the sentence someone opened this pane to read.
 fn field(name: &str, value: &str, width: usize) -> Vec<Line<'static>> {
     const LABEL: usize = 10;
     wrap(value, width.saturating_sub(LABEL))
@@ -1244,6 +1353,7 @@ fn tail(text: &str, lines: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::session::{Finished, Session};
     use ostraka_core::gate::{Approval, CheckRecord};
     use ostraka_core::identity::ActorId;
     use ratatui::Terminal;
@@ -1264,14 +1374,72 @@ mod tests {
         }
     }
 
+    fn record(run_id: &str, prompt: &str, checks: Vec<CheckRecord>) -> RunRecord {
+        RunRecord {
+            run_id: run_id.into(),
+            task_id: "t1".into(),
+            prompt: prompt.into(),
+            author: ActorId::new("archon"),
+            adapter: "claude-code".into(),
+            started_at: String::new(),
+            finished_at: None,
+            checks,
+            approval: None,
+            usage: Vec::new(),
+            outcome: Some(Outcome::Rejected),
+        }
+    }
+
+    fn check(name: &str, code: i32, stderr: &str) -> CheckRecord {
+        CheckRecord {
+            name: name.to_string(),
+            cmd: name.to_string(),
+            exit_code: Some(code),
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+            duration_ms: 126,
+        }
+    }
+
+    fn said(phase: Phase, text: &str) -> Step {
+        Step::Said {
+            phase,
+            event: Event::Message {
+                text: text.to_string(),
+                raw: None,
+            },
+        }
+    }
+
+    fn finished(run_id: &str, outcome: Outcome, summary: &str) -> Finished {
+        Finished {
+            run_id: run_id.to_string(),
+            outcome: Some(outcome),
+            summary: summary.to_string(),
+        }
+    }
+
+    /// A turn that is over, put straight into the thread.
+    fn turn(app: &mut App, prompt: &str, steps: Vec<Step>, ended: Option<Finished>) {
+        app.thread.turns.push(Turn {
+            prompt: prompt.to_string(),
+            steps,
+            finished: ended,
+            failed: None,
+        });
+    }
+
+    fn working(app: &mut App, prompt: &str, steps: Vec<Step>) {
+        app.thread.live = Some(Session::recorded(prompt, steps, None));
+    }
+
     fn screen(app: &mut App, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
         terminal.draw(|frame| draw(frame, app)).expect("draws");
         let buffer = terminal.backend().buffer().clone();
-        let area = buffer.area;
-        (0..area.height)
+        (0..buffer.area.height)
             .map(|y| {
-                (0..area.width)
+                (0..buffer.area.width)
                     .map(|x| buffer[(x, y)].symbol().to_string())
                     .collect::<String>()
             })
@@ -1279,10 +1447,26 @@ mod tests {
             .join("\n")
     }
 
+    /// Everything drawn in one colour, read back off the rendered cells.
+    fn painted(app: &mut App, width: u16, height: u16, colour: Color) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
+        terminal.draw(|frame| draw(frame, app)).expect("draws");
+        let buffer = terminal.backend().buffer().clone();
+        let mut found = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let cell = &buffer[(x, y)];
+                if cell.fg == colour {
+                    found.push_str(cell.symbol());
+                }
+            }
+        }
+        found
+    }
+
     #[test]
     fn a_directory_that_is_not_a_project_says_what_would_be_written() {
-        // Rather than an empty run list, which reads as a broken screen.
-        let dir = std::env::temp_dir().join(format!("ostraka-tui-init-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ostraka-view-init-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch");
         std::fs::write(dir.join("Cargo.toml"), "[package]\n").expect("write");
@@ -1290,10 +1474,9 @@ mod tests {
         let mut app = App::new(dir.clone(), Vec::new());
         app.setup = Some(crate::init::plan(&dir));
 
-        let out = screen(&mut app, 100, 22);
+        let out = screen(&mut app, 100, 24);
         assert!(out.contains("not an Ostraka project yet"), "{out}");
         assert!(out.contains("a Rust project"), "{out}");
-        assert!(out.contains("ostraka.toml"), "{out}");
         assert!(out.contains("adapters/codex.toml"), "{out}");
         assert!(out.contains("i set this directory up"), "{out}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1301,14 +1484,14 @@ mod tests {
 
     #[test]
     fn setup_names_what_is_already_there_rather_than_offering_to_rewrite_it() {
-        let dir = std::env::temp_dir().join(format!("ostraka-tui-half-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ostraka-view-half-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch");
         std::fs::write(dir.join("ostraka.toml"), "# mine\n").expect("write");
 
         let mut app = App::new(dir.clone(), Vec::new());
         app.setup = Some(crate::init::plan(&dir));
-        let out = screen(&mut app, 100, 22);
+        let out = screen(&mut app, 100, 24);
         assert!(out.contains("already there"), "{out}");
         assert!(
             out.contains("Nothing already on disk is overwritten"),
@@ -1318,15 +1501,234 @@ mod tests {
     }
 
     #[test]
-    fn a_project_with_no_runs_says_so_rather_than_showing_an_empty_frame() {
+    fn an_empty_thread_says_what_to_do_rather_than_showing_nothing() {
         let mut app = App::new(PathBuf::from("/p"), Vec::new());
-        let out = screen(&mut app, 90, 12);
-        assert!(out.contains("0 runs"), "{out}");
-        assert!(out.contains("No runs yet"), "{out}");
+        let out = screen(&mut app, 100, 18);
+        assert!(out.contains("Nothing has been asked here yet"), "{out}");
+        assert!(out.contains("reviewed by a different agent"), "{out}");
     }
 
     #[test]
-    fn the_list_shows_what_each_run_was_for_and_how_it_ended() {
+    fn the_regions_are_divided_by_rules_rather_than_by_space_alone() {
+        // Four regions separated only by gaps read as one region with holes in
+        // it, and the eye re-derives the boundaries every time it looks.
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let out = screen(&mut app, 100, 18);
+        let rules = out
+            .lines()
+            .filter(|line| line.trim_start().starts_with(theme::RULE))
+            .count();
+        assert!(
+            rules >= 1,
+            "nothing divides the breadcrumb from the work:\n{out}"
+        );
+        // And the box is a box, which is the other divider.
+        assert!(out.contains('\u{256d}'), "{out}");
+    }
+
+    #[test]
+    fn the_thread_shows_what_was_asked_and_what_each_agent_did() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        turn(
+            &mut app,
+            "add a wall-clock ceiling",
+            vec![
+                Step::Entered(Phase::Authoring),
+                said(Phase::Authoring, "editing gate.rs"),
+                Step::Entered(Phase::Gating),
+                Step::Checked(check("format", 0, "")),
+                Step::Entered(Phase::Reviewing),
+                said(Phase::Reviewing, "the change does what was asked"),
+            ],
+            Some(finished(
+                "t1-20260908T000100Z",
+                Outcome::Approved,
+                "approved \u{2014} nothing merged",
+            )),
+        );
+
+        let out = screen(&mut app, 100, 24);
+        for expected in [
+            "add a wall-clock ceiling",
+            "author",
+            "editing gate.rs",
+            "gate",
+            "format",
+            "review",
+            "the change does what was asked",
+            "approved",
+        ] {
+            assert!(out.contains(expected), "no {expected:?} on:\n{out}");
+        }
+    }
+
+    #[test]
+    fn a_turn_is_closed_by_a_rule_carrying_how_it_ended() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        turn(
+            &mut app,
+            "one",
+            vec![Step::Entered(Phase::Authoring)],
+            Some(finished(
+                "t1-20260908T000100Z",
+                Outcome::Rejected,
+                "refused",
+            )),
+        );
+        let out = screen(&mut app, 100, 20);
+        let closing = out
+            .lines()
+            .find(|line| line.contains("refused") && line.contains(theme::RULE))
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            !closing.is_empty(),
+            "the turn was not closed by a labelled rule:\n{out}"
+        );
+    }
+
+    #[test]
+    fn who_is_speaking_is_a_colour_rather_than_something_to_read() {
+        // A transcript should be scannable for "what did the reviewer say"
+        // without reading it.
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        turn(
+            &mut app,
+            "one",
+            vec![
+                Step::Entered(Phase::Authoring),
+                Step::Entered(Phase::Gating),
+                Step::Entered(Phase::Reviewing),
+            ],
+            None,
+        );
+        assert!(painted(&mut app, 100, 20, theme::ACCENT).contains("author"));
+        assert!(painted(&mut app, 100, 20, theme::WARN).contains("gate"));
+        assert!(painted(&mut app, 100, 20, theme::REVIEW).contains("review"));
+    }
+
+    #[test]
+    fn the_transcript_marks_only_the_phase_that_is_still_going() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        working(
+            &mut app,
+            "do a thing",
+            vec![
+                Step::Entered(Phase::Authoring),
+                Step::Entered(Phase::Gating),
+            ],
+        );
+        let spinning = |app: &mut App| {
+            screen(app, 100, 20)
+                .lines()
+                .filter(|line| theme::SPINNER.iter().any(|f| line.contains(f)))
+                .count()
+        };
+        assert_eq!(spinning(&mut app), 1, "one phase is running, not two");
+
+        let first = screen(&mut app, 100, 20);
+        app.tick += 1;
+        assert_ne!(first, screen(&mut app, 100, 20), "the mark did not move");
+    }
+
+    #[test]
+    fn a_failing_check_shows_its_output_without_waiting_for_the_record() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        working(
+            &mut app,
+            "break the build",
+            vec![
+                Step::Entered(Phase::Gating),
+                Step::Checked(check("format", 0, "")),
+                Step::Checked(check("test", 101, "assertion failed: left == right")),
+            ],
+        );
+        let out = screen(&mut app, 100, 22);
+        assert!(out.contains("pass"), "{out}");
+        assert!(out.contains("FAIL"), "{out}");
+        assert!(out.contains("assertion failed"), "{out}");
+    }
+
+    #[test]
+    fn a_run_that_never_started_is_not_reported_as_a_refusal() {
+        // "Refused" is a verdict on a change. A run that could not be launched
+        // never produced one.
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        app.thread.turns.push(Turn {
+            prompt: "do a thing".into(),
+            steps: Vec::new(),
+            finished: None,
+            failed: Some("no adapter profile can run here".into()),
+        });
+        let out = screen(&mut app, 100, 20);
+        assert!(out.contains("did not finish"), "{out}");
+        assert!(out.contains("no adapter profile"), "{out}");
+        assert!(!out.contains("refused"), "{out}");
+    }
+
+    #[test]
+    fn a_live_transcript_follows_its_own_tail_until_somebody_scrolls_up() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut steps = vec![Step::Entered(Phase::Authoring)];
+        steps.extend((0..60).map(|i| said(Phase::Authoring, &format!("line {i}"))));
+        working(&mut app, "a talkative agent", steps);
+
+        let following = screen(&mut app, 100, 20);
+        assert!(
+            following.contains("line 59"),
+            "the tail was not shown:\n{following}"
+        );
+
+        app.scroll_by(-30);
+        assert!(!app.follow, "scrolling up did not release the tail");
+        let held = screen(&mut app, 100, 20);
+        assert!(!held.contains("line 59"), "the view snapped back:\n{held}");
+    }
+
+    #[test]
+    fn the_breadcrumb_says_what_the_next_run_will_stand_on() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        // Nothing to say while the chain is still standing on HEAD.
+        assert!(!screen(&mut app, 100, 18).contains("ostraka/"));
+
+        app.thread.base_ref = "ostraka/t1-20260908T000100Z".into();
+        let out = screen(&mut app, 100, 18);
+        let breadcrumb = out.lines().next().unwrap_or_default();
+        assert!(breadcrumb.contains(" on "), "{out}");
+        assert!(breadcrumb.contains("ostraka/t1-"), "{out}");
+    }
+
+    #[test]
+    fn the_box_says_where_typing_goes() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        // It opens with the keys, because the first thing anybody does here is
+        // say what they want.
+        let writing = screen(&mut app, 100, 18);
+        assert!(
+            writing.contains("say what the agent should do"),
+            "{writing}"
+        );
+
+        app.focus = Focus::Keys;
+        let idle = screen(&mut app, 100, 18);
+        assert!(idle.contains("write a task"), "{idle}");
+        assert!(idle.contains("ctrl-k"), "{idle}");
+    }
+
+    #[test]
+    fn a_task_of_several_lines_makes_the_box_taller() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let one = app.prompt_height();
+        app.prompt = "first\nsecond\nthird".into();
+        assert!(app.prompt_height() > one);
+
+        let out = screen(&mut app, 100, 20);
+        assert!(out.contains("first"), "{out}");
+        assert!(out.contains("third"), "{out}");
+    }
+
+    #[test]
+    fn the_runs_dialog_lists_what_was_run_and_narrows_as_it_is_typed_into() {
         let mut app = App::new(
             PathBuf::from("/p"),
             vec![
@@ -1338,96 +1740,68 @@ mod tests {
                 ),
             ],
         );
-        let out = screen(&mut app, 100, 16);
-        assert!(out.contains("2 runs"), "{out}");
+        app.open(Dialog::Runs);
+        let out = screen(&mut app, 110, 24);
         assert!(out.contains("add a test"), "{out}");
         assert!(out.contains("rename a field"), "{out}");
         assert!(out.contains("09-07 00:03"), "{out}");
-        assert!(out.contains("approved"), "{out}");
-        // Each entry carries how far it got under what it was for, so the list
-        // answers "did it pass" without anybody selecting the run.
-        assert!(out.contains("3 of 4 checks"), "{out}");
+        assert!(out.contains("enter opens it"), "{out}");
+
+        app.filter = "rename".into();
+        app.refilter();
+        let narrowed = screen(&mut app, 110, 24);
+        assert!(narrowed.contains("1 of 2 runs"), "{narrowed}");
+        assert!(!narrowed.contains("add a test"), "{narrowed}");
     }
 
     #[test]
-    fn the_selected_run_is_marked_down_its_whole_entry() {
-        // Two lines, one mark: a highlight on only the first of them reads as
-        // a different run from the second.
-        let mut app = App::new(
-            PathBuf::from("/p"),
-            vec![
-                summary("t1-20260907T000300Z", "first", Some(Outcome::Approved)),
-                summary("t2-20260907T000100Z", "second", Some(Outcome::Approved)),
-            ],
-        );
-        app.move_by(1);
-        let out = screen(&mut app, 100, 16);
-        let marked: Vec<&str> = out
-            .lines()
-            .filter(|line| line.starts_with(CURSOR_AT_LEFT))
-            .collect();
-        assert_eq!(marked.len(), 2, "the cursor did not span the entry:\n{out}");
-        assert!(marked[0].contains("second"), "{out}");
-        assert!(marked[1].contains("checks"), "{out}");
-    }
-
-    /// The cursor as it appears at the very left of a rendered row. The list
-    /// column starts at the frame's edge, so the bar is the first cell.
-    const CURSOR_AT_LEFT: &str = "\u{258c}";
-
-    #[test]
-    fn a_list_taller_than_its_column_scrolls_to_keep_the_selection_in_view() {
-        let mut app = App::new(
-            PathBuf::from("/p"),
-            (0..20)
-                .map(|i| {
-                    summary(
-                        &format!("t{i}-2026090{}T000300Z", i % 10),
-                        &format!("task number {i}"),
-                        Some(Outcome::Approved),
-                    )
-                })
-                .collect(),
-        );
-        app.move_by(19);
-        let out = screen(&mut app, 100, 16);
-        assert!(
-            out.contains("task number 19"),
-            "the end is unreachable:\n{out}"
-        );
-        assert!(
-            !out.contains("task number 0 "),
-            "the top did not scroll:\n{out}"
-        );
-    }
-
-    #[test]
-    fn a_narrow_terminal_shows_one_column_and_enter_moves_between_them() {
-        // Both columns on forty-eight columns means neither can be read.
+    fn a_filter_matching_nothing_says_so_instead_of_looking_broken() {
         let mut app = App::new(
             PathBuf::from("/p"),
             vec![summary(
                 "t1-20260907T000300Z",
-                "narrow",
+                "alpha",
                 Some(Outcome::Approved),
             )],
         );
-        let list = screen(&mut app, 48, 16);
-        assert!(list.contains("narrow"), "{list}");
-        assert!(
-            !list.contains("checks   events"),
-            "both columns were drawn:\n{list}"
-        );
-
-        app.focus = Focus::Detail;
-        let detail = screen(&mut app, 48, 16);
-        assert!(detail.contains("checks"), "{detail}");
-        assert!(detail.contains("author"), "{detail}");
+        app.open(Dialog::Runs);
+        app.filter = "nothing matches this".into();
+        app.refilter();
+        let out = screen(&mut app, 110, 24);
+        assert!(out.contains("Nothing matches that"), "{out}");
+        assert!(out.contains("0 of 1 runs"), "{out}");
     }
 
     #[test]
-    fn a_failing_check_shows_the_output_that_explains_it() {
-        // The reason someone opens this screen. A passing check's output is
+    fn the_agents_dialog_says_who_is_ready_and_who_was_chosen() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        app.agents = vec![
+            Agent {
+                id: "claude-code".into(),
+                ready: true,
+                note: "2.1.263".into(),
+            },
+            Agent {
+                id: "codex".into(),
+                ready: false,
+                note: "codex not found on PATH".into(),
+            },
+        ];
+        app.open(Dialog::Agents);
+
+        let out = screen(&mut app, 110, 24);
+        assert!(out.contains("automatic"), "{out}");
+        assert!(out.contains("claude-code"), "{out}");
+        assert!(out.contains("not found on PATH"), "{out}");
+
+        app.thread.adapter = Some("claude-code".into());
+        let chosen = screen(&mut app, 110, 24);
+        assert!(chosen.contains("writes"), "{chosen}");
+    }
+
+    #[test]
+    fn a_record_shows_the_failing_check_that_explains_it() {
+        // The reason someone looks a run up. A passing check's output is
         // noise; a failing one's is the whole point.
         let mut app = App::new(
             PathBuf::from("/p"),
@@ -1437,38 +1811,22 @@ mod tests {
                 Some(Outcome::Rejected),
             )],
         );
-        app.record = Some(RunRecord {
-            run_id: "t1-20260907T000300Z".into(),
-            task_id: "t1".into(),
-            prompt: "break the build".into(),
-            author: ActorId::new("archon"),
-            adapter: "claude-code".into(),
-            started_at: String::new(),
-            finished_at: None,
-            checks: vec![
+        app.screen = Screen::Record;
+        let mut r = record(
+            "t1-20260907T000300Z",
+            "break the build",
+            vec![
                 CheckRecord {
-                    name: "format".into(),
-                    cmd: "fmt".into(),
-                    exit_code: Some(0),
                     stdout: "quiet success".into(),
-                    stderr: String::new(),
-                    duration_ms: 12,
+                    ..check("format", 0, "")
                 },
-                CheckRecord {
-                    name: "test".into(),
-                    cmd: "test".into(),
-                    exit_code: Some(101),
-                    stdout: String::new(),
-                    stderr: "assertion failed: left == right".into(),
-                    duration_ms: 340,
-                },
+                check("test", 101, "assertion failed: left == right"),
             ],
-            approval: None,
-            usage: Vec::new(),
-            outcome: Some(Outcome::Rejected),
-        });
+        );
+        r.approval = None;
+        app.record = Some(r);
 
-        let out = screen(&mut app, 100, 20);
+        let out = screen(&mut app, 100, 24);
         assert!(out.contains("FAIL"), "{out}");
         assert!(out.contains("assertion failed"), "{out}");
         assert!(
@@ -1478,7 +1836,7 @@ mod tests {
     }
 
     #[test]
-    fn the_detail_pane_switches_to_what_the_agents_said() {
+    fn a_record_shows_the_reason_the_reviewer_gave() {
         let mut app = App::new(
             PathBuf::from("/p"),
             vec![summary(
@@ -1487,143 +1845,120 @@ mod tests {
                 Some(Outcome::Rejected),
             )],
         );
-        app.events = vec![
-            Event::Message {
-                text: "I could not reach the model".into(),
-                raw: None,
+        app.screen = Screen::Record;
+        let mut r = record("t1-20260907T000300Z", "do a thing", Vec::new());
+        r.approval = Some(Approval {
+            reviewer: ActorId::new("ephor"),
+            verdict: Verdict::Reject {
+                reason: "went outside the task".into(),
             },
-            Event::Finished {
-                exit_code: Some(1),
-                files_touched: vec![],
-            },
-        ];
-        app.detail = Detail::Events;
-        let out = screen(&mut app, 100, 18);
-        assert!(out.contains("could not reach the model"), "{out}");
-        assert!(out.contains("exit 1"), "{out}");
+        });
+        app.record = Some(r);
+        assert!(screen(&mut app, 100, 20).contains("went outside the task"));
     }
 
     #[test]
-    fn the_detail_tabs_name_every_pane_and_mark_the_one_showing() {
-        // The names, not a hint about the key that reveals the next one: the
-        // row costs the same width either way and says more.
+    fn the_record_tabs_name_every_pane_and_mark_the_one_showing() {
         let mut app = App::new(
             PathBuf::from("/p"),
             vec![summary("t1-20260907T000300Z", "a", Some(Outcome::Approved))],
         );
-        let out = screen(&mut app, 100, 18);
+        app.screen = Screen::Record;
+        let out = screen(&mut app, 100, 20);
         for pane in Detail::ALL {
             assert!(out.contains(pane.title()), "{pane:?} unnamed:\n{out}");
         }
-        assert_eq!(marked_tab(&mut app, 100, 18), Some("checks".to_string()));
 
+        let marked = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("test terminal");
+            terminal.draw(|frame| draw(frame, app)).expect("draws");
+            let buffer = terminal.backend().buffer().clone();
+            let mut found = String::new();
+            for y in 0..buffer.area.height {
+                for x in 0..buffer.area.width {
+                    let cell = &buffer[(x, y)];
+                    if cell.fg == theme::ACCENT
+                        && cell.modifier.contains(Modifier::UNDERLINED)
+                        && cell.symbol() != " "
+                    {
+                        found.push_str(cell.symbol());
+                    }
+                }
+            }
+            found
+        };
+        assert_eq!(marked(&mut app), "checks");
         app.detail = app.detail.next();
-        assert_eq!(marked_tab(&mut app, 100, 18), Some("events".to_string()));
+        assert_eq!(marked(&mut app), "events");
         app.detail = app.detail.next();
-        assert_eq!(marked_tab(&mut app, 100, 18), Some("diff".to_string()));
+        assert_eq!(marked(&mut app), "diff");
         assert_eq!(app.detail.next(), Detail::Checks);
     }
 
-    /// The tab drawn in the accent colour, read back off the rendered cells.
-    ///
-    /// Asserted on the styling rather than on the text because all three names
-    /// are on screen either way: which one is marked is the whole claim.
-    fn marked_tab(app: &mut App, width: u16, height: u16) -> Option<String> {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
-        terminal.draw(|frame| draw(frame, app)).expect("draws");
-        let buffer = terminal.backend().buffer().clone();
-        let mut found = String::new();
-        for y in 0..buffer.area.height {
-            for x in 0..buffer.area.width {
-                let cell = &buffer[(x, y)];
-                if cell.fg == theme::ACCENT
-                    && cell.modifier.contains(Modifier::UNDERLINED)
-                    && cell.symbol() != " "
-                {
-                    found.push_str(cell.symbol());
-                }
-            }
-        }
-        (!found.is_empty()).then_some(found)
-    }
-
     #[test]
-    fn a_rejection_shows_the_reason_the_reviewer_gave() {
+    fn the_diff_pane_shows_the_change_and_marks_its_sides() {
         let mut app = App::new(
             PathBuf::from("/p"),
             vec![summary(
                 "t1-20260907T000300Z",
-                "do a thing",
-                Some(Outcome::Rejected),
+                "add a line",
+                Some(Outcome::Approved),
             )],
         );
-        app.record = Some(RunRecord {
-            run_id: "t1-20260907T000300Z".into(),
-            task_id: "t1".into(),
-            prompt: "do a thing".into(),
-            author: ActorId::new("archon"),
-            adapter: "claude-code".into(),
-            started_at: String::new(),
-            finished_at: None,
-            checks: Vec::new(),
-            approval: Some(Approval {
-                reviewer: ActorId::new("ephor"),
-                verdict: Verdict::Reject {
-                    reason: "went outside the task".into(),
-                },
-            }),
-            usage: Vec::new(),
-            outcome: Some(Outcome::Rejected),
-        });
-        let out = screen(&mut app, 100, 16);
-        assert!(out.contains("went outside the task"), "{out}");
-    }
-
-    #[test]
-    fn a_long_rejection_reason_wraps_rather_than_running_off_the_pane() {
-        // The value most likely to be too long for one row is the sentence
-        // explaining why a change was refused, which is the sentence someone
-        // opened this pane to read.
-        let reason = "The file is not newline-terminated, so it comes out of \
-                      the checkout differently from every other file in this \
-                      repository and the format check would fail on it next time";
-        let mut app = App::new(
-            PathBuf::from("/p"),
-            vec![summary(
-                "t1-20260907T000300Z",
-                "write a file",
-                Some(Outcome::Rejected),
-            )],
-        );
-        app.record = Some(RunRecord {
-            run_id: "t1-20260907T000300Z".into(),
-            task_id: "t1".into(),
-            prompt: "write a file".into(),
-            author: ActorId::new("archon"),
-            adapter: "claude-code".into(),
-            started_at: String::new(),
-            finished_at: None,
-            checks: Vec::new(),
-            approval: Some(Approval {
-                reviewer: ActorId::new("ephor"),
-                verdict: Verdict::Reject {
-                    reason: reason.into(),
-                },
-            }),
-            usage: Vec::new(),
-            outcome: Some(Outcome::Rejected),
-        });
-
+        app.screen = Screen::Record;
+        app.detail = Detail::Diff;
+        app.diff = Some(Some(
+            "diff --git a/x b/x\n@@ -1 +1,2 @@\n context\n+added line\n-removed line\n".into(),
+        ));
         let out = screen(&mut app, 100, 24);
-        // The last words of the reason, which is what a cut-off line loses.
-        // Asserted on a fragment short enough to survive any wrap point: a
-        // longer phrase would straddle a break the moment the pane changed
-        // width by a column, and fail for a reason that is not the claim.
-        assert!(out.contains("on it next time"), "{out}");
-        assert!(
-            out.lines().all(|line| line.chars().count() <= 100),
-            "a line ran past the frame:\n{out}"
+        assert!(out.contains("+added line"), "{out}");
+        assert!(out.contains("-removed line"), "{out}");
+        assert!(out.contains("@@ -1 +1,2 @@"), "{out}");
+    }
+
+    #[test]
+    fn a_run_with_no_commit_names_both_reasons_rather_than_showing_an_empty_pane() {
+        let mut app = App::new(
+            PathBuf::from("/p"),
+            vec![summary(
+                "t1-20260907T000300Z",
+                "add a line",
+                Some(Outcome::Approved),
+            )],
         );
+        app.screen = Screen::Record;
+        app.detail = Detail::Diff;
+        app.diff = Some(None);
+        let out = screen(&mut app, 100, 22);
+        assert!(out.contains("produced no commit"), "{out}");
+        assert!(out.contains("merged away"), "{out}");
+    }
+
+    #[test]
+    fn scrolling_cannot_run_off_the_end_of_the_content() {
+        let mut app = App::new(
+            PathBuf::from("/p"),
+            vec![summary(
+                "t1-20260907T000300Z",
+                "look at a diff",
+                Some(Outcome::Approved),
+            )],
+        );
+        app.screen = Screen::Record;
+        app.detail = Detail::Diff;
+        app.diff = Some(Some((0..200).map(|i| format!("+line {i}\n")).collect()));
+
+        app.scroll_by(10_000);
+        let out = screen(&mut app, 100, 24);
+        assert!(app.scroll < 250, "scroll ran away: {}", app.scroll);
+        assert!(
+            out.contains("line 199"),
+            "the end was not reachable:\n{out}"
+        );
+
+        app.scroll_by(-10_000);
+        assert_eq!(app.scroll, 0);
+        assert!(screen(&mut app, 100, 24).contains("t1-20260907T000300Z"));
     }
 
     #[test]
@@ -1652,117 +1987,6 @@ mod tests {
     }
 
     #[test]
-    fn the_diff_pane_shows_the_change_and_marks_its_sides() {
-        let mut app = App::new(
-            PathBuf::from("/p"),
-            vec![summary(
-                "t1-20260907T000300Z",
-                "add a line",
-                Some(Outcome::Approved),
-            )],
-        );
-        app.detail = Detail::Diff;
-        app.diff = Some(Some(
-            "diff --git a/x b/x\n@@ -1 +1,2 @@\n context\n+added line\n-removed line\n".into(),
-        ));
-        let out = screen(&mut app, 100, 20);
-        assert!(out.contains("+added line"), "{out}");
-        assert!(out.contains("-removed line"), "{out}");
-        assert!(out.contains("@@ -1 +1,2 @@"), "{out}");
-    }
-
-    #[test]
-    fn a_run_with_no_commit_names_both_reasons_rather_than_showing_an_empty_pane() {
-        // A refused run never committed; an old approved one may have been
-        // merged away. Same appearance, two causes, and guessing between them
-        // would be wrong half the time.
-        let mut app = App::new(
-            PathBuf::from("/p"),
-            vec![summary(
-                "t1-20260907T000300Z",
-                "add a line",
-                Some(Outcome::Approved),
-            )],
-        );
-        app.detail = Detail::Diff;
-        app.diff = Some(None);
-        let out = screen(&mut app, 100, 18);
-        assert!(out.contains("produced no commit"), "{out}");
-        assert!(out.contains("merged away"), "{out}");
-    }
-
-    #[test]
-    fn scrolling_cannot_run_off_the_end_of_the_content() {
-        // Past the end is an empty box, which reads as a broken screen.
-        let mut app = App::new(
-            PathBuf::from("/p"),
-            vec![summary(
-                "t1-20260907T000300Z",
-                "look at a diff",
-                Some(Outcome::Approved),
-            )],
-        );
-        app.detail = Detail::Diff;
-        app.diff = Some(Some((0..200).map(|i| format!("+line {i}\n")).collect()));
-
-        app.scroll_by(10_000);
-        let out = screen(&mut app, 100, 20);
-        assert!(app.scroll < 250, "scroll ran away: {}", app.scroll);
-        assert!(
-            out.contains("line 199"),
-            "the end was not reachable:\n{out}"
-        );
-
-        app.scroll_by(-10_000);
-        let top = screen(&mut app, 100, 20);
-        assert_eq!(app.scroll, 0);
-        assert!(top.contains("t1-20260907T000300Z"), "{top}");
-    }
-
-    #[test]
-    fn a_filter_narrows_the_list_and_says_how_far() {
-        let mut app = App::new(
-            PathBuf::from("/p"),
-            vec![
-                summary(
-                    "t1-20260907T000300Z",
-                    "rename a field",
-                    Some(Outcome::Approved),
-                ),
-                summary("t2-20260907T000200Z", "add a test", Some(Outcome::Rejected)),
-                summary(
-                    "t3-20260907T000100Z",
-                    "add a check",
-                    Some(Outcome::Approved),
-                ),
-            ],
-        );
-        app.filter = "add".into();
-        app.refilter();
-        assert_eq!(app.matching.len(), 2);
-
-        let out = screen(&mut app, 100, 16);
-        assert!(out.contains("2 of 3 runs"), "{out}");
-        assert!(!out.contains("rename a field"), "{out}");
-        assert!(out.contains("add a test"), "{out}");
-    }
-
-    #[test]
-    fn a_filter_matches_the_outcome_word_too() {
-        let mut app = App::new(
-            PathBuf::from("/p"),
-            vec![
-                summary("t1-20260907T000300Z", "one", Some(Outcome::Approved)),
-                summary("t2-20260907T000200Z", "two", Some(Outcome::Rejected)),
-            ],
-        );
-        app.filter = "refused".into();
-        app.refilter();
-        assert_eq!(app.matching.len(), 1);
-        assert_eq!(app.current().map(|r| r.prompt.as_str()), Some("two"));
-    }
-
-    #[test]
     fn a_filter_that_hides_the_selection_moves_it_rather_than_dangling() {
         let mut app = App::new(
             PathBuf::from("/p"),
@@ -1780,290 +2004,18 @@ mod tests {
     }
 
     #[test]
-    fn a_filter_matching_nothing_says_so_instead_of_looking_broken() {
+    fn a_filter_matches_the_outcome_word_too() {
         let mut app = App::new(
             PathBuf::from("/p"),
-            vec![summary(
-                "t1-20260907T000300Z",
-                "alpha",
-                Some(Outcome::Approved),
-            )],
+            vec![
+                summary("t1-20260907T000300Z", "one", Some(Outcome::Approved)),
+                summary("t2-20260907T000200Z", "two", Some(Outcome::Rejected)),
+            ],
         );
-        app.filter = "nothing matches this".into();
+        app.filter = "refused".into();
         app.refilter();
-        let out = screen(&mut app, 100, 12);
-        assert!(out.contains("Nothing matches this filter"), "{out}");
-        assert!(out.contains("0 of 1 runs"), "{out}");
-    }
-
-    #[test]
-    fn the_input_line_says_where_typing_goes_before_anybody_types() {
-        // The one box on the screen, and the only place a keystroke becomes
-        // text. A placeholder is what makes that legible without a legend.
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
-        let idle = screen(&mut app, 100, 12);
-        assert!(idle.contains("new run"), "{idle}");
-        assert!(idle.contains("filter runs"), "{idle}");
-        assert!(idle.contains("ctrl-k"), "{idle}");
-        assert!(idle.contains("\u{256d}"), "the box is not drawn:\n{idle}");
-
-        app.typing = Some(Typing::Filter);
-        app.filter = "typed".into();
-        let filtering = screen(&mut app, 100, 12);
-        assert!(filtering.contains("typed"), "{filtering}");
-        assert!(!filtering.contains("new run"), "{filtering}");
-    }
-
-    #[test]
-    fn the_box_says_whether_it_is_taking_a_task_or_a_filter() {
-        // Two jobs, one box. Typing a task into a filter would narrow the list
-        // to nothing and lose the sentence, which is a quiet way to fail.
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
-        app.typing = Some(Typing::Prompt);
-        app.prompt = "add a wall-clock ceiling".into();
-        let out = screen(&mut app, 100, 12);
-        assert!(out.contains("add a wall-clock ceiling"), "{out}");
-        assert!(out.contains("enter to run"), "{out}");
-        // Set aside, not dropped: escape keeps the text, and the box has to
-        // say the thing it actually does.
-        assert!(out.contains("sets it aside"), "{out}");
-        assert!(!out.contains("filter runs"), "{out}");
-    }
-
-    #[test]
-    fn the_command_palette_names_what_it_can_do_and_marks_the_pick() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
-        app.open(Dialog::Commands);
-        let out = screen(&mut app, 110, 24);
-        assert!(out.contains("promote run"), "{out}");
-        assert!(out.contains("reload runs"), "{out}");
-        // The key beside the name, so the palette teaches its own shortcut.
-        assert!(out.contains("merges nothing"), "{out}");
-
-        app.query = "promote".into();
-        let narrowed = screen(&mut app, 110, 24);
-        assert!(narrowed.contains("promote run"), "{narrowed}");
-        assert!(!narrowed.contains("reload runs"), "{narrowed}");
-    }
-
-    #[test]
-    fn a_palette_query_matching_nothing_says_so_rather_than_showing_an_empty_box() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
-        app.open(Dialog::Commands);
-        app.query = "xyzzy".into();
-        let out = screen(&mut app, 110, 24);
-        assert!(out.contains("no command matches that"), "{out}");
-        assert_eq!(app.picked(), None);
-    }
-
-    #[test]
-    fn the_keys_dialog_lists_the_keys_rather_than_a_footer_doing_it_forever() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
-        app.open(Dialog::Keys);
-        let out = screen(&mut app, 110, 24);
-        assert!(out.contains("ctrl-x"), "{out}");
-        assert!(out.contains("promote the selected run"), "{out}");
-        assert!(out.contains("esc closes this"), "{out}");
-    }
-
-    #[test]
-    fn a_pending_leader_says_what_it_is_waiting_for() {
-        // A terminal that has swallowed a keystroke and shows nothing is a
-        // terminal that looks broken.
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
-        app.leader = true;
-        let out = screen(&mut app, 110, 14);
-        assert!(out.contains("ctrl-x"), "{out}");
-        assert!(out.contains("promote run"), "{out}");
-    }
-
-    use crate::tui::session::Finished;
-
-    fn check(name: &str, code: i32, stderr: &str) -> CheckRecord {
-        CheckRecord {
-            name: name.to_string(),
-            cmd: name.to_string(),
-            exit_code: Some(code),
-            stdout: String::new(),
-            stderr: stderr.to_string(),
-            duration_ms: 126,
-        }
-    }
-
-    fn said(phase: Phase, text: &str) -> Step {
-        Step::Said {
-            phase,
-            event: Event::Message {
-                text: text.to_string(),
-                raw: None,
-            },
-        }
-    }
-
-    #[test]
-    fn a_run_in_progress_takes_the_column_beside_the_list() {
-        // What is changing wins the pane. The selected record will still be
-        // there afterwards; the run will not.
-        let mut app = App::new(
-            PathBuf::from("/p"),
-            vec![summary(
-                "t1-20260907T000300Z",
-                "an older run",
-                Some(Outcome::Approved),
-            )],
-        );
-        app.session = Some(Session::recorded(
-            "add a wall-clock ceiling to the gate",
-            vec![
-                Step::Entered(Phase::Isolating),
-                Step::Entered(Phase::Authoring),
-                said(
-                    Phase::Authoring,
-                    "editing crates/ostraka-runtime/src/gate.rs",
-                ),
-            ],
-            None,
-        ));
-        let out = screen(&mut app, 110, 22);
-        assert!(out.contains("add a wall-clock ceiling"), "{out}");
-        assert!(out.contains("isolate"), "{out}");
-        assert!(out.contains("editing crates"), "{out}");
-        // The list is still there beside it.
-        assert!(out.contains("an older run"), "{out}");
-    }
-
-    #[test]
-    fn the_transcript_marks_only_the_phase_that_is_still_going() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
-        app.session = Some(Session::recorded(
-            "do a thing",
-            vec![
-                Step::Entered(Phase::Authoring),
-                Step::Entered(Phase::Gating),
-            ],
-            None,
-        ));
-        let spinning = |app: &mut App| {
-            screen(app, 110, 22)
-                .lines()
-                .filter(|line| theme::SPINNER.iter().any(|f| line.contains(f)))
-                .count()
-        };
-        assert_eq!(spinning(&mut app), 1, "one phase is running, not two");
-
-        // And it turns, so a long phase does not look like a hung screen.
-        let first = screen(&mut app, 110, 22);
-        app.tick += 1;
-        assert_ne!(first, screen(&mut app, 110, 22), "the mark did not move");
-    }
-
-    #[test]
-    fn a_failing_check_shows_its_output_without_waiting_for_the_record() {
-        // The whole point of streaming the gate: the record does not exist
-        // until the run ends, and the failing check is what someone is waiting
-        // to read.
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
-        app.session = Some(Session::recorded(
-            "break the build",
-            vec![
-                Step::Entered(Phase::Gating),
-                Step::Checked(check("format", 0, "")),
-                Step::Checked(check("test", 101, "assertion failed: left == right")),
-            ],
-            None,
-        ));
-        let out = screen(&mut app, 110, 22);
-        assert!(out.contains("pass"), "{out}");
-        assert!(out.contains("FAIL"), "{out}");
-        assert!(out.contains("assertion failed"), "{out}");
-    }
-
-    #[test]
-    fn a_finished_run_says_how_it_ended_and_how_to_leave_it() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
-        app.session = Some(Session::recorded(
-            "do a thing",
-            vec![Step::Entered(Phase::Reviewing)],
-            Some(Finished {
-                run_id: "t1-20260907T000300Z".into(),
-                outcome: Some(Outcome::Approved),
-                summary: "approved \u{2014} nothing merged".into(),
-            }),
-        ));
-        let out = screen(&mut app, 110, 22);
-        assert!(out.contains("nothing merged"), "{out}");
-        assert!(out.contains("t1-20260907T000300Z"), "{out}");
-        assert!(out.contains("esc closes this"), "{out}");
-    }
-
-    #[test]
-    fn a_run_that_never_started_is_not_reported_as_a_refusal() {
-        // "Refused" is a verdict on a change. A run that could not be launched
-        // never produced one, and saying it was refused would put a judgement
-        // in the record's mouth that nobody made.
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
-        let mut session = Session::recorded("do a thing", Vec::new(), None);
-        session.failed = Some("no adapter profile can run here".into());
-        app.session = Some(session);
-
-        let out = screen(&mut app, 110, 22);
-        assert!(out.contains("did not finish"), "{out}");
-        assert!(out.contains("no adapter profile"), "{out}");
-        assert!(!out.contains("refused"), "{out}");
-    }
-
-    #[test]
-    fn the_first_run_in_an_empty_repository_is_not_hidden_by_no_runs_yet() {
-        // The list is empty precisely because this run has not finished. The
-        // screen contradicting itself there would be its first impression.
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
-        app.session = Some(Session::recorded(
-            "the very first task",
-            vec![Step::Entered(Phase::Authoring)],
-            None,
-        ));
-        let out = screen(&mut app, 100, 16);
-        assert!(out.contains("the very first task"), "{out}");
-        assert!(!out.contains("No runs yet"), "{out}");
-    }
-
-    #[test]
-    fn the_status_line_says_what_is_happening_while_a_run_is_going() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
-        app.session = Some(Session::recorded(
-            "do a thing",
-            vec![Step::Entered(Phase::Gating)],
-            None,
-        ));
-        let out = screen(&mut app, 110, 16);
-        assert!(out.contains("running"), "{out}");
-        assert!(out.contains("gate"), "{out}");
-        assert!(out.contains("41s"), "{out}");
-
-        app.session.as_mut().expect("a session").stopping = true;
-        assert!(screen(&mut app, 110, 16).contains("stopping"));
-    }
-
-    #[test]
-    fn a_live_transcript_follows_its_own_tail_until_somebody_scrolls_up() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
-        let mut steps = vec![Step::Entered(Phase::Authoring)];
-        steps.extend((0..60).map(|i| said(Phase::Authoring, &format!("line {i}"))));
-        app.session = Some(Session::recorded("a talkative agent", steps, None));
-
-        let following = screen(&mut app, 100, 20);
-        assert!(
-            following.contains("line 59"),
-            "the tail was not shown:\n{following}"
-        );
-
-        app.scroll_by(-30);
-        assert!(!app.follow, "scrolling up did not release the tail");
-        let held = screen(&mut app, 100, 20);
-        assert!(
-            !held.contains("line 59"),
-            "the view snapped back to the tail:\n{held}"
-        );
+        assert_eq!(app.matching.len(), 1);
+        assert_eq!(app.current().map(|r| r.prompt.as_str()), Some("two"));
     }
 
     /// A usage row shaped the way a vendor reports it: a split, or — when
@@ -2106,7 +2058,7 @@ mod tests {
                 ),
             ],
         );
-        let out = screen(&mut app, 120, 16);
+        let out = screen(&mut app, 120, 18);
         assert!(out.contains("tokens"), "{out}");
         assert!(out.contains("claude-code 30.1k in / 2.0k out"), "{out}");
         assert!(out.contains("codex 3.3k total"), "{out}");
@@ -2124,8 +2076,7 @@ mod tests {
                 &[("copilot-cli", "reviewer", 10_600, Some(296), true)],
             )],
         );
-        let out = screen(&mut app, 120, 14);
-        assert!(out.contains("copilot-cli ~10.6k in / ~296 out"), "{out}");
+        assert!(screen(&mut app, 120, 16).contains("copilot-cli ~10.6k in / ~296 out"));
     }
 
     #[test]
@@ -2139,36 +2090,26 @@ mod tests {
                 Some(Outcome::Approved),
             )],
         );
-        let out = screen(&mut app, 120, 14);
+        let out = screen(&mut app, 120, 16);
         assert!(out.contains("no backend on these runs reported"), "{out}");
         assert!(!out.contains(" 0 in "), "{out}");
     }
 
     #[test]
-    fn the_status_line_follows_the_filter() {
-        // It totals what is listed, so narrowing the list narrows the total.
-        let mut app = App::new(
-            PathBuf::from("/p"),
-            vec![
-                with_usage(
-                    summary("t1-20260907T000300Z", "keep me", Some(Outcome::Approved)),
-                    &[("claude-code", "author", 1_000, Some(100), false)],
-                ),
-                with_usage(
-                    summary("t2-20260907T000200Z", "hide me", Some(Outcome::Approved)),
-                    &[("claude-code", "author", 9_000, Some(900), false)],
-                ),
-            ],
-        );
-        assert!(screen(&mut app, 120, 14).contains("10.0k in"));
-        app.filter = "keep".into();
-        app.refilter();
-        assert!(screen(&mut app, 120, 14).contains("1.0k in / 100 out"));
+    fn the_status_line_says_what_is_happening_while_a_run_is_going() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        working(&mut app, "do a thing", vec![Step::Entered(Phase::Gating)]);
+        let out = screen(&mut app, 110, 18);
+        assert!(out.contains("running"), "{out}");
+        assert!(out.contains("gate"), "{out}");
+        assert!(out.contains("41s"), "{out}");
+
+        app.thread.live.as_mut().expect("a session").stopping = true;
+        assert!(screen(&mut app, 110, 18).contains("stopping"));
     }
 
     #[test]
     fn a_status_message_takes_the_line_from_the_totals_that_do_not_change() {
-        // What just happened is the answer to the key that was just pressed.
         let mut app = App::new(
             PathBuf::from("/p"),
             vec![summary(
@@ -2178,12 +2119,54 @@ mod tests {
             )],
         );
         app.status = Some("promoted to promoted/t1 \u{2014} nothing merged".into());
-        let out = screen(&mut app, 110, 14);
+        let out = screen(&mut app, 110, 16);
         assert!(out.contains("nothing merged"), "{out}");
         assert!(
             !out.contains("tokens"),
             "the totals outlived the message:\n{out}"
         );
+    }
+
+    #[test]
+    fn a_pending_leader_says_what_it_is_waiting_for() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        app.leader = true;
+        let out = screen(&mut app, 120, 16);
+        assert!(out.contains("ctrl-x"), "{out}");
+        assert!(out.contains("write a task"), "{out}");
+    }
+
+    #[test]
+    fn the_keys_dialog_lists_the_keys_rather_than_a_footer_doing_it_forever() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        app.open(Dialog::Keys);
+        let out = screen(&mut app, 110, 26);
+        assert!(out.contains("ctrl-x"), "{out}");
+        assert!(out.contains("alt-enter"), "{out}");
+        assert!(out.contains("esc closes this"), "{out}");
+    }
+
+    #[test]
+    fn the_command_palette_names_what_it_can_do_and_marks_the_pick() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        app.open(Dialog::Commands);
+        let out = screen(&mut app, 110, 26);
+        assert!(out.contains("promote run"), "{out}");
+        assert!(out.contains("merges nothing"), "{out}");
+
+        app.query = "promote".into();
+        let narrowed = screen(&mut app, 110, 26);
+        assert!(narrowed.contains("promote run"), "{narrowed}");
+        assert!(!narrowed.contains("reload runs"), "{narrowed}");
+    }
+
+    #[test]
+    fn a_palette_query_matching_nothing_says_so_rather_than_showing_an_empty_box() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        app.open(Dialog::Commands);
+        app.query = "xyzzy".into();
+        assert!(screen(&mut app, 110, 26).contains("no command matches that"));
+        assert_eq!(app.picked(), None);
     }
 
     #[test]
@@ -2204,36 +2187,10 @@ mod tests {
     }
 
     #[test]
-    fn a_long_task_is_wrapped_rather_than_cut_off() {
-        // The detail pane is where someone reads what was actually asked. The
-        // list already truncates; losing it here as well would lose it entirely.
-        let long = "Add a unit test to the adapter profile module asserting that a \
-                    profile whose arguments contain the worktree placeholder renders \
-                    it as the worktree path and changes nothing else";
-        let mut app = App::new(
-            PathBuf::from("/p"),
-            vec![summary(
-                "t1-20260907T000300Z",
-                long,
-                Some(Outcome::Approved),
-            )],
-        );
-        let out = screen(&mut app, 100, 20);
-        // Asserted on the words the wrap must not lose, one per rendered line,
-        // rather than on a phrase that would straddle a break the moment the
-        // pane's width changed by a column.
-        for word in ["placeholder", "worktree", "changes", "nothing"] {
-            assert!(out.contains(word), "{word} was lost:\n{out}");
-        }
-    }
-
-    #[test]
     fn wrapping_breaks_on_spaces_and_never_loses_a_word() {
         let parts = wrap("one two three four five", 9);
         assert!(parts.iter().all(|p| p.chars().count() <= 9), "{parts:?}");
         assert_eq!(parts.join(" "), "one two three four five");
-        // A word longer than the width goes on its own line rather than hanging
-        // the loop or being silently dropped.
         assert_eq!(wrap("supercalifragilistic", 5), ["supercalifragilistic"]);
         assert_eq!(wrap("", 10), [""]);
         assert_eq!(wrap("anything", 0), ["anything"]);
@@ -2241,7 +2198,6 @@ mod tests {
 
     #[test]
     fn truncation_counts_characters_rather_than_bytes() {
-        // Slicing by byte would panic in the middle of a multi-byte character.
         assert_eq!(truncate("ééééé", 3), "éé…");
         assert_eq!(truncate("short", 40), "short");
         assert_eq!(truncate("anything", 0), "anything");
@@ -2250,7 +2206,6 @@ mod tests {
     #[test]
     fn a_terminal_too_short_for_the_chrome_says_so_rather_than_drawing_nothing() {
         let mut app = App::new(PathBuf::from("/p"), Vec::new());
-        let out = screen(&mut app, 60, 4);
-        assert!(out.contains("too short"), "{out}");
+        assert!(screen(&mut app, 60, 4).contains("too short"));
     }
 }

@@ -26,7 +26,9 @@ pub struct Situation {
 pub enum Command {
     NewRun,
     Stop,
-    Filter,
+    Runs,
+    Agents,
+    Fresh,
     NextPane,
     Promote,
     Reload,
@@ -38,10 +40,12 @@ pub enum Command {
 impl Command {
     /// In the order the palette offers them: what someone reaches for most,
     /// first.
-    pub const ALL: [Command; 9] = [
+    pub const ALL: [Command; 11] = [
         Command::NewRun,
         Command::Stop,
-        Command::Filter,
+        Command::Runs,
+        Command::Agents,
+        Command::Fresh,
         Command::NextPane,
         Command::Promote,
         Command::Reload,
@@ -52,9 +56,11 @@ impl Command {
 
     pub fn name(self) -> &'static str {
         match self {
-            Command::NewRun => "new run",
+            Command::NewRun => "write a task",
             Command::Stop => "stop the run",
-            Command::Filter => "filter runs",
+            Command::Runs => "runs",
+            Command::Agents => "agents",
+            Command::Fresh => "start a fresh thread",
             Command::NextPane => "next pane",
             Command::Promote => "promote run",
             Command::Reload => "reload runs",
@@ -69,7 +75,9 @@ impl Command {
         match self {
             Command::NewRun => "n",
             Command::Stop => "s",
-            Command::Filter => "/",
+            Command::Runs => "l",
+            Command::Agents => "a",
+            Command::Fresh => "f",
             Command::NextPane => "tab",
             Command::Promote => "p",
             Command::Reload => "r",
@@ -88,7 +96,9 @@ impl Command {
         match self {
             Command::NewRun => 'n',
             Command::Stop => 's',
-            Command::Filter => '/',
+            Command::Runs => 'l',
+            Command::Agents => 'a',
+            Command::Fresh => 'f',
             Command::NextPane => 't',
             Command::Promote => 'p',
             Command::Reload => 'r',
@@ -100,9 +110,11 @@ impl Command {
 
     pub fn about(self) -> &'static str {
         match self {
-            Command::NewRun => "write a task and watch it run",
+            Command::NewRun => "say what the agent should do next",
             Command::Stop => "ask the running agent to stop",
-            Command::Filter => "narrow the list by task, id or outcome",
+            Command::Runs => "look up a run recorded here",
+            Command::Agents => "choose who writes and who reviews",
+            Command::Fresh => "forget the chain; start again from HEAD",
             Command::NextPane => "checks, then events, then the diff",
             Command::Promote => "give an approved run a branch; merges nothing",
             Command::Reload => "read the run records again",
@@ -126,6 +138,11 @@ impl Command {
                 // needs a config and a profile, which is what the opening
                 // screen is offering to write.
                 Command::NewRun => !situation.running && !situation.unconfigured,
+                // Choosing between profiles needs profiles to choose between.
+                Command::Agents => !situation.unconfigured,
+                // Throwing the chain away underneath a run that is standing on
+                // it is not something to offer.
+                Command::Fresh => !situation.running,
                 _ => true,
             })
             .collect()
@@ -205,7 +222,19 @@ mod tests {
 
     #[test]
     fn an_empty_query_offers_everything_that_makes_sense() {
+        // Everything but stopping a run that is not going, and setting up a
+        // directory that is already set up.
         assert_eq!(Command::matching("", IDLE).len(), Command::ALL.len() - 2);
+    }
+
+    #[test]
+    fn a_thread_is_not_thrown_away_from_under_a_running_run() {
+        let running = Situation {
+            running: true,
+            ..IDLE
+        };
+        assert!(!Command::offered(running).contains(&Command::Fresh));
+        assert!(Command::offered(IDLE).contains(&Command::Fresh));
     }
 
     #[test]
