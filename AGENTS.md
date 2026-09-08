@@ -554,6 +554,26 @@ whole foreground process group, so the child usually dies of the same signal
 before the poll notices, which made an interrupted run report as an agent
 failure until `finish` learned to ask whether a stop had been requested at all.
 
+**A ceiling that leaves the expensive half running has not bounded anything.**
+Abandoning the pipe kept the run moving, but the children went on running: a
+vendor's helper, a test runner's workers, a build's dev server, still holding
+the CPU, the ports and the GPU of a run that was over. Vendors and checks are
+launched into a process group of their own now, and the stop signals the group
+rather than the leader. That also detaches them from the terminal's foreground
+group, which is the right way round — the stop is deliberate and takes
+everything, instead of being whatever Ctrl-C happened to reach.
+
+The signal goes through `libc::killpg`, the one dependency `ostraka-adapter`
+and `ostraka-runtime` add beyond serde and thiserror, unix-only and bindings
+with no runtime of their own. It earns the line by being the version that
+works. Shelling out to `kill -TERM -1234` was written first and is silently
+wrong: procps reads `-1234` as the pid 1234, signals the leader alone, and
+exits 0 — so the descendants stay up and the launcher is told it worked. The
+two `kill` binaries in circulation disagree about the leading `-`, and a
+teardown path is the worst place to depend on which one is installed. Both
+crates keep a regression test that lets a shell fork something outliving it and
+fails if the survivor writes its marker.
+
 **A worktree is prepared before the agent, not just before the gate.** A fresh
 checkout has none of what git ignores — `node_modules/`, `.venv/`, `vendor/` —
 so every check that shells out to the toolchain fails for a reason that has

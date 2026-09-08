@@ -1981,6 +1981,7 @@ dependencies = [
 name = "ostraka-adapter"
 version = "1.0.0"
 dependencies = [
+ "libc",
  "ostraka-core",
  "serde",
  "serde_json",
@@ -2013,6 +2014,7 @@ dependencies = [
 name = "ostraka-runtime"
 version = "1.0.0"
 dependencies = [
+ "libc",
  "ostraka-adapter",
  "ostraka-core",
  "serde",

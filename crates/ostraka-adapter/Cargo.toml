@@ -14,3 +14,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
+
+# Signalling a process group has no std API. Bindings only — no runtime,
+# no build of its own, and already in the tree.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
