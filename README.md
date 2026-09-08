@@ -86,6 +86,12 @@ not fix.
 Where the workspace holds one repository, nothing has to name it. Where it
 holds several, `--repository` does — and the browser has a picker on `w`.
 
+**A workspace with nothing in it can start one.** Cloning needs a URL only you
+have; starting needs a name, so `w` then `n` takes one and `git init`s a
+repository there. It stops at `git init` on purpose: the commit a worktree
+branches from is left to the guided fix, which asks before it commits anything
+and reports git's own words when there is no author configured.
+
 A real run — Claude Code wrote the change, Codex reviewed it, neither knew the
 other was involved:
 

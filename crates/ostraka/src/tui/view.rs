@@ -646,7 +646,7 @@ fn opening(app: &App, width: u16, height: u16) -> Vec<Line<'static>> {
     // The guidance is what somebody opening this for the first time needs, and
     // the summary is context. On a screen too short for both, the context goes
     // — a run they cannot see is a run `l` still lists.
-    let guidance = 4;
+    let guidance = if app.blocked.is_some() { 8 } else { 4 };
     let room = (height as usize).saturating_sub(guidance + AROUND);
     let recent = room.min(RECENT);
 
@@ -682,6 +682,21 @@ fn opening(app: &App, width: u16, height: u16) -> Vec<Line<'static>> {
         ]));
         lines.push(Line::from(""));
         lines.push(theme::rule(width));
+        lines.push(Line::from(""));
+    }
+
+    // What is in the way, where there is something. It was said on the setup
+    // screen and that screen is gone the moment setting up is done — leaving a
+    // workspace that is configured, has nowhere to run anything, and says so
+    // only if you press enter and find out.
+    if let Some(blocked) = &app.blocked {
+        for part in wrap(blocked, width as usize) {
+            lines.push(Line::from(Span::styled(part, theme::on(theme::WARN))));
+        }
+        lines.push(Line::from(vec![
+            Span::styled("x", theme::accent()),
+            Span::styled(" walks through it.", theme::muted()),
+        ]));
         lines.push(Line::from(""));
     }
 
@@ -1041,6 +1056,16 @@ fn render_repos(frame: &mut Frame, app: &App, screen: Rect) {
             "Nothing has been cloned into repositories/ yet.".to_string()
         ));
     }
+    // Naming a new one. Cloning needs a URL only the operator knows; starting
+    // one needs a name, which is a thing this screen can take.
+    if let Some(name) = &app.editing {
+        lines.push(Line::from(vec![
+            Span::styled(" \u{203a} ", theme::accent()),
+            Span::styled(name.clone(), theme::text()),
+            Span::styled(theme::CURSOR, theme::accent()),
+            Span::styled("     a name, and enter starts it", theme::muted()),
+        ]));
+    }
     for (i, repo) in repositories.iter().enumerate() {
         let here = i == app.pick;
         let working = app.repository().is_some_and(|r| r.name == repo.name);
@@ -1058,7 +1083,17 @@ fn render_repos(frame: &mut Frame, app: &App, screen: Rect) {
         ]));
     }
     lines.push(Line::from(""));
-    lines.push(dim("enter works here \u{b7} esc closes this".to_string()));
+    lines.push(match app.editing {
+        Some(_) => dim("enter starts it \u{b7} esc puts it back".to_string()),
+        None => Line::from(vec![
+            Span::styled("enter", theme::accent()),
+            Span::styled("  work here      ", theme::muted()),
+            Span::styled("n", theme::accent()),
+            Span::styled("  start one here      ", theme::muted()),
+            Span::styled("esc", theme::accent()),
+            Span::styled("  close", theme::muted()),
+        ]),
+    });
 
     let area = theme::centred(screen, width, lines.len() as u16 + 2);
     frame.render_widget(Clear, area);
@@ -1570,6 +1605,7 @@ fn render_keys(frame: &mut Frame, screen: Rect) {
         ("ctrl-] / ctrl-[", "move between them"),
         ("s", "ask a running agent to stop"),
         ("l", "the runs recorded here"),
+        ("w", "the repositories, and n starts one"),
         ("tab", "checks, events, diff \u{2014} on a record"),
         ("p", "promote a record; merges nothing"),
         ("pgup / pgdn", "scroll"),
@@ -3111,6 +3147,37 @@ mod tests {
         assert_eq!(truncate("ééééé", 3), "éé…");
         assert_eq!(truncate("short", 40), "short");
         assert_eq!(truncate("anything", 0), "anything");
+    }
+
+    #[test]
+    fn the_work_screen_says_what_is_in_the_way_of_a_run() {
+        // It was said on the setup screen, and that screen goes the moment
+        // setting up is done — leaving a workspace that is configured, has
+        // nowhere to run anything, and says so only if you press enter.
+        let mut app = App::new(nowhere(), Vec::new());
+        assert!(!screen(&mut app, 100, 20).contains("walks through it"));
+
+        app.blocked = Some("Nothing has been cloned into repositories/ yet.".into());
+        let out = screen(&mut app, 100, 20);
+        assert!(out.contains("Nothing has been cloned"), "{out}");
+        assert!(out.contains("walks through it"), "{out}");
+        // And what to do next is still said under it.
+        assert!(out.contains("Write a task below"), "{out}");
+    }
+
+    #[test]
+    fn the_repositories_dialog_takes_a_name_for_a_new_one() {
+        let mut app = App::new(nowhere(), Vec::new());
+        app.open(Dialog::Repos);
+        let out = screen(&mut app, 100, 22);
+        assert!(out.contains("Nothing has been cloned"), "{out}");
+        assert!(out.contains("start one here"), "{out}");
+
+        app.editing = Some("fresh".into());
+        let naming = screen(&mut app, 100, 22);
+        assert!(naming.contains("fresh"), "{naming}");
+        assert!(naming.contains("enter starts it"), "{naming}");
+        assert!(!naming.contains("start one here"), "{naming}");
     }
 
     #[test]

@@ -56,11 +56,12 @@ impl Remedy {
             ),
             steps: vec![Step {
                 said: format!(
-                    "Clone what you want worked on into {}.",
+                    "Clone what you want worked on into {}, or start one: w, then n.",
                     repositories.display()
                 ),
                 warns: Some(
-                    "Only you can do this one — nobody here knows which repository you meant."
+                    "Cloning is yours — nobody here knows which repository you meant. \
+                     Starting one needs only a name."
                         .to_string(),
                 ),
                 commands: Vec::new(),
