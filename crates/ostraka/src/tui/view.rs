@@ -2379,6 +2379,11 @@ mod tests {
         // And the sentence telling you what to do is whole rather than cut at
         // the frame, which is where the other half of the answer lives.
         assert!(out.contains("start one"), "{out}");
+        // It also has to name keys that work. Single letters belong to the task
+        // box on the work screen, so the bare `w` this used to offer typed a
+        // letter into the box and opened nothing. Commands are behind the
+        // leader, and the step says so.
+        assert!(out.contains("ctrl-x w"), "{out}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
