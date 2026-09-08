@@ -84,26 +84,43 @@ which check failed and what it printed, what the reviewer said, the diff itself,
 and `p` to promote an approved one:
 
 ```
-ostraka  .  ·  2 of 7 runs
-+ 09-07 03:54  crates/ostraka-cli/src/runs.rs h…│ t3354339-20260907T035406Z
-- 09-07 02:11  In crates/ostraka-core/src/ident…│ approved
-                                                │ reviewer ephor — approve
-                                                │
-                                                │ diff
-                                                │ @@ -57,3 +57,33 @@ fn first_line(prompt: &str)
-                                                │ +#[cfg(test)]
-                                                │ +mod tests {
-tokens   claude-code 159.5k in / 4.3k out · codex 14.7k total · copilot-cli ~10.6k in / ~296 out
-j/k move · tab diff · space/b scroll · / filter · p promote · r reload · q quit
+ ~/src/ostraka
+
+▌ ✓  09-07 03:54  Add a test for first_l…   t3354339-20260907T035406Z   approved
+▌ │  4 of 4 checks · approved
+                                            task      Add a test asserting first_line
+  ✗  09-07 02:11  Rename ActorId::name…               trims a trailing newline
+  │  3 of 4 checks · refused                author    archon (claude-code)
+                                            reviewer  ephor — approve
+
+                                            checks   events   diff
+                                            @@ -57,3 +57,33 @@ fn first_line(prompt: &str)
+                                            +#[cfg(test)]
+                                            +mod tests {
+
+ ╭──────────────────────────────────────────────────────────────────────────────────────────╮
+ │ /  filter runs…     ctrl-k for commands                                                  │
+ ╰──────────────────────────────────────────────────────────────────────────────────────────╯
+ ostraka 3.0.0  ·  2 of 7 runs    tokens  claude-code 159.5k in / 4.3k out · codex 14.7k total
 ```
+
+One box, and it is the input line: everything else is separated by space, so the
+place a keystroke becomes text is the one place with a border around it. The
+sixteen colours are ANSI base colours, which means the hues are the ones already
+configured in that terminal rather than a palette shipped in the binary.
 
 The bottom line totals tokens per backend, from what each vendor said about
 itself — a combined figure shown as a total, a rounded one marked with a tilde,
-and a backend that reports nothing left out rather than shown as zero.
+and a backend that reports nothing left out rather than shown as zero. A message
+about what just happened takes the line while it is worth reading.
 
-Tab cycles checks, events and diff. `/` filters on the task text, the run id or
-the outcome word. A run that produced no commit says so rather than showing the
-commit its branch happens to point at, which is a thing it used to do.
+Tab cycles checks, events and diff, and the row above the pane names all three
+rather than a footer naming the next one. `/` filters on the task text, the run
+id or the outcome word. `ctrl-k` opens the commands by name, `ctrl-x` reaches the
+same ones as a chord, and `?` lists every key. Below about seventy columns the
+detail moves behind Enter rather than sharing a width neither pane can use. A run
+that produced no commit says so rather than showing the commit its branch happens
+to point at, which is a thing it used to do.
 
 It holds no logic of its own, so `p` cannot approve anything: promotion goes
 through the same gate as the command, and a record claiming an approval its

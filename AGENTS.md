@@ -230,6 +230,33 @@ approve anything. It shows finished runs only; a live view of a run in progress
 needs the orchestrator to stream while something else renders, which is the
 parallel-execution problem and waits for the same answer.
 
+**One box, sixteen colours, and one list of commands.** The screen is separated
+by space and a one-column gutter rather than by borders — a browser that boxes
+every region spends a quarter of an eighty-column terminal drawing lines around
+nothing, and once the boxes are gone the one that remains is unmistakably where
+typing goes. Colour is the sixteen ANSI base colours and nothing else: a
+true-colour palette would look identical on every machine, which sounds like the
+point and is not, because it would look identical *and* wrong beside every other
+window on that desktop, and unreadable over ssh to an eight-colour terminal. The
+two outcome ticks are the one knowing exception — they are East Asian Ambiguous,
+so a terminal configured for CJK width shifts that column by a cell, accepted
+because they are what every other tool in the same terminal already uses.
+
+The three panes are named in a row above the pane rather than by a footer naming
+the next one: the row costs the same width and says what there is instead of what
+to press to find out. Below seventy-two columns the detail moves behind Enter,
+because two columns neither of which can be read is worse than one that can.
+
+`tui::command::Command` is the list, and the bare key, the `ctrl-x` leader and
+the `ctrl-k` palette all dispatch through one `perform` — three ways to reach
+seven actions, not three implementations that can drift into three slightly
+different versions of promote. A command added to that list appears in all three
+and in the keys dialog, which is the only way a screen with several routes to
+the same action stays honest about what it can do. Keys are read in the order a
+keystroke has to be read — an open dialog first, then what is being typed into,
+then a half-finished chord, then the browser — because any other order lets `q`
+close the browser out from under someone reading the help.
+
 **Nothing waits forever.** `policy.timeout_secs` spent this project's life
 declared, documented as a wall-clock ceiling, and read by nothing — which is
 worse than absent, because someone sets it and believes their fleet is bounded.

@@ -8,17 +8,36 @@
 //! costs a few allocations per frame and buys the thing that matters: the lines
 //! can be counted before they are drawn, which is how scrolling knows where the
 //! bottom is.
+//!
+//! There is one box on this screen and it is the input line. Everything else is
+//! separated by space and by a one-column gutter, because a browser whose every
+//! region is boxed spends a quarter of a small terminal drawing lines around
+//! nothing — and once the boxes are gone, the one that remains is unmistakably
+//! where typing goes.
 
 use crate::init::{Action, Plan};
+use crate::tui::command::Command;
+use crate::tui::theme;
 use ostraka_core::gate::Verdict;
 use ostraka_core::record::{Event, Outcome, RunRecord};
 use ostraka_runtime::index::{self, BackendUsage, RunSummary};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Modifier};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
-use std::path::PathBuf;
+use ratatui::widgets::{Clear, Padding, Paragraph};
+use std::path::{Path, PathBuf};
+
+/// Rows the chrome takes: the breadcrumb, a blank, the three of the input box
+/// and the status line. Everything left over is content.
+const CHROME: u16 = 6;
+
+/// Rows one run takes in the list: what it was, how it went, and air.
+const ENTRY: usize = 3;
+
+/// Below this the list and the detail cannot both be read, so only one is
+/// drawn and Enter moves between them.
+const TWO_COLUMN: u16 = 72;
 
 /// Which part of a run the detail pane is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +48,8 @@ pub enum Detail {
 }
 
 impl Detail {
+    pub const ALL: [Detail; 3] = [Detail::Checks, Detail::Events, Detail::Diff];
+
     pub fn next(self) -> Self {
         match self {
             Self::Checks => Self::Events,
@@ -37,7 +58,7 @@ impl Detail {
         }
     }
 
-    fn title(self) -> &'static str {
+    pub fn title(self) -> &'static str {
         match self {
             Self::Checks => "checks",
             Self::Events => "events",
@@ -46,13 +67,38 @@ impl Detail {
     }
 }
 
+/// Which column the keys are talking to. Only ever consulted on a terminal too
+/// narrow to show both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    List,
+    Detail,
+}
+
+/// The one thing that can be open over the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialog {
+    Keys,
+    Commands,
+}
+
 pub struct App {
     pub project: PathBuf,
+    /// The project path as the breadcrumb says it: resolved, and shortened to
+    /// `~` where it sits under the operator's home.
+    ///
+    /// Worked out once, when the browser opens, rather than every frame.
+    /// Drawing is a pure function of state, and a `canonicalize` per frame
+    /// would make it a function of the filesystem as well.
+    pub where_shown: String,
     /// Every run, in the order the index gave them.
     pub runs: Vec<RunSummary>,
     /// Indices into `runs` that match the filter. The selection indexes this.
     pub matching: Vec<usize>,
     pub selected: usize,
+    /// First entry the list is showing, so a selection below the fold scrolls
+    /// the list rather than disappearing off it.
+    pub list_top: usize,
     pub filter: String,
     pub filtering: bool,
     /// The full record of the selected run, loaded on demand: a listing holds
@@ -62,6 +108,7 @@ pub struct App {
     /// `None` until asked for; `Some(None)` once asked and not found.
     pub diff: Option<Option<String>>,
     pub detail: Detail,
+    pub focus: Focus,
     pub scroll: u16,
     /// Height of the detail pane at the last draw, so a page key can move by a
     /// page rather than by a number somebody guessed.
@@ -70,6 +117,13 @@ pub struct App {
     /// Present when this directory is not a project yet: what `init` would
     /// write. `None` once there is nothing left to write.
     pub setup: Option<Plan>,
+    pub dialog: Option<Dialog>,
+    /// What has been typed into the command palette.
+    pub query: String,
+    /// Which command the palette has selected.
+    pub pick: usize,
+    /// The leader key has been pressed and the next one completes a command.
+    pub leader: bool,
     pub quit: bool,
 }
 
@@ -77,20 +131,27 @@ impl App {
     pub fn new(project: PathBuf, runs: Vec<RunSummary>) -> Self {
         let matching = (0..runs.len()).collect();
         Self {
+            where_shown: where_we_are(&project),
             project,
             runs,
             matching,
             selected: 0,
+            list_top: 0,
             filter: String::new(),
             filtering: false,
             record: None,
             events: Vec::new(),
             diff: None,
             detail: Detail::Checks,
+            focus: Focus::List,
             scroll: 0,
             page: 10,
             status: None,
             setup: None,
+            dialog: None,
+            query: String::new(),
+            pick: 0,
+            leader: false,
             quit: false,
         }
     }
@@ -118,6 +179,7 @@ impl App {
             .map(|(i, _)| i)
             .collect();
         self.selected = self.selected.min(self.matching.len().saturating_sub(1));
+        self.list_top = 0;
         self.forget_detail();
     }
 
@@ -141,51 +203,373 @@ impl App {
         self.diff = None;
         self.scroll = 0;
     }
+
+    /// The commands the palette is currently offering.
+    pub fn commands(&self) -> Vec<Command> {
+        Command::matching(&self.query, self.setup.is_some())
+    }
+
+    pub fn picked(&self) -> Option<Command> {
+        self.commands().get(self.pick).copied()
+    }
+
+    pub fn move_pick(&mut self, delta: isize) {
+        let count = self.commands().len();
+        if count == 0 {
+            self.pick = 0;
+            return;
+        }
+        self.pick = self.pick.saturating_add_signed(delta).min(count - 1);
+    }
+
+    /// Opens a dialog from a clean slate. A palette that reopened holding the
+    /// last query would answer a question nobody had asked yet.
+    pub fn open(&mut self, dialog: Dialog) {
+        self.dialog = Some(dialog);
+        self.query.clear();
+        self.pick = 0;
+        self.leader = false;
+    }
+
+    pub fn close(&mut self) {
+        self.dialog = None;
+        self.query.clear();
+        self.pick = 0;
+    }
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    let screen = frame.area();
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
-            Constraint::Min(3),
             Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(3),
             Constraint::Length(1),
         ])
-        .split(frame.area());
+        .split(screen);
 
-    frame.render_widget(header(app), rows[0]);
-
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
-        .split(rows[1]);
+    frame.render_widget(breadcrumb(app, screen.width), theme::inset(rows[0]));
 
     if app.setup.is_some() {
-        // Nothing to browse yet, so the whole width says what is missing.
-        render_setup(frame, app, rows[1]);
-        frame.render_widget(footer(app), rows[3]);
+        render_setup(frame, app, theme::inset(rows[2]));
+    } else {
+        render_content(frame, app, rows[2]);
+    }
+
+    render_prompt(frame, app, rows[3]);
+    frame.render_widget(
+        Paragraph::new(status_bar(app, rows[4].width.saturating_sub(theme::GUTTER))),
+        theme::inset(rows[4]),
+    );
+
+    match app.dialog {
+        Some(Dialog::Keys) => render_keys(frame, screen),
+        Some(Dialog::Commands) => render_palette(frame, app, screen),
+        None => {}
+    }
+
+    // A frame this short has no room for chrome and content both. Saying so is
+    // better than drawing a screen with nothing on it, which reads as a hang.
+    if screen.height < CHROME {
+        frame.render_widget(Clear, screen);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "terminal too short",
+                theme::on(theme::WARN),
+            ))),
+            screen,
+        );
+    }
+}
+
+/// Where you are, said once, quietly, at the top.
+fn breadcrumb(app: &App, width: u16) -> Paragraph<'static> {
+    Paragraph::new(Line::from(Span::styled(
+        truncate(&app.where_shown, width.saturating_sub(2) as usize),
+        theme::muted(),
+    )))
+}
+
+/// A project path as a person would write it.
+///
+/// Resolved, because the default is `.` and a breadcrumb reading `.` tells
+/// nobody which of their checkouts this is; and shortened to `~`, because the
+/// first four segments of every path here are the same four.
+fn where_we_are(project: &Path) -> String {
+    let full = project
+        .canonicalize()
+        .unwrap_or_else(|_| project.to_path_buf())
+        .display()
+        .to_string();
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() && full.starts_with(&home) => {
+            format!("~{}", &full[home.len()..])
+        }
+        _ => full,
+    }
+}
+
+fn render_content(frame: &mut Frame, app: &mut App, area: Rect) {
+    // Said once, across the whole area, rather than once per column: an empty
+    // list and an empty detail are the same fact, and printing it twice reads
+    // as two different things having gone wrong.
+    if app.matching.is_empty() {
+        let message = if app.runs.is_empty() {
+            "No runs yet. `ostraka run \"\u{2026}\"` makes one."
+        } else {
+            "Nothing matches this filter."
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(message, theme::muted()))),
+            theme::inset(area),
+        );
         return;
     }
 
+    if area.width < TWO_COLUMN {
+        match app.focus {
+            Focus::List => render_list(frame, app, area),
+            Focus::Detail => render_detail(frame, app, theme::inset(area)),
+        }
+        return;
+    }
+
+    // A fraction, then a ceiling: a list column wider than about forty-five
+    // columns is holding whitespace, and the detail pane is where the reading
+    // happens.
+    let list_width = (area.width * 2 / 5).clamp(24, 46);
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(list_width), Constraint::Min(10)])
+        .split(area);
+
     render_list(frame, app, columns[0]);
-    render_detail(frame, app, columns[1]);
-    frame.render_widget(tokens(app), rows[2]);
-    frame.render_widget(footer(app), rows[3]);
+    render_detail(frame, app, theme::inset(columns[1]));
 }
 
-fn header(app: &App) -> Paragraph<'static> {
+/// The runs, two lines each: what was asked, and how it went.
+///
+/// Rendered as text rather than as a list widget because the selected entry is
+/// marked in a gutter that spans both of its lines, and a widget that owns one
+/// row per item cannot draw that.
+fn render_list(frame: &mut Frame, app: &mut App, area: Rect) {
+    // Clamped here because here is the only place that knows both how many
+    // entries there are and how tall the column is.
+    let visible = (area.height as usize / ENTRY).max(1);
+    if app.selected < app.list_top {
+        app.list_top = app.selected;
+    }
+    if app.selected >= app.list_top + visible {
+        app.list_top = app.selected + 1 - visible;
+    }
+
+    let width = area.width.saturating_sub(theme::GUTTER) as usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (i, run) in app
+        .matching
+        .iter()
+        .enumerate()
+        .skip(app.list_top)
+        .take(visible)
+        .filter_map(|(i, index)| app.runs.get(*index).map(|run| (i, run)))
+    {
+        let here = i == app.selected;
+        let (mark, colour) = marker(run.outcome);
+        let cursor = if here { theme::CURSOR } else { " " };
+        let title = if here {
+            theme::text().add_modifier(Modifier::BOLD)
+        } else {
+            theme::text()
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(cursor, theme::on(colour)),
+            Span::styled(format!(" {mark}  "), theme::on(colour)),
+            Span::styled(when(&run.run_id), theme::muted()),
+            Span::raw("  "),
+            Span::styled(
+                truncate(&described(&run.prompt), width.saturating_sub(19)),
+                title,
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(cursor, theme::on(colour)),
+            Span::styled(format!(" {}  ", theme::CONTINUE), theme::muted()),
+            Span::styled(
+                truncate(
+                    &format!(
+                        "{} of {} checks \u{b7} {}",
+                        run.checks_passed,
+                        run.checks_total,
+                        outcome_word(run.outcome)
+                    ),
+                    width.saturating_sub(5),
+                ),
+                theme::muted(),
+            ),
+        ]));
+        lines.push(Line::from(""));
+    }
+
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
+    // Nothing selected is drawn by `render_content` before it splits the area,
+    // so reaching here with no run means the two disagree. Drawing nothing is
+    // the honest answer to that, and not a panic.
+    let Some(run) = app.current().cloned() else {
+        return;
+    };
+
+    app.page = area.height.saturating_sub(1).max(1);
+
+    let mut lines = summary_lines(app, &run, area.width as usize);
+    lines.push(tabs(app));
+    match app.detail {
+        Detail::Checks => lines.extend(check_lines(app, &run)),
+        Detail::Events => lines.extend(event_lines(app)),
+        Detail::Diff => lines.extend(diff_lines(app)),
+    }
+
+    // Clamped here because here is the only place that knows both how many
+    // lines there are and how tall the pane is. Scrolling past the end shows an
+    // empty box, which reads as a broken screen.
+    let overflow = lines.len().saturating_sub(area.height as usize);
+    app.scroll = app.scroll.min(overflow as u16);
+
+    frame.render_widget(Paragraph::new(lines).scroll((app.scroll, 0)), area);
+}
+
+/// The three panes, named, with the one you are in marked.
+///
+/// A row of names rather than a hint saying which key shows the next one: the
+/// names are the same width either way, and this way the screen says what it
+/// has instead of what to press to find out.
+fn tabs(app: &App) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (i, pane) in Detail::ALL.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("   ", theme::muted()));
+        }
+        spans.push(Span::styled(
+            pane.title(),
+            if *pane == app.detail {
+                theme::accent().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else {
+                theme::muted()
+            },
+        ));
+    }
+    Line::from(spans)
+}
+
+/// The line that says where typing goes.
+fn render_prompt(frame: &mut Frame, app: &App, area: Rect) {
+    let inner = Rect {
+        x: area.x.saturating_add(theme::GUTTER),
+        width: area.width.saturating_sub(theme::GUTTER * 2),
+        ..area
+    };
+    let block = theme::panel(app.filtering);
+    let text = if app.filtering {
+        Line::from(vec![
+            Span::styled("/  ", theme::accent()),
+            Span::styled(app.filter.clone(), theme::text()),
+            Span::styled(theme::CURSOR, theme::accent()),
+        ])
+    } else if app.filter.is_empty() {
+        Line::from(vec![
+            Span::styled("/  ", theme::muted()),
+            Span::styled("filter runs\u{2026}", theme::muted()),
+            Span::styled("     ctrl-k for commands", theme::muted()),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("/  ", theme::accent()),
+            Span::styled(app.filter.clone(), theme::text()),
+            Span::styled("     esc to clear", theme::muted()),
+        ])
+    };
+    frame.render_widget(
+        Paragraph::new(text).block(block.padding(Padding::horizontal(1))),
+        inner,
+    );
+}
+
+/// The bottom line: who you are running, and what it has cost.
+///
+/// One row carrying three different things at different times, in the order
+/// they matter. A message about what just happened wins, because it is the
+/// answer to the key that was just pressed; a pending leader wins next,
+/// because a terminal that has swallowed a keystroke and says nothing is a
+/// terminal that looks broken.
+fn status_bar(app: &App, width: u16) -> Line<'static> {
+    if let Some(status) = &app.status {
+        return Line::from(Span::styled(status.clone(), theme::on(theme::WARN)));
+    }
+    if app.leader {
+        let mut spans = vec![Span::styled("ctrl-x  ", theme::on(theme::WARN))];
+        for (i, command) in Command::offered(app.setup.is_some()).iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(" \u{b7} ", theme::muted()));
+            }
+            spans.push(Span::styled(
+                command.leader().to_string(),
+                theme::on(theme::WARN),
+            ));
+            spans.push(Span::styled(format!(" {}", command.name()), theme::muted()));
+        }
+        return Line::from(spans);
+    }
+    if app.setup.is_some() {
+        return Line::from(Span::styled(
+            "i set this directory up \u{b7} q quit",
+            theme::muted(),
+        ));
+    }
+
+    let left = vec![
+        Span::styled("ostraka", theme::bold()),
+        Span::styled(format!(" {}", env!("CARGO_PKG_VERSION")), theme::muted()),
+        Span::styled(format!("  \u{b7}  {}", counted(app)), theme::muted()),
+    ];
+    let right = tokens(app);
+
+    let left_width: usize = left.iter().map(|s| s.content.chars().count()).sum();
+    let right_width: usize = right.iter().map(|s| s.content.chars().count()).sum();
+    let width = width as usize;
+
+    let mut spans = left;
+    if left_width + right_width + 2 <= width {
+        spans.push(Span::raw(" ".repeat(width - left_width - right_width)));
+        spans.extend(right);
+    } else if left_width + 10 < width {
+        // No room for both. The counts on the left are the ones that change
+        // as you move, so what is left of the line goes to the totals.
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            truncate(
+                &right.iter().map(|s| s.content.as_ref()).collect::<String>(),
+                width - left_width - 2,
+            ),
+            theme::muted(),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn counted(app: &App) -> String {
     let shown = app.matching.len();
     let total = app.runs.len();
-    let count = if shown == total {
+    if shown == total {
         format!("{total} run{}", plural(total))
     } else {
         format!("{shown} of {total} runs")
-    };
-    Paragraph::new(Line::from(vec![
-        Span::styled("ostraka", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(format!("  {}  ·  {count}", app.project.display())),
-    ]))
+    }
 }
 
 /// What each backend has cost, across the runs currently listed.
@@ -193,7 +577,7 @@ fn header(app: &App) -> Paragraph<'static> {
 /// Every figure is a vendor's own accounting. A backend that reports nothing
 /// does not appear here at all rather than appearing as a zero — "does not say"
 /// and "spent nothing" are different claims, and only one of them is true.
-fn tokens(app: &App) -> Paragraph<'static> {
+fn tokens(app: &App) -> Vec<Span<'static>> {
     let listed: Vec<RunSummary> = app
         .matching
         .iter()
@@ -203,27 +587,24 @@ fn tokens(app: &App) -> Paragraph<'static> {
     let backends = index::by_backend(&listed);
 
     if backends.is_empty() {
-        return Paragraph::new(Line::from(Span::styled(
-            "tokens   no backend on these runs reported what it spent",
-            Style::default().fg(Color::DarkGray),
-        )));
+        return vec![Span::styled(
+            "tokens  no backend on these runs reported what it spent",
+            theme::muted(),
+        )];
     }
 
-    let mut spans = vec![Span::styled(
-        "tokens   ",
-        Style::default().fg(Color::DarkGray),
-    )];
+    let mut spans = vec![Span::styled("tokens  ", theme::muted())];
     for (i, backend) in backends.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(" \u{b7} ", theme::muted()));
         }
+        spans.push(Span::styled(backend.adapter.clone(), theme::accent()));
         spans.push(Span::styled(
-            backend.adapter.clone(),
-            Style::default().fg(Color::Cyan),
+            format!(" {}", describe_backend(backend)),
+            theme::text(),
         ));
-        spans.push(Span::raw(format!(" {}", describe_backend(backend))));
     }
-    Paragraph::new(Line::from(spans))
+    spans
 }
 
 fn describe_backend(backend: &BackendUsage) -> String {
@@ -244,7 +625,7 @@ fn describe_backend(backend: &BackendUsage) -> String {
     if backend.total == 0 {
         split
     } else {
-        format!("{split} · {about}{} total", compact(backend.total))
+        format!("{split} \u{b7} {about}{} total", compact(backend.total))
     }
 }
 
@@ -259,44 +640,6 @@ fn compact(n: u64) -> String {
 
 fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
-}
-
-fn footer(app: &App) -> Paragraph<'static> {
-    if app.filtering {
-        return Paragraph::new(Line::from(vec![
-            Span::styled("filter: ", Style::default().fg(Color::Yellow)),
-            Span::raw(app.filter.clone()),
-            Span::styled("_", Style::default().add_modifier(Modifier::SLOW_BLINK)),
-            Span::styled(
-                "   enter to keep · esc to clear",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
-    }
-    if let Some(status) = &app.status {
-        return Paragraph::new(Line::from(Span::styled(
-            status.clone(),
-            Style::default().fg(Color::Yellow),
-        )));
-    }
-    let filtered = if app.filter.is_empty() {
-        String::new()
-    } else {
-        format!(" · filter {:?}", app.filter)
-    };
-    if app.setup.is_some() {
-        return Paragraph::new(Line::from(Span::styled(
-            "i set this directory up · q quit",
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-    Paragraph::new(Line::from(Span::styled(
-        format!(
-            "j/k move · tab {} · space/b scroll · / filter · p promote · r reload · q quit{filtered}",
-            app.detail.next().title()
-        ),
-        Style::default().fg(Color::DarkGray),
-    )))
 }
 
 /// The opening screen in a directory that is not a project yet.
@@ -321,13 +664,13 @@ fn render_setup(frame: &mut Frame, app: &App, area: Rect) {
             .display()
             .to_string();
         let (word, colour) = match file.action {
-            Action::Create => ("create", Color::Green),
-            Action::Append => ("append to", Color::Cyan),
-            Action::AlreadyThere => ("already there", Color::DarkGray),
+            Action::Create => ("create", theme::OK),
+            Action::Append => ("append to", theme::ACCENT),
+            Action::AlreadyThere => ("already there", theme::MUTED),
         };
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(format!("{word:<14}"), Style::default().fg(colour)),
+            Span::styled(format!("{word:<14}"), theme::on(colour)),
             Span::raw(name),
         ]));
     }
@@ -335,97 +678,104 @@ fn render_setup(frame: &mut Frame, app: &App, area: Rect) {
     lines.push(dim(
         "Nothing already on disk is overwritten. `ostraka init` does the same.".to_string(),
     ));
-    frame.render_widget(Paragraph::new(lines), inset(area));
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn render_list(frame: &mut Frame, app: &mut App, area: Rect) {
-    let width = area.width.saturating_sub(16) as usize;
-    let items: Vec<ListItem> = app
-        .matching
-        .iter()
-        .filter_map(|i| app.runs.get(*i))
-        .map(|run| {
-            let (mark, colour) = marker(run.outcome);
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{mark} "), Style::default().fg(colour)),
-                Span::styled(when(&run.run_id), Style::default().fg(Color::DarkGray)),
-                Span::raw("  "),
-                Span::raw(truncate(&described(&run.prompt), width)),
-            ]))
-        })
-        .collect();
+/// Every key the screen answers to, in one place someone can read.
+fn render_keys(frame: &mut Frame, screen: Rect) {
+    let rows: Vec<(&str, &str)> = vec![
+        ("j / k", "move between runs"),
+        ("g / G", "first run / last run"),
+        ("space / b", "scroll the pane"),
+        ("tab", "checks, events, diff"),
+        (
+            "enter / esc",
+            "into the pane and back, on a narrow terminal",
+        ),
+        ("/", "filter runs"),
+        ("p", "promote the selected run"),
+        ("r", "reload the run records"),
+        ("ctrl-k", "commands"),
+        ("ctrl-x", "leader: the same commands, one key away"),
+        ("?", "this list"),
+        ("q", "quit"),
+    ];
 
-    let empty = items.is_empty();
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::RIGHT))
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-
-    let mut state = ListState::default();
-    if !empty {
-        state.select(Some(app.selected));
+    let mut lines = vec![Line::from(Span::styled("keys", theme::bold()))];
+    lines.push(Line::from(""));
+    for (key, what) in &rows {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{key:<13}"), theme::accent()),
+            Span::styled((*what).to_string(), theme::text()),
+        ]));
     }
-    frame.render_stateful_widget(list, area, &mut state);
+    lines.push(Line::from(""));
+    lines.push(dim("esc closes this".to_string()));
+
+    let area = theme::centred(screen, 66, lines.len() as u16 + 2);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(theme::panel(true).padding(Padding::horizontal(2))),
+        area,
+    );
 }
 
-fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
-    let area = inset(area);
-    let Some(run) = app.current().cloned() else {
-        let message = if app.runs.is_empty() {
-            "No runs yet. `ostraka run \"\u{2026}\"` makes one."
-        } else {
-            "Nothing matches this filter."
-        };
-        frame.render_widget(Paragraph::new(message), area);
-        return;
-    };
+/// The commands, by name, for the times nobody remembers the key.
+fn render_palette(frame: &mut Frame, app: &App, screen: Rect) {
+    let commands = app.commands();
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("> ", theme::accent()),
+            Span::styled(app.query.clone(), theme::text()),
+            Span::styled(theme::CURSOR, theme::accent()),
+        ]),
+        Line::from(""),
+    ];
 
-    app.page = area.height.saturating_sub(1).max(1);
-
-    let mut lines = summary_lines(app, &run, area.width as usize);
-    match app.detail {
-        Detail::Checks => lines.extend(check_lines(app, &run)),
-        Detail::Events => lines.extend(event_lines(app)),
-        Detail::Diff => lines.extend(diff_lines(app)),
+    if commands.is_empty() {
+        lines.push(dim("no command matches that".to_string()));
+    }
+    for (i, command) in commands.iter().enumerate() {
+        let here = i == app.pick;
+        lines.push(Line::from(vec![
+            Span::styled(if here { theme::CURSOR } else { " " }, theme::accent()),
+            Span::styled(
+                format!(" {:<24}", command.name()),
+                if here {
+                    theme::text().add_modifier(Modifier::BOLD)
+                } else {
+                    theme::text()
+                },
+            ),
+            Span::styled(format!("{:<6}", command.key()), theme::accent()),
+            Span::styled(command.about().to_string(), theme::muted()),
+        ]));
     }
 
-    // Clamped here because here is the only place that knows both how many
-    // lines there are and how tall the pane is. Scrolling past the end shows an
-    // empty box, which reads as a broken screen.
-    let overflow = lines.len().saturating_sub(area.height as usize);
-    app.scroll = app.scroll.min(overflow as u16);
-
-    frame.render_widget(Paragraph::new(lines).scroll((app.scroll, 0)), area);
+    let area = theme::centred(screen, 86, lines.len() as u16 + 2);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(theme::panel(true).padding(Padding::horizontal(2))),
+        area,
+    );
 }
 
 fn summary_lines(app: &App, run: &RunSummary, width: usize) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(Span::styled(
-        run.run_id.clone(),
-        Style::default().add_modifier(Modifier::BOLD),
-    ))];
     let (_, colour) = marker(run.outcome);
-    lines.push(Line::from(Span::styled(
-        outcome_word(run.outcome).to_string(),
-        Style::default().fg(colour),
-    )));
-    lines.push(Line::from(""));
-    // Wrapped here rather than by the widget: `Paragraph::wrap` would make the
-    // number of rendered lines differ from the number of logical ones, and the
-    // scroll clamp counts logical lines. A task nobody can read in full is
-    // worse than one that takes three rows.
-    for (i, part) in wrap(&described(&run.prompt), width.saturating_sub(9))
-        .into_iter()
-        .enumerate()
-    {
-        lines.push(if i == 0 {
-            field("task", &part)
-        } else {
-            Line::from(Span::raw(format!("{:<9}{part}", "")))
-        });
-    }
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(run.run_id.clone(), theme::bold()),
+            Span::raw("   "),
+            Span::styled(outcome_word(run.outcome).to_string(), theme::on(colour)),
+        ]),
+        Line::from(""),
+    ];
+    lines.extend(field("task", &described(&run.prompt), width));
     if !run.adapter.is_empty() {
-        lines.push(field(
+        lines.extend(field(
             "author",
             &format!("{} ({})", run.author, run.adapter),
+            width,
         ));
     }
     if let Some(reviewer) = &run.reviewer {
@@ -435,7 +785,7 @@ fn summary_lines(app: &App, run: &RunSummary, width: usize) -> Vec<Line<'static>
             .and_then(|r| r.approval.as_ref())
             .map(|a| describe_verdict(&a.verdict))
             .unwrap_or_default();
-        lines.push(field("reviewer", &format!("{reviewer}{verdict}")));
+        lines.extend(field("reviewer", &format!("{reviewer}{verdict}"), width));
     }
     lines.push(Line::from(""));
     lines
@@ -452,17 +802,20 @@ fn check_lines(app: &App, run: &RunSummary) -> Vec<Line<'static>> {
         return vec![dim("no checks ran".to_string())];
     }
 
-    let mut lines = vec![bold("checks".to_string())];
+    let mut lines = Vec::new();
     for check in &record.checks {
-        let (word, colour) = if check.passed() {
-            ("pass", Color::Green)
+        let (mark, word, colour) = if check.passed() {
+            (theme::PASSED, "pass", theme::OK)
         } else {
-            ("FAIL", Color::Red)
+            (theme::FAILED, "FAIL", theme::BAD)
         };
         lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(word, Style::default().fg(colour)),
-            Span::raw(format!("  {:<10} {}ms", check.name, check.duration_ms)),
+            Span::styled(format!("{mark} "), theme::on(colour)),
+            Span::styled(word, theme::on(colour)),
+            Span::styled(
+                format!("  {:<10} {}ms", check.name, check.duration_ms),
+                theme::text(),
+            ),
         ]));
         // Only for a failure. A passing check's output is noise, and a failing
         // one is the reason someone opened this screen.
@@ -471,7 +824,7 @@ fn check_lines(app: &App, run: &RunSummary) -> Vec<Line<'static>> {
                 .into_iter()
                 .chain(tail(&check.stdout, 12))
             {
-                lines.push(dim(format!("        {line}")));
+                lines.push(dim(format!("     {line}")));
             }
         }
     }
@@ -482,12 +835,12 @@ fn event_lines(app: &App) -> Vec<Line<'static>> {
     if app.events.is_empty() {
         return vec![dim("no events recorded".to_string())];
     }
-    let mut lines = vec![bold("events".to_string())];
+    let mut lines = Vec::new();
     for event in &app.events {
         let (kind, text, colour) = match event {
-            Event::Message { text, .. } => ("said", text.clone(), Color::Reset),
-            Event::ToolUse { name, .. } => ("tool", name.clone(), Color::Cyan),
-            Event::Error { message, .. } => ("err ", message.clone(), Color::Red),
+            Event::Message { text, .. } => ("said", text.clone(), theme::TEXT),
+            Event::ToolUse { name, .. } => ("tool", name.clone(), theme::ACCENT),
+            Event::Error { message, .. } => ("err ", message.clone(), theme::BAD),
             Event::Finished {
                 exit_code,
                 files_touched,
@@ -498,12 +851,12 @@ fn event_lines(app: &App) -> Vec<Line<'static>> {
                     exit_code.map(|c| c.to_string()).unwrap_or("?".into()),
                     files_touched.len()
                 ),
-                Color::DarkGray,
+                theme::MUTED,
             ),
         };
         lines.push(Line::from(vec![
-            Span::styled(format!("  {kind} "), Style::default().fg(Color::DarkGray)),
-            Span::styled(text.replace('\n', " "), Style::default().fg(colour)),
+            Span::styled(format!("{kind} "), theme::muted()),
+            Span::styled(text.replace('\n', " "), theme::on(colour)),
         ]));
     }
     lines
@@ -521,34 +874,27 @@ fn diff_lines(app: &App) -> Vec<Line<'static>> {
             dim("this run produced no commit.".to_string()),
             dim("It was refused, or its branch has since been merged away.".to_string()),
         ],
-        Some(Some(text)) => {
-            let mut lines = vec![bold("diff".to_string())];
-            for line in text.lines() {
+        Some(Some(text)) => text
+            .lines()
+            .map(|line| {
                 let colour = match line.as_bytes().first() {
-                    Some(b'+') if !line.starts_with("+++") => Color::Green,
-                    Some(b'-') if !line.starts_with("---") => Color::Red,
-                    Some(b'@') => Color::Cyan,
-                    _ => Color::DarkGray,
+                    Some(b'+') if !line.starts_with("+++") => theme::OK,
+                    Some(b'-') if !line.starts_with("---") => theme::BAD,
+                    Some(b'@') => theme::ACCENT,
+                    _ => theme::MUTED,
                 };
-                lines.push(Line::from(Span::styled(
-                    line.to_string(),
-                    Style::default().fg(colour),
-                )));
-            }
-            lines
-        }
+                Line::from(Span::styled(line.to_string(), theme::on(colour)))
+            })
+            .collect(),
     }
 }
 
 fn dim(text: String) -> Line<'static> {
-    Line::from(Span::styled(text, Style::default().fg(Color::DarkGray)))
+    Line::from(Span::styled(text, theme::muted()))
 }
 
 fn bold(text: String) -> Line<'static> {
-    Line::from(Span::styled(
-        text,
-        Style::default().add_modifier(Modifier::BOLD),
-    ))
+    Line::from(Span::styled(text, theme::bold()))
 }
 
 /// A run recorded before the record carried what was asked.
@@ -563,26 +909,47 @@ fn described(prompt: &str) -> String {
     }
 }
 
-fn field(name: &str, value: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{name:<9}"), Style::default().fg(Color::DarkGray)),
-        Span::raw(value.to_string()),
-    ])
+/// A labelled value, wrapped under its own label.
+///
+/// Wrapped here rather than by the widget: `Paragraph::wrap` would make the
+/// number of rendered lines differ from the number of logical ones, and the
+/// scroll clamp counts logical lines. Every field wraps, not just the task —
+/// the value most likely to be long is a rejection's reason, and cutting that
+/// off loses the sentence someone opened this pane to read.
+fn field(name: &str, value: &str, width: usize) -> Vec<Line<'static>> {
+    const LABEL: usize = 10;
+    wrap(value, width.saturating_sub(LABEL))
+        .into_iter()
+        .enumerate()
+        .map(|(i, part)| {
+            Line::from(vec![
+                Span::styled(
+                    if i == 0 {
+                        format!("{name:<LABEL$}")
+                    } else {
+                        " ".repeat(LABEL)
+                    },
+                    theme::muted(),
+                ),
+                Span::styled(part, theme::text()),
+            ])
+        })
+        .collect()
 }
 
 fn describe_verdict(verdict: &Verdict) -> String {
     match verdict {
-        Verdict::Approve => " — approve".to_string(),
-        Verdict::Reject { reason } => format!(" — reject: {reason}"),
+        Verdict::Approve => " \u{2014} approve".to_string(),
+        Verdict::Reject { reason } => format!(" \u{2014} reject: {reason}"),
     }
 }
 
-fn marker(outcome: Option<Outcome>) -> (char, Color) {
+fn marker(outcome: Option<Outcome>) -> (&'static str, Color) {
     match outcome {
-        Some(Outcome::Approved) => ('+', Color::Green),
-        Some(Outcome::Rejected) => ('-', Color::Red),
-        Some(Outcome::Failed) => ('!', Color::Magenta),
-        None => ('?', Color::DarkGray),
+        Some(Outcome::Approved) => (theme::PASSED, theme::OK),
+        Some(Outcome::Rejected) => (theme::FAILED, theme::BAD),
+        Some(Outcome::Failed) => ("!", theme::HALTED),
+        None => ("\u{b7}", theme::MUTED),
     }
 }
 
@@ -653,15 +1020,6 @@ fn tail(text: &str, lines: usize) -> Vec<String> {
         .collect()
 }
 
-/// One column of breathing room on the left of the detail pane.
-fn inset(area: Rect) -> Rect {
-    Rect {
-        x: area.x.saturating_add(1),
-        width: area.width.saturating_sub(1),
-        ..area
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -711,7 +1069,7 @@ mod tests {
         let mut app = App::new(dir.clone(), Vec::new());
         app.setup = Some(crate::init::plan(&dir));
 
-        let out = screen(&mut app, 100, 20);
+        let out = screen(&mut app, 100, 22);
         assert!(out.contains("not an Ostraka project yet"), "{out}");
         assert!(out.contains("a Rust project"), "{out}");
         assert!(out.contains("ostraka.toml"), "{out}");
@@ -729,7 +1087,7 @@ mod tests {
 
         let mut app = App::new(dir.clone(), Vec::new());
         app.setup = Some(crate::init::plan(&dir));
-        let out = screen(&mut app, 100, 20);
+        let out = screen(&mut app, 100, 22);
         assert!(out.contains("already there"), "{out}");
         assert!(
             out.contains("Nothing already on disk is overwritten"),
@@ -759,12 +1117,91 @@ mod tests {
                 ),
             ],
         );
-        let out = screen(&mut app, 100, 14);
+        let out = screen(&mut app, 100, 16);
         assert!(out.contains("2 runs"), "{out}");
         assert!(out.contains("add a test"), "{out}");
         assert!(out.contains("rename a field"), "{out}");
         assert!(out.contains("09-07 00:03"), "{out}");
         assert!(out.contains("approved"), "{out}");
+        // Each entry carries how far it got under what it was for, so the list
+        // answers "did it pass" without anybody selecting the run.
+        assert!(out.contains("3 of 4 checks"), "{out}");
+    }
+
+    #[test]
+    fn the_selected_run_is_marked_down_its_whole_entry() {
+        // Two lines, one mark: a highlight on only the first of them reads as
+        // a different run from the second.
+        let mut app = App::new(
+            PathBuf::from("/p"),
+            vec![
+                summary("t1-20260907T000300Z", "first", Some(Outcome::Approved)),
+                summary("t2-20260907T000100Z", "second", Some(Outcome::Approved)),
+            ],
+        );
+        app.move_by(1);
+        let out = screen(&mut app, 100, 16);
+        let marked: Vec<&str> = out
+            .lines()
+            .filter(|line| line.starts_with(CURSOR_AT_LEFT))
+            .collect();
+        assert_eq!(marked.len(), 2, "the cursor did not span the entry:\n{out}");
+        assert!(marked[0].contains("second"), "{out}");
+        assert!(marked[1].contains("checks"), "{out}");
+    }
+
+    /// The cursor as it appears at the very left of a rendered row. The list
+    /// column starts at the frame's edge, so the bar is the first cell.
+    const CURSOR_AT_LEFT: &str = "\u{258c}";
+
+    #[test]
+    fn a_list_taller_than_its_column_scrolls_to_keep_the_selection_in_view() {
+        let mut app = App::new(
+            PathBuf::from("/p"),
+            (0..20)
+                .map(|i| {
+                    summary(
+                        &format!("t{i}-2026090{}T000300Z", i % 10),
+                        &format!("task number {i}"),
+                        Some(Outcome::Approved),
+                    )
+                })
+                .collect(),
+        );
+        app.move_by(19);
+        let out = screen(&mut app, 100, 16);
+        assert!(
+            out.contains("task number 19"),
+            "the end is unreachable:\n{out}"
+        );
+        assert!(
+            !out.contains("task number 0 "),
+            "the top did not scroll:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_narrow_terminal_shows_one_column_and_enter_moves_between_them() {
+        // Both columns on forty-eight columns means neither can be read.
+        let mut app = App::new(
+            PathBuf::from("/p"),
+            vec![summary(
+                "t1-20260907T000300Z",
+                "narrow",
+                Some(Outcome::Approved),
+            )],
+        );
+        let list = screen(&mut app, 48, 16);
+        assert!(list.contains("narrow"), "{list}");
+        assert!(
+            !list.contains("checks   events"),
+            "both columns were drawn:\n{list}"
+        );
+
+        app.focus = Focus::Detail;
+        let detail = screen(&mut app, 48, 16);
+        assert!(detail.contains("checks"), "{detail}");
+        assert!(detail.contains("author"), "{detail}");
     }
 
     #[test]
@@ -840,9 +1277,53 @@ mod tests {
             },
         ];
         app.detail = Detail::Events;
-        let out = screen(&mut app, 100, 16);
+        let out = screen(&mut app, 100, 18);
         assert!(out.contains("could not reach the model"), "{out}");
         assert!(out.contains("exit 1"), "{out}");
+    }
+
+    #[test]
+    fn the_detail_tabs_name_every_pane_and_mark_the_one_showing() {
+        // The names, not a hint about the key that reveals the next one: the
+        // row costs the same width either way and says more.
+        let mut app = App::new(
+            PathBuf::from("/p"),
+            vec![summary("t1-20260907T000300Z", "a", Some(Outcome::Approved))],
+        );
+        let out = screen(&mut app, 100, 18);
+        for pane in Detail::ALL {
+            assert!(out.contains(pane.title()), "{pane:?} unnamed:\n{out}");
+        }
+        assert_eq!(marked_tab(&mut app, 100, 18), Some("checks".to_string()));
+
+        app.detail = app.detail.next();
+        assert_eq!(marked_tab(&mut app, 100, 18), Some("events".to_string()));
+        app.detail = app.detail.next();
+        assert_eq!(marked_tab(&mut app, 100, 18), Some("diff".to_string()));
+        assert_eq!(app.detail.next(), Detail::Checks);
+    }
+
+    /// The tab drawn in the accent colour, read back off the rendered cells.
+    ///
+    /// Asserted on the styling rather than on the text because all three names
+    /// are on screen either way: which one is marked is the whole claim.
+    fn marked_tab(app: &mut App, width: u16, height: u16) -> Option<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
+        terminal.draw(|frame| draw(frame, app)).expect("draws");
+        let buffer = terminal.backend().buffer().clone();
+        let mut found = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let cell = &buffer[(x, y)];
+                if cell.fg == theme::ACCENT
+                    && cell.modifier.contains(Modifier::UNDERLINED)
+                    && cell.symbol() != " "
+                {
+                    found.push_str(cell.symbol());
+                }
+            }
+        }
+        (!found.is_empty()).then_some(found)
     }
 
     #[test]
@@ -875,6 +1356,53 @@ mod tests {
         });
         let out = screen(&mut app, 100, 16);
         assert!(out.contains("went outside the task"), "{out}");
+    }
+
+    #[test]
+    fn a_long_rejection_reason_wraps_rather_than_running_off_the_pane() {
+        // The value most likely to be too long for one row is the sentence
+        // explaining why a change was refused, which is the sentence someone
+        // opened this pane to read.
+        let reason = "The file is not newline-terminated, so it comes out of \
+                      the checkout differently from every other file in this \
+                      repository and the format check would fail on it next time";
+        let mut app = App::new(
+            PathBuf::from("/p"),
+            vec![summary(
+                "t1-20260907T000300Z",
+                "write a file",
+                Some(Outcome::Rejected),
+            )],
+        );
+        app.record = Some(RunRecord {
+            run_id: "t1-20260907T000300Z".into(),
+            task_id: "t1".into(),
+            prompt: "write a file".into(),
+            author: ActorId::new("archon"),
+            adapter: "claude-code".into(),
+            started_at: String::new(),
+            finished_at: None,
+            checks: Vec::new(),
+            approval: Some(Approval {
+                reviewer: ActorId::new("ephor"),
+                verdict: Verdict::Reject {
+                    reason: reason.into(),
+                },
+            }),
+            usage: Vec::new(),
+            outcome: Some(Outcome::Rejected),
+        });
+
+        let out = screen(&mut app, 100, 24);
+        // The last words of the reason, which is what a cut-off line loses.
+        // Asserted on a fragment short enough to survive any wrap point: a
+        // longer phrase would straddle a break the moment the pane changed
+        // width by a column, and fail for a reason that is not the claim.
+        assert!(out.contains("on it next time"), "{out}");
+        assert!(
+            out.lines().all(|line| line.chars().count() <= 100),
+            "a line ran past the frame:\n{out}"
+        );
     }
 
     #[test]
@@ -937,7 +1465,7 @@ mod tests {
         );
         app.detail = Detail::Diff;
         app.diff = Some(None);
-        let out = screen(&mut app, 100, 16);
+        let out = screen(&mut app, 100, 18);
         assert!(out.contains("produced no commit"), "{out}");
         assert!(out.contains("merged away"), "{out}");
     }
@@ -992,7 +1520,7 @@ mod tests {
         app.refilter();
         assert_eq!(app.matching.len(), 2);
 
-        let out = screen(&mut app, 100, 14);
+        let out = screen(&mut app, 100, 16);
         assert!(out.contains("2 of 3 runs"), "{out}");
         assert!(!out.contains("rename a field"), "{out}");
         assert!(out.contains("add a test"), "{out}");
@@ -1048,17 +1576,67 @@ mod tests {
     }
 
     #[test]
-    fn the_panes_cycle_and_the_footer_names_the_next_one() {
-        let mut app = App::new(
-            PathBuf::from("/p"),
-            vec![summary("t1-20260907T000300Z", "a", Some(Outcome::Approved))],
-        );
-        assert!(screen(&mut app, 100, 12).contains("tab events"));
-        app.detail = app.detail.next();
-        assert!(screen(&mut app, 100, 12).contains("tab diff"));
-        app.detail = app.detail.next();
-        assert!(screen(&mut app, 100, 12).contains("tab checks"));
-        assert_eq!(app.detail.next(), Detail::Checks);
+    fn the_input_line_says_where_typing_goes_before_anybody_types() {
+        // The one box on the screen, and the only place a keystroke becomes
+        // text. A placeholder is what makes that legible without a legend.
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let idle = screen(&mut app, 100, 12);
+        assert!(idle.contains("filter runs"), "{idle}");
+        assert!(idle.contains("ctrl-k for commands"), "{idle}");
+        assert!(idle.contains("\u{256d}"), "the box is not drawn:\n{idle}");
+
+        app.filtering = true;
+        app.filter = "typed".into();
+        let typing = screen(&mut app, 100, 12);
+        assert!(typing.contains("typed"), "{typing}");
+        assert!(!typing.contains("filter runs\u{2026}"), "{typing}");
+    }
+
+    #[test]
+    fn the_command_palette_names_what_it_can_do_and_marks_the_pick() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        app.open(Dialog::Commands);
+        let out = screen(&mut app, 110, 24);
+        assert!(out.contains("promote run"), "{out}");
+        assert!(out.contains("reload runs"), "{out}");
+        // The key beside the name, so the palette teaches its own shortcut.
+        assert!(out.contains("merges nothing"), "{out}");
+
+        app.query = "promote".into();
+        let narrowed = screen(&mut app, 110, 24);
+        assert!(narrowed.contains("promote run"), "{narrowed}");
+        assert!(!narrowed.contains("reload runs"), "{narrowed}");
+    }
+
+    #[test]
+    fn a_palette_query_matching_nothing_says_so_rather_than_showing_an_empty_box() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        app.open(Dialog::Commands);
+        app.query = "xyzzy".into();
+        let out = screen(&mut app, 110, 24);
+        assert!(out.contains("no command matches that"), "{out}");
+        assert_eq!(app.picked(), None);
+    }
+
+    #[test]
+    fn the_keys_dialog_lists_the_keys_rather_than_a_footer_doing_it_forever() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        app.open(Dialog::Keys);
+        let out = screen(&mut app, 110, 24);
+        assert!(out.contains("ctrl-x"), "{out}");
+        assert!(out.contains("promote the selected run"), "{out}");
+        assert!(out.contains("esc closes this"), "{out}");
+    }
+
+    #[test]
+    fn a_pending_leader_says_what_it_is_waiting_for() {
+        // A terminal that has swallowed a keystroke and shows nothing is a
+        // terminal that looks broken.
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        app.leader = true;
+        let out = screen(&mut app, 110, 14);
+        assert!(out.contains("ctrl-x"), "{out}");
+        assert!(out.contains("promote run"), "{out}");
     }
 
     /// A usage row shaped the way a vendor reports it: a split, or — when
@@ -1162,6 +1740,26 @@ mod tests {
     }
 
     #[test]
+    fn a_status_message_takes_the_line_from_the_totals_that_do_not_change() {
+        // What just happened is the answer to the key that was just pressed.
+        let mut app = App::new(
+            PathBuf::from("/p"),
+            vec![summary(
+                "t1-20260907T000300Z",
+                "one",
+                Some(Outcome::Approved),
+            )],
+        );
+        app.status = Some("promoted to promoted/t1 \u{2014} nothing merged".into());
+        let out = screen(&mut app, 110, 14);
+        assert!(out.contains("nothing merged"), "{out}");
+        assert!(
+            !out.contains("tokens"),
+            "the totals outlived the message:\n{out}"
+        );
+    }
+
+    #[test]
     fn counts_are_compact_without_becoming_vague_below_a_thousand() {
         assert_eq!(compact(0), "0");
         assert_eq!(compact(999), "999");
@@ -1194,8 +1792,12 @@ mod tests {
             )],
         );
         let out = screen(&mut app, 100, 20);
-        assert!(out.contains("worktree placeholder"), "{out}");
-        assert!(out.contains("changes nothing else"), "{out}");
+        // Asserted on the words the wrap must not lose, one per rendered line,
+        // rather than on a phrase that would straddle a break the moment the
+        // pane's width changed by a column.
+        for word in ["placeholder", "worktree", "changes", "nothing"] {
+            assert!(out.contains(word), "{word} was lost:\n{out}");
+        }
     }
 
     #[test]
@@ -1216,5 +1818,12 @@ mod tests {
         assert_eq!(truncate("ééééé", 3), "éé…");
         assert_eq!(truncate("short", 40), "short");
         assert_eq!(truncate("anything", 0), "anything");
+    }
+
+    #[test]
+    fn a_terminal_too_short_for_the_chrome_says_so_rather_than_drawing_nothing() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let out = screen(&mut app, 60, 4);
+        assert!(out.contains("too short"), "{out}");
     }
 }
