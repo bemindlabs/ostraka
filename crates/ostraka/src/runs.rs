@@ -4,12 +4,11 @@
 //! pipe, a CI log, a machine reading `--json`.
 
 use ostraka_runtime::index;
-use std::path::Path;
 
 type Outcome = Result<bool, Box<dyn std::error::Error>>;
 
-pub fn run(project: &Path, json: bool) -> Outcome {
-    let runs = index::list(&project.join(".ostraka"))?;
+pub fn run(workspace: &crate::workspace::Workspace, json: bool) -> Outcome {
+    let runs = index::list(&workspace.records())?;
 
     if json {
         let rows: Vec<_> = runs

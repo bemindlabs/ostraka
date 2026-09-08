@@ -20,7 +20,7 @@ mod thread;
 mod view;
 
 use crate::init;
-use crate::project;
+use crate::workspace::Workspace;
 use command::Command;
 use ostraka_runtime::promote::{self, NotPromoted};
 use ostraka_runtime::{index, orchestrator};
@@ -40,7 +40,7 @@ type Outcome = Result<bool, Box<dyn std::error::Error>>;
 /// keypress feels immediate.
 const TICK: Duration = Duration::from_millis(250);
 
-pub fn run(project_dir: &Path) -> Outcome {
+pub fn run(workspace: &Workspace) -> Outcome {
     // Said plainly, before anything is set up. Piped into `head`, the terminal
     // library's own failure is a panic and a backtrace naming a file inside a
     // dependency, which tells the operator nothing they can act on.
@@ -51,8 +51,8 @@ pub fn run(project_dir: &Path) -> Outcome {
             .into());
     }
 
-    let records_root = project_dir.join(".ostraka");
-    let mut app = open(project_dir, &records_root)?;
+    let records_root = workspace.records();
+    let mut app = open(workspace, &records_root)?;
 
     // Installs a panic hook that restores the terminal first. Without it a
     // panic leaves the operator staring at a shell with no echo and no prompt.
@@ -68,9 +68,9 @@ pub fn run(project_dir: &Path) -> Outcome {
 ///
 /// Probing runs every vendor's binary, so it happens when somebody asks to
 /// see the list rather than when the browser opens.
-fn agents(project: &Path) -> Vec<Agent> {
+fn agents(workspace: &Workspace) -> Vec<Agent> {
     use ostraka_adapter::{VendorAdapter, process::ProcessAdapter};
-    let Ok(profiles) = project::load_profiles(project) else {
+    let Ok(profiles) = workspace.profiles() else {
         return Vec::new();
     };
     let mut agents: Vec<Agent> = profiles
@@ -99,8 +99,11 @@ fn agents(project: &Path) -> Vec<Agent> {
 ///
 /// Separated from `run` so the flow tests start where an operator starts,
 /// rather than from an `App` assembled by hand that could drift from this one.
-fn open(project_dir: &Path, records_root: &Path) -> Result<App, Box<dyn std::error::Error>> {
-    let mut app = App::new(project_dir.to_path_buf(), index::list(records_root)?);
+fn open(workspace: &Workspace, records_root: &Path) -> Result<App, Box<dyn std::error::Error>> {
+    let mut app = App::new(workspace.clone(), index::list(records_root)?);
+    // The one there is, where there is one. A workspace with several waits to
+    // be told which, because picking would be picking.
+    app.repository = workspace.repository(None).ok();
     // Opened somewhere that is not a project yet: say what is missing and offer
     // to write it, rather than showing an empty list that looks like a bug.
     //
@@ -108,10 +111,10 @@ fn open(project_dir: &Path, records_root: &Path) -> Result<App, Box<dyn std::err
     // be run, and `init` asks whether it has anything left to write. Those are
     // different questions, and asking the second one put "not an Ostraka
     // project yet" across a screen with three recorded runs behind it.
-    app.setup = Some(init::plan(project_dir)).filter(|plan| !plan.runnable());
+    app.setup = Some(init::plan(&workspace.root)).filter(|plan| !plan.runnable());
     // Asked once, here, because the screen that offers to set this directory
     // up is the one that has to say what setting it up will not fix.
-    app.blocked = remedy::Remedy::diagnose(project_dir).map(|r| r.problem);
+    app.blocked = blocking(&app).map(|r| r.problem);
     load_detail(&mut app, records_root);
     Ok(app)
 }
@@ -218,7 +221,11 @@ fn handle(app: &mut App, key: KeyEvent, records_root: &Path) {
     if app.leader {
         app.leader = false;
         if let KeyCode::Char(c) = key.code {
-            if let Some(command) = Command::offered(app.situation())
+            // Looked up in the whole list rather than in what is on offer,
+            // so a letter that names a command nobody can use right now says
+            // why instead of doing nothing. A key that silently does nothing
+            // is a key somebody presses twice.
+            if let Some(command) = Command::ALL
                 .into_iter()
                 .find(|command| command.leader() == c)
             {
@@ -310,6 +317,7 @@ fn command_key(app: &mut App, key: KeyEvent, records_root: &Path) {
         KeyCode::Char('n') | KeyCode::Enter => perform(app, Command::NewRun, records_root),
         KeyCode::Char('s') => perform(app, Command::Stop, records_root),
         KeyCode::Char('l') => perform(app, Command::Runs, records_root),
+        KeyCode::Char('w') => perform(app, Command::Repos, records_root),
         KeyCode::Char('a') => perform(app, Command::Agents, records_root),
         KeyCode::Char('i') => perform(app, Command::Setup, records_root),
         KeyCode::Char('r') => perform(app, Command::Reload, records_root),
@@ -376,13 +384,22 @@ fn perform(app: &mut App, command: Command, records_root: &Path) {
         }
         Command::Fix => open_fix(app),
         Command::Settings => {
-            app.project_facts = project_facts(&app.project);
+            app.project_facts = project_facts(app);
             app.editing = None;
             app.open(Dialog::Settings);
         }
         Command::Runs => app.open(Dialog::Runs),
+        Command::Repos => {
+            app.open(Dialog::Repos);
+            app.pick = app
+                .workspace
+                .repositories()
+                .iter()
+                .position(|r| Some(&r.name) == app.repository.as_ref().map(|c| &c.name))
+                .unwrap_or(0);
+        }
         Command::Agents => {
-            app.agents = agents(&app.project);
+            app.agents = agents(&app.workspace);
             app.open(Dialog::Agents);
         }
         Command::Fresh => {
@@ -421,6 +438,7 @@ fn unavailable(app: &App, command: Command) -> String {
             "this directory cannot run anything yet \u{2014} i sets it up".to_string()
         }
         Command::Stop => "nothing is running".to_string(),
+        Command::Fix => "nothing is in the way".to_string(),
         Command::Setup => "this directory is already set up".to_string(),
         other => format!("{} is not available here", other.name()),
     }
@@ -482,6 +500,7 @@ fn dialog_key(app: &mut App, key: KeyEvent, records_root: &Path) {
         Some(Dialog::Agents) => agents_key(app, key.code),
         Some(Dialog::Fix) => fix_key(app, key.code),
         Some(Dialog::Settings) => settings_key(app, key.code),
+        Some(Dialog::Repos) => repos_key(app, key.code, records_root),
         Some(Dialog::Leaving) => {
             let leaving = matches!(
                 key.code,
@@ -503,8 +522,11 @@ fn dialog_key(app: &mut App, key: KeyEvent, records_root: &Path) {
 /// Read when the settings are opened rather than held: `ostraka.toml` is a
 /// file somebody edits, and a browser showing what it said an hour ago would
 /// be showing the wrong thing precisely when they had just changed it.
-fn project_facts(project: &Path) -> Vec<(String, String)> {
-    let Ok(config) = project::load_config(project) else {
+fn project_facts(app: &App) -> Vec<(String, String)> {
+    let Some(repo) = app.repository.as_ref() else {
+        return Vec::new();
+    };
+    let Ok(config) = app.workspace.config_for(repo) else {
         return Vec::new();
     };
     let said = |secs: Option<u64>| match secs {
@@ -524,6 +546,15 @@ fn project_facts(project: &Path) -> Vec<(String, String)> {
     facts.push(("agent stops".to_string(), said(config.policy.timeout_secs)));
     facts.push(("gate stops".to_string(), said(config.gate.timeout_secs)));
     facts.push(("worktrees".to_string(), config.worktree.base.clone()));
+    facts.push((
+        "config".to_string(),
+        app.workspace
+            .config_source(repo)
+            .strip_prefix(&app.workspace.root)
+            .unwrap_or(&app.workspace.config_source(repo))
+            .display()
+            .to_string(),
+    ));
     facts
 }
 
@@ -555,7 +586,7 @@ fn settings_key(app: &mut App, code: KeyCode) {
         KeyCode::Down => app.pick = (app.pick + 1).min(rows.len().saturating_sub(1)),
         KeyCode::Up => app.pick = app.pick.saturating_sub(1),
         KeyCode::Char('a') => {
-            app.agents = agents(&app.project);
+            app.agents = agents(&app.workspace);
             app.open(Dialog::Agents);
         }
         KeyCode::Enter => {
@@ -590,8 +621,23 @@ fn apply_setting(app: &mut App, row: Option<&'static str>, value: String) {
 
 /// Opens the guided fix, worked out fresh: the directory may have been put
 /// right in another window since anybody last looked.
+/// What is in the way of a run here, if anything.
+///
+/// The workspace does not have to be a repository; the thing being worked on
+/// does. So the question is asked of the repository, and where there is not
+/// one yet the answer is to clone something in — which is a step only a person
+/// can take, because nobody here knows the URL.
+fn blocking(app: &App) -> Option<remedy::Remedy> {
+    match app.repository.as_ref() {
+        Some(repo) => remedy::Remedy::diagnose(&repo.path),
+        None => Some(remedy::Remedy::nothing_cloned(
+            &app.workspace.repositories_dir(),
+        )),
+    }
+}
+
 fn open_fix(app: &mut App) {
-    app.remedy = remedy::Remedy::diagnose(&app.project);
+    app.remedy = blocking(app);
     app.blocked = app.remedy.as_ref().map(|r| r.problem.clone());
     match app.remedy {
         Some(_) => app.open(Dialog::Fix),
@@ -605,7 +651,11 @@ fn open_fix(app: &mut App) {
 /// whatever is lying in the operator's directory, which is not a thing to do
 /// quietly on somebody's behalf.
 fn fix_key(app: &mut App, code: KeyCode) {
-    let project = app.project.clone();
+    let project = app
+        .repository
+        .as_ref()
+        .map(|r| r.path.clone())
+        .unwrap_or_else(|| app.workspace.root.clone());
     let Some(remedy) = app.remedy.as_mut() else {
         app.close();
         return;
@@ -621,10 +671,39 @@ fn fix_key(app: &mut App, code: KeyCode) {
             // believed would work, and whether they did is a question for the
             // directory.
             if remedy.done() && !remedy.failed {
-                app.blocked = remedy::Remedy::diagnose(&project).map(|r| r.problem);
+                app.repository = app
+                    .workspace
+                    .repository(None)
+                    .ok()
+                    .or(app.repository.take());
+                app.blocked = blocking(app).map(|r| r.problem);
             }
         }
         KeyCode::Char('s') if !remedy.done() => remedy.at += 1,
+        _ => {}
+    }
+}
+
+/// Keys while the repository is being chosen.
+fn repos_key(app: &mut App, code: KeyCode, records_root: &Path) {
+    let repositories = app.workspace.repositories();
+    match code {
+        KeyCode::Esc => app.close(),
+        KeyCode::Down => app.pick = (app.pick + 1).min(repositories.len().saturating_sub(1)),
+        KeyCode::Up => app.pick = app.pick.saturating_sub(1),
+        KeyCode::Enter => {
+            if let Some(repo) = repositories.get(app.pick) {
+                app.repository = Some(repo.clone());
+                // A thread is a chain of runs in one repository. Moving to
+                // another one starts a new chain rather than continuing this
+                // one somewhere it was never made.
+                app.thread = thread::Thread::default();
+                app.blocked = blocking(app).map(|r| r.problem);
+                app.status = Some(format!("working in {}", repo.name));
+                let _ = records_root;
+            }
+            app.close();
+        }
         _ => {}
     }
 }
@@ -671,7 +750,7 @@ fn start_run(app: &mut App) {
     // Checked here rather than found out from inside the run. The run would
     // fail at `git worktree add` two layers down, in git's own words, having
     // already been started — and the task in the box would be gone.
-    if let Some(remedy) = remedy::Remedy::diagnose(&app.project) {
+    if let Some(remedy) = blocking(app) {
         app.blocked = Some(remedy.problem.clone());
         app.remedy = Some(remedy);
         app.open(Dialog::Fix);
@@ -683,7 +762,8 @@ fn start_run(app: &mut App) {
     app.status = None;
     app.follow = true;
     app.screen = Screen::Work;
-    app.thread.start(app.project.clone(), prompt);
+    let repository = app.repository.as_ref().map(|r| r.name.clone());
+    app.thread.start(app.workspace.clone(), repository, prompt);
 }
 
 /// Leaving, asked rather than assumed.
@@ -730,7 +810,10 @@ fn load_detail(app: &mut App, records_root: &Path) {
     // The diff costs a git call, so it is fetched only when someone asks to see
     // one — moving down a list of fifty runs should not shell out fifty times.
     if app.detail == Detail::Diff && app.diff.is_none() {
-        app.diff = Some(index::diff(&app.project, &run).ok().flatten());
+        let repo = app
+            .current()
+            .and_then(|summary| crate::promote::repository_for(&app.workspace, summary).ok());
+        app.diff = Some(repo.and_then(|repo| index::diff(&repo.path, &run).ok().flatten()));
     }
 }
 
@@ -746,7 +829,7 @@ fn initialise(app: &mut App, records_root: &Path) {
                 written.len()
             ));
             app.setup = None;
-            app.agents = agents(&app.project);
+            app.agents = agents(&app.workspace);
             if let Ok(runs) = index::list(records_root) {
                 app.runs = runs;
                 app.refilter();
@@ -766,13 +849,17 @@ fn promote_selected(app: &App) -> String {
         return format!("{} was not approved; nothing to promote", run.run_id);
     }
 
-    let config = match project::load_config(&app.project) {
-        Ok(config) => config,
-        Err(e) => return format!("could not read ostraka.toml: {e}"),
+    let repo = match crate::promote::repository_for(&app.workspace, run) {
+        Ok(repo) => repo,
+        Err(e) => return format!("could not tell which repository: {e}"),
     };
-    let records_root: PathBuf = app.project.join(".ostraka");
+    let config = match app.workspace.config_for(&repo) {
+        Ok(config) => config,
+        Err(e) => return format!("could not read the configuration: {e}"),
+    };
+    let records_root: PathBuf = app.workspace.records();
 
-    match promote::promote(&app.project, &records_root, &run.run_id, &config, None) {
+    match promote::promote(&repo.path, &records_root, &run.run_id, &config, None) {
         Ok(Ok(p)) => format!("promoted to {} \u{2014} nothing merged", p.branch),
         Ok(Err(NotPromoted::Refused(r))) => format!("the gate refuses this run: {r:?}"),
         Ok(Err(why)) => format!("not promoted \u{2014} {why}"),
@@ -794,7 +881,7 @@ mod tests {
     }
 
     fn app() -> App {
-        App::new(PathBuf::from("/p"), Vec::new())
+        App::new(Workspace::at(Path::new("/p")), Vec::new())
     }
 
     fn typed(app: &mut App, text: &str) {
@@ -916,6 +1003,9 @@ mod tests {
     fn a_setting_typed_into_the_thread_reaches_the_next_run() {
         let mut a = app();
         a.open(Dialog::Settings);
+        // The first row is which repository, which is not this screen's to
+        // change; the second is the author.
+        handle(&mut a, press(KeyCode::Down), Path::new("/p/.ostraka"));
         handle(&mut a, press(KeyCode::Enter), Path::new("/p/.ostraka"));
         assert!(a.editing.is_some(), "enter did not open the row");
         for _ in 0.."author".len() {
@@ -932,6 +1022,7 @@ mod tests {
     fn an_identity_cannot_be_emptied_into_a_commit_trailer() {
         let mut a = app();
         a.open(Dialog::Settings);
+        handle(&mut a, press(KeyCode::Down), Path::new("/p/.ostraka"));
         handle(&mut a, press(KeyCode::Enter), Path::new("/p/.ostraka"));
         for _ in 0.."author".len() {
             handle(&mut a, press(KeyCode::Backspace), Path::new("/p/.ostraka"));

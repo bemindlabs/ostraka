@@ -1,12 +1,11 @@
 //! `ostraka run` — one task through the whole pipeline.
 
-use crate::project;
+use crate::workspace::Workspace;
 use ostraka_core::identity::ActorId;
 use ostraka_core::task::TaskSpec;
-use ostraka_runtime::orchestrator::RunReport;
+use ostraka_runtime::orchestrator::{Places, RunReport};
 use ostraka_runtime::progress::Watcher;
 use ostraka_runtime::{orchestrator, route};
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Which run of this process the next one is.
@@ -21,6 +20,9 @@ pub const BASE_REF: &str = "HEAD";
 
 pub struct Args {
     pub prompt: String,
+    /// Which repository the change is made in. `None` where the workspace
+    /// holds one and there is nothing to choose between.
+    pub repository: Option<String>,
     pub author: String,
     pub reviewer: String,
     pub adapter: Option<String>,
@@ -38,6 +40,7 @@ impl Args {
     pub fn for_task(prompt: String) -> Self {
         Self {
             prompt,
+            repository: None,
             author: AUTHOR.to_string(),
             reviewer: REVIEWER.to_string(),
             adapter: None,
@@ -67,23 +70,23 @@ type Outcome = Result<bool, Box<dyn std::error::Error>>;
 /// by the run clearing the flag a moment later, and the run nobody wanted
 /// would carry on.
 pub fn execute(
-    project: &Path,
+    workspace: &Workspace,
     args: &Args,
     watcher: Option<Box<dyn Watcher>>,
 ) -> Result<RunReport, Box<dyn std::error::Error>> {
-    let config = project::load_config(project)?;
+    let repo = workspace.repository(args.repository.as_deref())?;
+    let config = workspace.config_for(&repo)?;
     config.validate()?;
-    let profiles = project::load_profiles(project)?;
+    let profiles = workspace.profiles()?;
 
     // Vendors that can only be isolated by relocating their home directory get
     // one here, beside the run records and ignored by git for the same reason.
-    let records_root: PathBuf = project.join(".ostraka");
-
+    let vendor_home = workspace.ostraka().join("vendor-home");
     let routing = route::select(
         &profiles,
         args.adapter.as_deref(),
         args.review_adapter.as_deref(),
-        &records_root.join("vendor-home"),
+        &vendor_home,
         config
             .policy
             .timeout_secs
@@ -110,18 +113,28 @@ pub fn execute(
         model: args.model.clone(),
     };
 
+    let worktrees = workspace.worktrees(&config);
+    let notes = workspace.notes_if_present();
+    let records = workspace.records();
+    let places = Places {
+        repo: &repo.path,
+        worktrees: &worktrees,
+        records: &records,
+        name: &repo.name,
+        notes: notes.as_deref(),
+    };
+
     Ok(orchestrator::run_task(
-        project,
+        &places,
         &config,
         &routing,
         &task,
         &ActorId::new(&args.reviewer),
-        &records_root,
         watcher,
     )?)
 }
 
-pub fn run(project: &Path, args: &Args, json: bool) -> Outcome {
+pub fn run(workspace: &Workspace, args: &Args, json: bool) -> Outcome {
     // One Ctrl-C asks the run to stop; the adapters notice within a poll and
     // kill what they launched. A second is the operator saying they meant it,
     // and the default handler takes over.
@@ -135,8 +148,7 @@ pub fn run(project: &Path, args: &Args, json: bool) -> Outcome {
         }
     });
 
-    let records_root: PathBuf = project.join(".ostraka");
-    let report = execute(project, args, None)?;
+    let report = execute(workspace, args, None)?;
 
     if json {
         let out = serde_json::json!({
@@ -167,7 +179,7 @@ pub fn run(project: &Path, args: &Args, json: bool) -> Outcome {
             (None, Some(refusal)) => println!("refused — {}", describe(refusal)),
             (None, None) => println!("refused"),
         }
-        println!("record: {}", records_root.join("runs").display());
+        println!("record: {}", workspace.records().join("runs").display());
     }
 
     Ok(report.approved())

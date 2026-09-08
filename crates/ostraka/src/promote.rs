@@ -4,17 +4,18 @@
 //! request are acts a person takes; this command's job is to make sure that
 //! what they take them on actually passed the gate.
 
-use crate::project;
+use crate::workspace::{Repository, Workspace};
 use ostraka_runtime::promote::{self, NotPromoted};
-use std::path::{Path, PathBuf};
+use ostraka_runtime::{index, orchestrator};
 
 type Outcome = Result<bool, Box<dyn std::error::Error>>;
 
-pub fn run(project_dir: &Path, run_id: &str, branch: Option<&str>, json: bool) -> Outcome {
-    let config = project::load_config(project_dir)?;
-    let records_root: PathBuf = project_dir.join(".ostraka");
+pub fn run(workspace: &Workspace, run_id: &str, branch: Option<&str>, json: bool) -> Outcome {
+    let records_root = workspace.records();
+    let repo = repository_of(workspace, &records_root, run_id)?;
+    let config = workspace.config_for(&repo)?;
 
-    let result = promote::promote(project_dir, &records_root, run_id, &config, branch)?;
+    let result = promote::promote(&repo.path, &records_root, run_id, &config, branch)?;
 
     match result {
         Ok(p) => {
@@ -69,4 +70,31 @@ pub fn run(project_dir: &Path, run_id: &str, branch: Option<&str>, json: bool) -
             Ok(false)
         }
     }
+}
+
+/// The repository a recorded run was made in.
+///
+/// Read from the record, because a workspace can hold several and promoting
+/// into the wrong one would be promoting a commit that is not there. A record
+/// written before a workspace could hold more than one names none, and the
+/// answer for those is the only repository there was.
+pub fn repository_of(
+    workspace: &Workspace,
+    records_root: &std::path::Path,
+    run_id: &str,
+) -> Result<Repository, Box<dyn std::error::Error>> {
+    let named = orchestrator::replay(records_root, run_id)
+        .ok()
+        .map(|(record, _)| record.repository)
+        .filter(|name| !name.is_empty());
+    workspace.repository(named.as_deref())
+}
+
+/// The repository a listed run was made in, for the callers that already have
+/// the summary and should not read the record again to learn one field.
+pub fn repository_for(
+    workspace: &Workspace,
+    run: &index::RunSummary,
+) -> Result<Repository, Box<dyn std::error::Error>> {
+    workspace.repository(Some(run.repository.as_str()).filter(|n| !n.is_empty()))
 }

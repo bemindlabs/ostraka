@@ -44,6 +44,33 @@ pub struct Remedy {
 }
 
 impl Remedy {
+    /// A workspace with nothing to work on.
+    ///
+    /// The only step here is one the browser cannot take: it does not know
+    /// what you meant to clone, and guessing a URL is not a thing to guess.
+    pub fn nothing_cloned(repositories: &Path) -> Remedy {
+        Remedy {
+            problem: format!(
+                "Nothing has been cloned into {} yet, so there is nothing to work on.",
+                repositories.display()
+            ),
+            steps: vec![Step {
+                said: format!(
+                    "Clone what you want worked on into {}.",
+                    repositories.display()
+                ),
+                warns: Some(
+                    "Only you can do this one — nobody here knows which repository you meant."
+                        .to_string(),
+                ),
+                commands: Vec::new(),
+            }],
+            at: 0,
+            said: None,
+            failed: false,
+        }
+    }
+
     /// What is wrong with this directory, if the browser knows.
     ///
     /// Read off the directory, not off an error message.
@@ -67,13 +94,17 @@ impl Remedy {
             // operator's own files. `git init` creates something; this one
             // takes everything in the directory and writes it into history.
             warns: Some(
-                "This commits everything currently in this directory, \
-                 respecting .gitignore."
+                "This commits everything currently in this directory, respecting \
+                 .gitignore \u{2014} and makes an empty commit where there is nothing \
+                 yet, because a worktree needs one either way."
                     .to_string(),
             ),
             commands: vec![
                 words(&["git", "add", "-A"]),
-                words(&["git", "commit", "-m", "Initial commit"]),
+                // `--allow-empty` because a directory somebody has only just
+                // made has nothing in it, and refusing to give it a commit
+                // would refuse the whole point of the step.
+                words(&["git", "commit", "-m", "Initial commit", "--allow-empty"]),
             ],
         });
 

@@ -100,6 +100,12 @@ fn config(check_cmd: &str) -> Config {
     .expect("valid config")
 }
 
+/// Where a fixture's run happens: the repository is the fixture, and the
+/// worktrees and records sit beside it as they do in a workspace.
+fn places(f: &Fixture) -> (PathBuf, PathBuf) {
+    (f.repo.join("worktrees"), f.repo.join(".ostraka"))
+}
+
 fn task(prompt: &str, author: &str) -> TaskSpec {
     TaskSpec {
         id: "t1".into(),
@@ -128,13 +134,20 @@ fn an_author_that_changed_nothing_is_reported_as_such_and_not_sent_to_a_reviewer
     )
     .unwrap();
 
+    let (worktrees, records) = places(&f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+    };
     let report = orchestrator::run_task(
-        &f.repo,
+        &places,
         &config("true"),
         &routing,
         &task("add a test that is already there", "archon"),
         &ActorId::new("ephor"),
-        &f.repo.join(".ostraka"),
         None,
     )
     .expect("runs");
@@ -164,6 +177,14 @@ fn a_run_the_operator_stopped_says_so_rather_than_blaming_the_agent() {
     .unwrap();
 
     ostraka_adapter::interrupt::clear();
+    let (worktrees, records) = places(&f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+    };
     // Scoped so the signalling thread cannot outlive this test and set the
     // flag underneath another one.
     let report = std::thread::scope(|scope| {
@@ -172,12 +193,11 @@ fn a_run_the_operator_stopped_says_so_rather_than_blaming_the_agent() {
             ostraka_adapter::interrupt::request();
         });
         orchestrator::run_task(
-            &f.repo,
+            &places,
             &config("true"),
             &routing,
             &task("do a thing", "archon"),
             &ActorId::new("ephor"),
-            &f.repo.join(".ostraka"),
             None,
         )
         .expect("runs")
@@ -212,13 +232,20 @@ fn an_author_that_could_not_run_is_refused_in_its_own_words_without_calling_a_re
     )
     .unwrap();
 
+    let (worktrees, records) = places(&f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+    };
     let report = orchestrator::run_task(
-        &f.repo,
+        &places,
         &config("true"),
         &routing,
         &task("change something", "archon"),
         &ActorId::new("ephor"),
-        &f.repo.join(".ostraka"),
         None,
     )
     .expect("runs");
@@ -255,14 +282,20 @@ fn an_approved_run_produces_a_token_a_commit_and_a_replayable_record() {
     )
     .unwrap();
 
-    let records = f.repo.join(".ostraka");
+    let (worktrees, records) = places(&f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+    };
     let report = orchestrator::run_task(
-        &f.repo,
+        &places,
         &config("true"),
         &routing,
         &task("add a file", "archon"),
         &ActorId::new("ephor"),
-        &records,
         None,
     )
     .expect("run completes");
@@ -309,13 +342,20 @@ fn a_failing_check_refuses_before_any_reviewer_is_consulted() {
     )
     .unwrap();
 
+    let (worktrees, records) = places(&f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+    };
     let report = orchestrator::run_task(
-        &f.repo,
+        &places,
         &config("exit 1"),
         &routing,
         &task("break it", "archon"),
         &ActorId::new("ephor"),
-        &f.repo.join(".ostraka"),
         None,
     )
     .expect("run completes");
@@ -356,13 +396,20 @@ fn a_rejecting_reviewer_blocks_a_change_whose_checks_all_passed() {
     )
     .unwrap();
 
+    let (worktrees, records) = places(&f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+    };
     let report = orchestrator::run_task(
-        &f.repo,
+        &places,
         &config("true"),
         &routing,
         &task("do too much", "archon"),
         &ActorId::new("ephor"),
-        &f.repo.join(".ostraka"),
         None,
     )
     .expect("run completes");
@@ -389,13 +436,20 @@ fn a_silent_reviewer_is_a_rejection_not_a_pass() {
     )
     .unwrap();
 
+    let (worktrees, records) = places(&f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+    };
     let report = orchestrator::run_task(
-        &f.repo,
+        &places,
         &config("true"),
         &routing,
         &task("say nothing", "archon"),
         &ActorId::new("ephor"),
-        &f.repo.join(".ostraka"),
         None,
     )
     .expect("run completes");
@@ -418,13 +472,20 @@ fn the_author_cannot_review_their_own_change_end_to_end() {
     .unwrap();
 
     // Same identity on both sides: the reviewing adapter differs, the actor does not.
+    let (worktrees, records) = places(&f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+    };
     let report = orchestrator::run_task(
-        &f.repo,
+        &places,
         &config("true"),
         &routing,
         &task("approve myself", "archon"),
         &ActorId::new("archon"),
-        &f.repo.join(".ostraka"),
         None,
     )
     .expect("run completes");
@@ -482,13 +543,20 @@ fn run_pair(
         None,
     )
     .unwrap();
+    let (worktrees, records) = places(f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+    };
     orchestrator::run_task(
-        &f.repo,
+        &places,
         &config("true"),
         &routing,
         &task(prompt, "archon"),
         &ActorId::new("ephor"),
-        &f.repo.join(".ostraka"),
         None,
     )
     .expect("runs")

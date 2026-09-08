@@ -18,6 +18,8 @@ pub struct RunSummary {
     pub prompt: String,
     pub author: ActorId,
     pub adapter: String,
+    /// Which repository the change was made in.
+    pub repository: String,
     pub reviewer: Option<ActorId>,
     pub outcome: Option<Outcome>,
     pub checks_passed: usize,
@@ -84,6 +86,7 @@ impl RunSummary {
             prompt: "(no record — the run did not finish)".to_string(),
             author: ActorId::new(""),
             adapter: String::new(),
+            repository: String::new(),
             reviewer: None,
             outcome: None,
             checks_passed: 0,
@@ -99,6 +102,7 @@ impl RunSummary {
             prompt: record.prompt.clone(),
             author: record.author.clone(),
             adapter: record.adapter.clone(),
+            repository: record.repository.clone(),
             reviewer: record.approval.as_ref().map(|a| a.reviewer.clone()),
             outcome: record.outcome,
             checks_passed: record.checks.iter().filter(|c| c.passed()).count(),
@@ -225,6 +229,7 @@ mod tests {
             prompt: format!("do {run_id}"),
             author: ActorId::new("archon"),
             adapter: "a".into(),
+            repository: "only".into(),
             started_at: "2026-09-07T00:00:00Z".into(),
             finished_at: None,
             checks: vec![CheckRecord {

@@ -4,13 +4,13 @@ mod adapters;
 mod check;
 mod init;
 mod init_cmd;
-mod project;
 mod promote;
 mod prune;
 mod replay;
 mod run;
 mod runs;
 mod tui;
+mod workspace;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -23,9 +23,14 @@ use std::process::ExitCode;
     about = "Run agent fleets you can actually review."
 )]
 struct Cli {
-    /// Project directory. Defaults to the current directory.
+    /// Workspace directory. Defaults to the current directory.
     #[arg(long, global = true)]
-    project: Option<PathBuf>,
+    workspace: Option<PathBuf>,
+
+    /// Which repository under `repositories/` to work in. Only needed where
+    /// the workspace holds more than one.
+    #[arg(long, global = true)]
+    repository: Option<String>,
 
     /// Emit machine-readable output.
     #[arg(long, global = true)]
@@ -113,18 +118,19 @@ enum Commands {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let project = cli.project.clone().unwrap_or_else(|| PathBuf::from("."));
+    let here = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace = workspace::Workspace::at(&here);
 
     let result = match &cli.command {
-        Commands::Check => check::run(&project, cli.json),
-        Commands::Init { force } => init_cmd::run(&project, *force, cli.json),
-        Commands::Adapters => adapters::run(&project, cli.json),
-        Commands::Replay { run_id } => replay::run(&project, run_id, cli.json),
-        Commands::Runs => runs::run(&project, cli.json),
-        Commands::Prune { apply } => prune::run(&project, *apply, cli.json),
-        Commands::Tui => tui::run(&project),
+        Commands::Check => check::run(&workspace, cli.json),
+        Commands::Init { force } => init_cmd::run(&here, *force, cli.json),
+        Commands::Adapters => adapters::run(&workspace, cli.json),
+        Commands::Replay { run_id } => replay::run(&workspace, run_id, cli.json),
+        Commands::Runs => runs::run(&workspace, cli.json),
+        Commands::Prune { apply } => prune::run(&workspace, *apply, cli.json),
+        Commands::Tui => tui::run(&workspace),
         Commands::Promote { run_id, branch } => {
-            promote::run(&project, run_id, branch.as_deref(), cli.json)
+            promote::run(&workspace, run_id, branch.as_deref(), cli.json)
         }
         Commands::Run {
             prompt,
@@ -135,9 +141,10 @@ fn main() -> ExitCode {
             base_ref,
             model,
         } => run::run(
-            &project,
+            &workspace,
             &run::Args {
                 prompt: prompt.clone(),
+                repository: cli.repository.clone(),
                 author: author.clone(),
                 reviewer: reviewer.clone(),
                 adapter: adapter.clone(),

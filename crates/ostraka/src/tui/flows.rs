@@ -21,6 +21,7 @@
 
 use super::view::{App, Dialog, Focus, Screen};
 use super::{handle, take_stock};
+use crate::workspace::Workspace;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -73,7 +74,13 @@ fn git(repo: &Path, args: &[&str]) {
     );
 }
 
-/// A project the browser can actually run something in.
+/// A workspace the browser can actually run something in.
+///
+/// ```text
+/// <workspace>/.ostraka/{ostraka.toml, adapters/}
+/// <workspace>/repositories/work   a git repository with one commit
+/// <workspace>/notes/
+/// ```
 ///
 /// `pause` is what the author sleeps for before it writes: zero for the flows
 /// that want a verdict, and long enough to press a key for the flows that want
@@ -81,7 +88,10 @@ fn git(repo: &Path, args: &[&str]) {
 fn project(name: &str, pause: u32) -> Scratch {
     let scratch = Scratch::new(name);
     let dir = scratch.path();
-    std::fs::create_dir_all(dir.join("adapters")).expect("adapters");
+    std::fs::create_dir_all(dir.join(".ostraka/adapters")).expect("ostraka");
+    std::fs::create_dir_all(dir.join("notes")).expect("notes");
+    let repo = dir.join("repositories/work");
+    std::fs::create_dir_all(&repo).expect("repository");
 
     // One script, two profiles. It answers a review by reading the marker out
     // of the prompt it was handed — which is the mechanism, not a shortcut —
@@ -110,7 +120,7 @@ fn project(name: &str, pause: u32) -> Scratch {
                 .expect("chmod");
         }
         std::fs::write(
-            dir.join(format!("adapters/{id}.toml")),
+            dir.join(format!(".ostraka/adapters/{id}.toml")),
             format!(
                 "id = \"{id}\"\ncommand = \"{}\"\nargs = [\"{{{{prompt}}}}\"]\nprobe_args = [\"--probe\"]\n",
                 script.display()
@@ -120,22 +130,27 @@ fn project(name: &str, pause: u32) -> Scratch {
     }
 
     std::fs::write(
-        dir.join("ostraka.toml"),
+        dir.join(".ostraka/ostraka.toml"),
         "[gate]\n\
          checks = [{ name = \"check\", cmd = \"true\", required = true }]\n\n\
          [gate.review]\n\
          must_differ_from_author = true\n",
     )
     .expect("config");
-    std::fs::write(dir.join(".gitignore"), "/.ostraka/\n/worktrees/\n").expect("gitignore");
-    std::fs::write(dir.join("seed.txt"), "seed\n").expect("seed");
+    std::fs::write(repo.join(".gitignore"), "/.ostraka/\n").expect("gitignore");
+    std::fs::write(repo.join("seed.txt"), "seed\n").expect("seed");
 
-    git(dir, &["init", "-q", "-b", "main"]);
-    git(dir, &["config", "user.email", "flow@example.invalid"]);
-    git(dir, &["config", "user.name", "flow"]);
-    git(dir, &["add", "-A"]);
-    git(dir, &["commit", "-q", "-m", "seed"]);
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.email", "flow@example.invalid"]);
+    git(&repo, &["config", "user.name", "flow"]);
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "seed"]);
     scratch
+}
+
+/// The one repository a fixture workspace holds.
+fn repo_of(scratch: &Scratch) -> PathBuf {
+    scratch.path().join("repositories/work")
 }
 
 /// The browser, driven the way an operator drives it.
@@ -148,9 +163,10 @@ struct Driver {
 
 impl Driver {
     /// Opens where `ostraka tui` opens, through the same function.
-    fn open(project: &Path) -> Self {
-        let records_root = project.join(".ostraka");
-        let app = super::open(project, &records_root).expect("the browser opens");
+    fn open(root: &Path) -> Self {
+        let workspace = Workspace::at(root);
+        let records_root = workspace.records();
+        let app = super::open(&workspace, &records_root).expect("the browser opens");
         Self {
             app,
             records_root,
@@ -260,7 +276,7 @@ fn a_browser_with_no_terminal_says_so_rather_than_panicking() {
     // nothing they can act on. A test's stdout is not a terminal, so this is
     // the real path.
     let scratch = Scratch::new("no-tty");
-    let error = super::run(scratch.path()).expect_err("a pipe is not a terminal");
+    let error = super::run(&Workspace::at(scratch.path())).expect_err("a pipe is not a terminal");
     let said = error.to_string();
     assert!(said.contains("needs a terminal"), "{said}");
     assert!(
@@ -274,7 +290,12 @@ fn setting_up_a_directory_leaves_a_browser_that_can_run_something() {
     // The first five minutes: open somewhere that is not a project, read what
     // would be written, take the offer, and end up somewhere a task works.
     let scratch = Scratch::new("setup");
-    std::fs::write(scratch.path().join("Cargo.toml"), "[package]\n").expect("write");
+    std::fs::create_dir_all(scratch.path().join("repositories/work")).expect("repository");
+    std::fs::write(
+        scratch.path().join("repositories/work/Cargo.toml"),
+        "[package]\n",
+    )
+    .expect("write");
     let mut d = Driver::open(scratch.path());
 
     d.shows("not an Ostraka project yet");
@@ -290,28 +311,35 @@ fn setting_up_a_directory_leaves_a_browser_that_can_run_something() {
     d.ctrl('x').key(KeyCode::Char('i'));
     d.hides("not an Ostraka project yet");
     d.shows("Write a task below");
-    assert!(scratch.path().join("adapters/codex.toml").is_file());
+    assert!(
+        scratch
+            .path()
+            .join(".ostraka/adapters/codex.toml")
+            .is_file()
+    );
 }
 
 #[test]
-fn onboarding_a_directory_that_git_has_never_heard_of_says_so_first() {
-    // The whole runtime stands on `git worktree add`. Setting up a directory
-    // git does not know about produces a perfectly valid project that cannot
-    // run anything, and it used to say so for the first time from inside a
-    // run, in git's own words, after a vendor had been paid.
+fn onboarding_an_empty_workspace_says_what_is_missing_before_it_is_missed() {
+    // A workspace is set up before anything is cloned into it, so the first
+    // thing wrong is that there is nothing to work on — and the second, once
+    // there is, is whether git knows about it. Both used to be found out from
+    // inside a run, in somebody else's words, after a vendor had been paid.
     let scratch = Scratch::new("no-git");
     let mut d = Driver::open(scratch.path());
 
     d.shows("not an Ostraka project yet");
-    d.shows("not a git repository");
+    // An empty workspace's problem is not git yet — it is that there is
+    // nothing to work on, and that is the sentence it gets.
+    d.shows("Nothing has been cloned into");
     d.shows("x walks through it");
-    // And this one has no recognisable toolchain either, so the gate it would
-    // write is a placeholder. Better said before the offer is taken.
+    // And no recognisable toolchain either, so the gate it would write is a
+    // placeholder. Better said before the offer is taken.
     d.shows("fails on purpose");
 
     // Taking the offer does not make the warning untrue, so it stays.
     d.ctrl('x').key(KeyCode::Char('i'));
-    assert!(scratch.path().join("ostraka.toml").is_file());
+    assert!(scratch.path().join(".ostraka/ostraka.toml").is_file());
     assert!(
         d.app.blocked.is_some(),
         "the warning went away without the cause"
@@ -319,13 +347,16 @@ fn onboarding_a_directory_that_git_has_never_heard_of_says_so_first() {
 }
 
 #[test]
-fn a_task_in_a_directory_git_does_not_know_offers_the_steps_out_of_it() {
+fn a_task_in_a_repository_git_does_not_know_offers_the_steps_out_of_it() {
     // What this replaces: the run started, spent a vendor, and came back with
     // "did not finish — git worktree add failed: fatal: not a git repository",
     // which is true, is git's account from two layers down, and leaves the
     // operator to work out both that the answer is `git init` and that `git
     // init` alone is not enough either.
     let scratch = Scratch::new("guided");
+    // A workspace with something cloned in that git has never heard of, which
+    // is what an operator who copied a directory rather than cloning one has.
+    std::fs::create_dir_all(scratch.path().join("repositories/work")).expect("repository");
     let mut d = Driver::open(scratch.path());
     d.ctrl('x').key(KeyCode::Char('i'));
 
@@ -341,28 +372,35 @@ fn a_task_in_a_directory_git_does_not_know_offers_the_steps_out_of_it() {
 
     // Step by step, and only when asked.
     d.key(KeyCode::Char('y'));
-    assert!(scratch.path().join(".git").is_dir(), "step one did nothing");
+    assert!(
+        scratch.path().join("repositories/work/.git").is_dir(),
+        "step one did nothing"
+    );
     d.shows("commits everything");
 
-    // Committing needs an author, which this machine may not have configured.
-    // Either way is a real answer: the directory is fixed, or git says why not.
-    let out = Command::new("git")
-        .args([
-            "-c",
-            "user.email=flow@example.invalid",
-            "-c",
-            "user.name=flow",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "seed",
-        ])
-        .current_dir(scratch.path())
-        .output()
-        .expect("git runs");
-    assert!(out.status.success());
+    // The commit needs an author, and a machine running these may have none
+    // configured; that is the repository's business rather than this test's.
+    for (key, value) in [
+        ("user.email", "flow@example.invalid"),
+        ("user.name", "flow"),
+    ] {
+        assert!(
+            Command::new("git")
+                .args(["config", key, value])
+                .current_dir(scratch.path().join("repositories/work"))
+                .status()
+                .expect("git runs")
+                .success()
+        );
+    }
 
+    d.key(KeyCode::Char('y'));
+    assert!(
+        d.app.remedy.as_ref().is_some_and(|r| r.done()),
+        "the steps did not finish"
+    );
     d.key(KeyCode::Esc);
+
     d.ctrl('x').key(KeyCode::Char('x'));
     d.shows("nothing is in the way");
     assert!(d.app.blocked.is_none());
@@ -448,7 +486,7 @@ fn the_second_task_starts_where_the_first_one_finished() {
         .expect("a second run");
     let out = Command::new("git")
         .args(["log", "--format=%H", &format!("ostraka/{second}")])
-        .current_dir(scratch.path())
+        .current_dir(repo_of(&scratch))
         .output()
         .expect("git log");
     let commits = String::from_utf8_lossy(&out.stdout).lines().count();
@@ -462,7 +500,7 @@ fn a_refused_run_is_not_the_ground_the_next_one_stands_on() {
     let scratch = project("refused", 0);
     // A gate nothing can pass.
     std::fs::write(
-        scratch.path().join("ostraka.toml"),
+        scratch.path().join(".ostraka/ostraka.toml"),
         "[gate]\nchecks = [{ name = \"check\", cmd = \"false\", required = true }]\n\n\
          [gate.review]\nmust_differ_from_author = true\n",
     )
@@ -533,7 +571,7 @@ fn a_task_whose_agent_runs_out_of_tokens_is_refused_and_says_why() {
     );
 
     // And what it managed to write is kept, because that is the evidence.
-    let left = std::fs::read_dir(scratch.path().join("worktrees"))
+    let left = std::fs::read_dir(scratch.path().join(".ostraka/worktrees"))
         .expect("a worktrees directory")
         .filter_map(|e| e.ok())
         .find(|e| e.path().join("wrote.txt").is_file());
@@ -673,7 +711,12 @@ fn a_fresh_thread_goes_back_to_head() {
 #[test]
 fn the_palette_reaches_a_command_by_name_and_the_leader_by_letter() {
     let scratch = Scratch::new("commands");
-    std::fs::write(scratch.path().join("Cargo.toml"), "[package]\n").expect("write");
+    std::fs::create_dir_all(scratch.path().join("repositories/work")).expect("repository");
+    std::fs::write(
+        scratch.path().join("repositories/work/Cargo.toml"),
+        "[package]\n",
+    )
+    .expect("write");
     let mut d = Driver::open(scratch.path());
 
     d.ctrl('k').typed("keys").key(KeyCode::Enter);

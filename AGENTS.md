@@ -75,6 +75,40 @@ change. It belongs in CI, on a clean checkout.
 These were open questions across two implementation notes. They are answered;
 reopening one needs a reason, not a preference.
 
+**Ostraka works from a workspace, not from inside what it is working on.**
+`.ostraka/` holds the configuration, the adapter profiles, the run records and
+the worktrees; `repositories/<name>` holds what is being worked on;  `notes/`
+holds what was worked out along the way. A repository cloned in is left as its
+owner left it — no config at its root, no worktrees inside it, and deleting the
+workspace deletes every trace of Ostraka having been used. `orchestrator::Places`
+is that topology as a parameter: a run happens *in* a repository, *beside* a set
+of worktrees, and is *recorded* somewhere that may be neither, and deriving the
+second two from the first was the assumption that a workspace held exactly one
+repository.
+
+**How a project is verified is that project's business.** A workspace holding a
+Rust repository and a Node one cannot have one gate between them, so a
+repository's own `ostraka.toml` wins entirely where it has one and the
+workspace's answers where it does not. `check` says which answered for each.
+The gate is still the repository's agreement, wherever it is read from — the
+browser shows it and does not edit it.
+
+**`notes/` is linked into every worktree, and is not configuration.** An agent
+writing there writes into the real directory, so what it worked out survives
+the run — including a refused one, which is the run whose notes are worth the
+most. The link points out of the checkout, so none of it reaches the diff a
+reviewer judges: notes are what was learned and the diff is what was changed,
+and confusing the two would put an agent's scratchpad in front of a reviewer as
+if it were part of the change.
+
+**A workspace resolves where it is.** The command line defaults to `.`, and a
+relative worktree path built from it means two different directories: `git
+worktree add` resolves it against the repository it is run in, and everything
+else resolves it against the workspace. The agent then works in a checkout git
+has never heard of and the first thing to notice is `git status` failing two
+minutes later. Found by running it, in a real workspace, rather than by
+reasoning about it.
+
 **The repository is self-contained.** The fleet in the sibling workspace —
 `agents/archon`, `agents/ephor` and the rest — is the team that *builds*
 Ostraka. It is not an input to the runtime, which reads `ostraka.toml` and

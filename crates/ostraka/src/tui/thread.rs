@@ -18,10 +18,9 @@
 
 use crate::run;
 use crate::tui::session::{Finished, Session};
+use crate::workspace::Workspace;
 use ostraka_core::record::Outcome;
 use ostraka_runtime::progress::Step;
-use std::path::PathBuf;
-
 /// One run in the chain, once it is over.
 pub struct Turn {
     pub prompt: String,
@@ -94,16 +93,17 @@ impl Thread {
     }
 
     /// Starts the next run, from wherever the chain has got to.
-    pub fn start(&mut self, project: PathBuf, prompt: String) {
+    pub fn start(&mut self, workspace: Workspace, repository: Option<String>, prompt: String) {
         self.history.push(prompt.clone());
         let mut args = run::Args::for_task(prompt);
+        args.repository = repository;
         args.base_ref = self.base_ref.clone();
         args.adapter = self.adapter.clone();
         args.review_adapter = self.review_adapter.clone();
         args.model = self.model.clone();
         args.author = self.author.clone();
         args.reviewer = self.reviewer.clone();
-        self.live = Some(Session::start(project, args));
+        self.live = Some(Session::start(workspace, args));
     }
 
     /// Takes what the run has said, and closes it out when it is over.

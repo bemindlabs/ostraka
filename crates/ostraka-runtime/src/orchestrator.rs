@@ -35,9 +35,30 @@ impl RunReport {
     }
 }
 
+/// Where the parts of a run live.
+///
+/// Three directories that used to be one: a run is made *in* a repository,
+/// *beside* a set of worktrees, and *recorded* somewhere that may be neither.
+/// Deriving the second two from the first assumed a workspace holding exactly
+/// one repository, which is the assumption this replaces — and passing them
+/// explicitly means the layout is decided by whoever knows it rather than
+/// rebuilt from a convention in here.
+pub struct Places<'a> {
+    /// The repository the change is made in.
+    pub repo: &'a Path,
+    /// Where worktrees are created.
+    pub worktrees: &'a Path,
+    /// Where run records are written.
+    pub records: &'a Path,
+    /// The name this repository is known by, for the record.
+    pub name: &'a str,
+    /// The workspace's notes, linked into the worktree so what an agent works
+    /// out survives the run. `None` where there are none.
+    pub notes: Option<&'a Path>,
+}
+
 /// Runs one task through the whole pipeline.
 ///
-/// `records_root` is where run logs are written — `.ostraka/` by convention.
 /// The worktree is left in place on completion so the diff can be inspected;
 /// removing it is the caller's decision, not this function's.
 ///
@@ -45,16 +66,16 @@ impl RunReport {
 /// a screen to keep up to date. It cannot change any of it: see
 /// [`crate::progress`]. `None` behaves exactly as this function always has.
 pub fn run_task(
-    repo: &Path,
+    places: &Places<'_>,
     config: &Config,
     routing: &Routing,
     task: &TaskSpec,
     reviewer_identity: &ActorId,
-    records_root: &Path,
     watcher: Option<Box<dyn Watcher>>,
 ) -> Result<RunReport> {
+    let repo = places.repo;
     let run_id = format!("{}-{}", task.id, now_rfc3339().replace([':', '-'], ""));
-    let mut log = RunLog::create(records_root, &run_id)?.watched_by(watcher);
+    let mut log = RunLog::create(places.records, &run_id)?.watched_by(watcher);
     log.enter(Phase::Isolating);
 
     let mut record = RunRecord {
@@ -63,6 +84,7 @@ pub fn run_task(
         prompt: task.prompt.clone(),
         author: task.author.clone(),
         adapter: routing.author.id().to_string(),
+        repository: places.name.to_string(),
         started_at: now_rfc3339(),
         finished_at: None,
         checks: Vec::new(),
@@ -72,12 +94,7 @@ pub fn run_task(
     };
 
     // 1. Isolate. Work is a diff on disk before it is anything else.
-    let wt = worktree::create(
-        repo,
-        &repo.join(&config.worktree.base),
-        &run_id,
-        &task.base_ref,
-    )?;
+    let wt = worktree::create(repo, places.worktrees, &run_id, &task.base_ref)?;
 
     // 2. Make the checkout usable. A worktree is a fresh checkout, so whatever
     //    git ignores is missing from it — and the agent needs the project's
@@ -87,6 +104,7 @@ pub fn run_task(
         repo,
         wt.path(),
         &config.worktree,
+        places.notes,
         config.gate.timeout_secs.map(std::time::Duration::from_secs),
     ) {
         Ok(steps) => {

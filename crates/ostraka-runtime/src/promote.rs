@@ -218,6 +218,7 @@ mod tests {
             prompt: "do a thing".into(),
             author: ActorId::new("archon"),
             adapter: "a".into(),
+            repository: "only".into(),
             started_at: "now".into(),
             finished_at: None,
             checks: vec![CheckRecord {

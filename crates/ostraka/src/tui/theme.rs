@@ -101,6 +101,35 @@ pub fn panel(active: bool) -> Block<'static> {
         .border_style(if active { accent() } else { muted() })
 }
 
+/// Trims a dialog to the room there is, keeping the way out of it.
+///
+/// The last line of every dialog says how to leave; a dialog whose footer has
+/// been cut off the bottom of a short terminal is one somebody is stuck in.
+/// What goes instead is the middle, and it says how much of it went.
+pub fn fit(
+    mut lines: Vec<ratatui::text::Line<'static>>,
+    height: u16,
+) -> Vec<ratatui::text::Line<'static>> {
+    use ratatui::text::{Line, Span};
+    let room = height.saturating_sub(2) as usize;
+    if lines.len() <= room || room < 4 {
+        return lines;
+    }
+    let footer = lines.pop().unwrap_or_default();
+    let kept = room - 2;
+    let hidden = lines.len() - kept;
+    lines.truncate(kept);
+    lines.push(Line::from(Span::styled(
+        format!(
+            "\u{2026} {hidden} more line{}",
+            if hidden == 1 { "" } else { "s" }
+        ),
+        muted(),
+    )));
+    lines.push(footer);
+    lines
+}
+
 /// A rectangle of the given size in the middle of `area`, clamped to fit.
 pub fn centred(area: Rect, width: u16, height: u16) -> Rect {
     let width = width.min(area.width);

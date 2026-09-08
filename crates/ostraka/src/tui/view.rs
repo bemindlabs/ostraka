@@ -25,6 +25,7 @@ use crate::tui::command::{Command, Situation};
 use crate::tui::remedy::Remedy;
 use crate::tui::theme;
 use crate::tui::thread::{Thread, Turn};
+use crate::workspace::{Repository, Workspace};
 use ostraka_core::gate::{CheckRecord, Verdict};
 use ostraka_core::record::{Event, Outcome, RunRecord};
 use ostraka_runtime::index::{self, BackendUsage, RunSummary};
@@ -34,7 +35,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Padding, Paragraph};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Rows the chrome takes at its smallest: the breadcrumb, its rule, the three
 /// of the input box and the status line.
@@ -101,6 +102,7 @@ pub enum Dialog {
     Leaving,
     Fix,
     Settings,
+    Repos,
 }
 
 /// One adapter profile, as the agents dialog shows it.
@@ -111,7 +113,10 @@ pub struct Agent {
 }
 
 pub struct App {
-    pub project: PathBuf,
+    pub workspace: Workspace,
+    /// The repository being worked in. `None` where the workspace holds none,
+    /// or holds several and nobody has said which.
+    pub repository: Option<Repository>,
     /// The project path as the breadcrumb says it: resolved, and shortened to
     /// `~` where it sits under the operator's home.
     ///
@@ -185,11 +190,12 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(project: PathBuf, runs: Vec<RunSummary>) -> Self {
+    pub fn new(workspace: Workspace, runs: Vec<RunSummary>) -> Self {
         let matching = (0..runs.len()).collect();
         Self {
-            where_shown: where_we_are(&project),
-            project,
+            where_shown: where_we_are(&workspace.root),
+            workspace,
+            repository: None,
             runs,
             matching,
             selected: 0,
@@ -385,7 +391,9 @@ impl App {
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let screen = frame.area();
-    let box_height = app.prompt_height();
+    // At most a third of a short terminal: a box that grew to six lines on a
+    // twelve-row screen would leave four rows for the work it is about.
+    let box_height = app.prompt_height().min((screen.height / 3).max(3));
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -430,6 +438,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Dialog::Leaving) => render_leaving(frame, app, screen),
         Some(Dialog::Fix) => render_fix(frame, app, screen),
         Some(Dialog::Settings) => render_settings(frame, app, screen),
+        Some(Dialog::Repos) => render_repos(frame, app, screen),
         None => {}
     }
 
@@ -460,6 +469,12 @@ fn breadcrumb(app: &App, width: u16) -> Paragraph<'static> {
         truncate(&app.where_shown, room as usize),
         theme::muted(),
     )];
+    // Which repository, because a workspace can hold several and a task goes
+    // into exactly one of them.
+    if let Some(repo) = &app.repository {
+        spans.push(Span::styled("  ", theme::muted()));
+        spans.push(Span::styled(repo.name.clone(), theme::accent()));
+    }
     // What the next run will stand on, where that is not simply `HEAD`. It
     // belongs beside the path because it is the same kind of fact: where you
     // are working.
@@ -492,7 +507,7 @@ fn where_we_are(project: &Path) -> String {
 fn render_work(frame: &mut Frame, app: &mut App, area: Rect) {
     app.page = area.height.saturating_sub(1).max(1);
     if app.thread.is_empty() {
-        frame.render_widget(Paragraph::new(opening(app, area.width)), area);
+        frame.render_widget(Paragraph::new(opening(app, area.width, area.height)), area);
         return;
     }
 
@@ -511,15 +526,25 @@ fn render_work(frame: &mut Frame, app: &mut App, area: Rect) {
 /// directory, and in a repository with fifty runs behind it that reads as a
 /// browser that has lost them. What was asked here last is the context
 /// somebody opening this wants, so it is the first thing they get.
-fn opening(app: &App, width: u16) -> Vec<Line<'static>> {
+fn opening(app: &App, width: u16, height: u16) -> Vec<Line<'static>> {
     /// Enough to recognise where the work got to, and not a second list.
     const RECENT: usize = 5;
+    /// What the summary costs besides its rows: a heading, three blanks, the
+    /// count and the rule under it.
+    const AROUND: usize = 6;
+
+    // The guidance is what somebody opening this for the first time needs, and
+    // the summary is context. On a screen too short for both, the context goes
+    // — a run they cannot see is a run `l` still lists.
+    let guidance = 4;
+    let room = (height as usize).saturating_sub(guidance + AROUND);
+    let recent = room.min(RECENT);
 
     let mut lines = Vec::new();
-    if !app.runs.is_empty() {
+    if !app.runs.is_empty() && recent > 0 {
         lines.push(Line::from(Span::styled("Last asked here", theme::bold())));
         lines.push(Line::from(""));
-        for run in app.runs.iter().take(RECENT) {
+        for run in app.runs.iter().take(recent) {
             let (mark, colour) = marker(run.outcome);
             lines.push(Line::from(vec![
                 Span::styled(format!(" {mark}  "), theme::on(colour)),
@@ -553,11 +578,15 @@ fn opening(app: &App, width: u16) -> Vec<Line<'static>> {
     lines.push(Line::from(vec![
         Span::styled("Write a task below and press ", theme::muted()),
         Span::styled("enter", theme::accent()),
-        Span::styled(". Each one is isolated, gated and", theme::muted()),
+        Span::styled(".", theme::muted()),
     ]));
-    lines.push(dim(
-        "reviewed by a different agent than the one that wrote it.".to_string(),
-    ));
+    for part in wrap(
+        "Each one is isolated, gated and reviewed by a different agent than the \
+         one that wrote it.",
+        width as usize,
+    ) {
+        lines.push(dim(part));
+    }
     // A chain says where the next one will start, which is the other half of
     // "where did I get to".
     if app.thread.continuing() {
@@ -882,7 +911,49 @@ fn render_slash(frame: &mut Frame, app: &App, box_area: Rect) {
 
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(lines).block(theme::panel(true).padding(Padding::horizontal(1))),
+        Paragraph::new(theme::fit(lines, area.height))
+            .block(theme::panel(true).padding(Padding::horizontal(1))),
+        area,
+    );
+}
+
+/// The repositories this workspace works on.
+fn render_repos(frame: &mut Frame, app: &App, screen: Rect) {
+    let width = 78u16.min(screen.width);
+    let repositories = app.workspace.repositories();
+    let mut lines = vec![
+        Line::from(Span::styled("Repositories", theme::bold())),
+        theme::rule(width.saturating_sub(6)),
+    ];
+    if repositories.is_empty() {
+        lines.push(dim(
+            "Nothing has been cloned into repositories/ yet.".to_string()
+        ));
+    }
+    for (i, repo) in repositories.iter().enumerate() {
+        let here = i == app.pick;
+        let working = app.repository.as_ref().is_some_and(|r| r.name == repo.name);
+        lines.push(Line::from(vec![
+            Span::styled(if here { theme::CURSOR } else { " " }, theme::accent()),
+            Span::styled(
+                format!(" {:<24}", repo.name),
+                if here {
+                    theme::text().add_modifier(Modifier::BOLD)
+                } else {
+                    theme::text()
+                },
+            ),
+            Span::styled(if working { "working here" } else { "" }, theme::accent()),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(dim("enter works here \u{b7} esc closes this".to_string()));
+
+    let area = theme::centred(screen, width, lines.len() as u16 + 2);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(theme::fit(lines, area.height))
+            .block(theme::panel(true).padding(Padding::horizontal(2))),
         area,
     );
 }
@@ -960,7 +1031,8 @@ fn render_settings(frame: &mut Frame, app: &App, screen: Rect) {
     let area = theme::centred(screen, width, lines.len() as u16 + 2);
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(lines).block(theme::panel(true).padding(Padding::horizontal(2))),
+        Paragraph::new(theme::fit(lines, area.height))
+            .block(theme::panel(true).padding(Padding::horizontal(2))),
         area,
     );
 }
@@ -972,6 +1044,14 @@ pub fn settings_rows(app: &App) -> Vec<(&'static str, String, bool)> {
         None => "automatic".to_string(),
     };
     vec![
+        (
+            "repository",
+            app.repository
+                .as_ref()
+                .map(|r| r.name.clone())
+                .unwrap_or_else(|| "\u{2014}".into()),
+            false,
+        ),
         ("author", app.thread.author.clone(), true),
         ("reviewer", app.thread.reviewer.clone(), true),
         (
@@ -1319,7 +1399,8 @@ fn render_fix(frame: &mut Frame, app: &App, screen: Rect) {
     let area = theme::centred(screen, width, lines.len() as u16 + 2);
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(lines).block(theme::panel(true).padding(Padding::horizontal(2))),
+        Paragraph::new(theme::fit(lines, area.height))
+            .block(theme::panel(true).padding(Padding::horizontal(2))),
         area,
     );
 }
@@ -1360,7 +1441,8 @@ fn render_leaving(frame: &mut Frame, app: &App, screen: Rect) {
     let area = theme::centred(screen, 66, lines.len() as u16 + 2);
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(lines).block(theme::panel(true).padding(Padding::horizontal(2))),
+        Paragraph::new(theme::fit(lines, area.height))
+            .block(theme::panel(true).padding(Padding::horizontal(2))),
         area,
     );
 }
@@ -1401,7 +1483,8 @@ fn render_keys(frame: &mut Frame, screen: Rect) {
     let area = theme::centred(screen, 72, lines.len() as u16 + 2);
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(lines).block(theme::panel(true).padding(Padding::horizontal(2))),
+        Paragraph::new(theme::fit(lines, area.height))
+            .block(theme::panel(true).padding(Padding::horizontal(2))),
         area,
     );
 }
@@ -1441,7 +1524,8 @@ fn render_palette(frame: &mut Frame, app: &App, screen: Rect) {
     let area = theme::centred(screen, 86, lines.len() as u16 + 2);
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(lines).block(theme::panel(true).padding(Padding::horizontal(2))),
+        Paragraph::new(theme::fit(lines, area.height))
+            .block(theme::panel(true).padding(Padding::horizontal(2))),
         area,
     );
 }
@@ -1504,7 +1588,8 @@ fn render_runs(frame: &mut Frame, app: &App, screen: Rect) {
     let area = theme::centred(screen, width, lines.len() as u16 + 2);
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(lines).block(theme::panel(true).padding(Padding::horizontal(2))),
+        Paragraph::new(theme::fit(lines, area.height))
+            .block(theme::panel(true).padding(Padding::horizontal(2))),
         area,
     );
 }
@@ -1575,7 +1660,8 @@ fn render_agents(frame: &mut Frame, app: &App, screen: Rect) {
     let area = theme::centred(screen, width, lines.len() as u16 + 2);
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(lines).block(theme::panel(true).padding(Padding::horizontal(2))),
+        Paragraph::new(theme::fit(lines, area.height))
+            .block(theme::panel(true).padding(Padding::horizontal(2))),
         area,
     );
 }
@@ -1825,6 +1911,7 @@ mod tests {
             prompt: prompt.to_string(),
             author: ActorId::new("archon"),
             adapter: "claude-code".to_string(),
+            repository: "only".to_string(),
             reviewer: Some(ActorId::new("ephor")),
             outcome,
             checks_passed: 3,
@@ -1840,6 +1927,7 @@ mod tests {
             prompt: prompt.into(),
             author: ActorId::new("archon"),
             adapter: "claude-code".into(),
+            repository: "only".into(),
             started_at: String::new(),
             finished_at: None,
             checks,
@@ -1892,6 +1980,11 @@ mod tests {
         app.thread.live = Some(Session::recorded(prompt, steps, None));
     }
 
+    /// A workspace that is not on disk, for the screens that do not touch it.
+    fn nowhere() -> Workspace {
+        Workspace::at(std::path::Path::new("/p"))
+    }
+
     fn screen(app: &mut App, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
         terminal.draw(|frame| draw(frame, app)).expect("draws");
@@ -1927,16 +2020,16 @@ mod tests {
     fn a_directory_that_is_not_a_project_says_what_would_be_written() {
         let dir = std::env::temp_dir().join(format!("ostraka-view-init-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("scratch");
-        std::fs::write(dir.join("Cargo.toml"), "[package]\n").expect("write");
+        std::fs::create_dir_all(dir.join("repositories/work")).expect("scratch");
+        std::fs::write(dir.join("repositories/work/Cargo.toml"), "[package]\n").expect("write");
 
-        let mut app = App::new(dir.clone(), Vec::new());
+        let mut app = App::new(Workspace::at(&dir), Vec::new());
         app.setup = Some(crate::init::plan(&dir));
 
         let out = screen(&mut app, 100, 24);
         assert!(out.contains("not an Ostraka project yet"), "{out}");
         assert!(out.contains("a Rust project"), "{out}");
-        assert!(out.contains("adapters/codex.toml"), "{out}");
+        assert!(out.contains(".ostraka/adapters/codex.toml"), "{out}");
         assert!(out.contains("i set this directory up"), "{out}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1945,10 +2038,10 @@ mod tests {
     fn setup_names_what_is_already_there_rather_than_offering_to_rewrite_it() {
         let dir = std::env::temp_dir().join(format!("ostraka-view-half-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("scratch");
-        std::fs::write(dir.join("ostraka.toml"), "# mine\n").expect("write");
+        std::fs::create_dir_all(dir.join(".ostraka")).expect("scratch");
+        std::fs::write(dir.join(".ostraka/ostraka.toml"), "# mine\n").expect("write");
 
-        let mut app = App::new(dir.clone(), Vec::new());
+        let mut app = App::new(Workspace::at(&dir), Vec::new());
         app.setup = Some(crate::init::plan(&dir));
         let out = screen(&mut app, 100, 24);
         assert!(out.contains("already there"), "{out}");
@@ -1968,7 +2061,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch");
 
-        let mut app = App::new(dir.clone(), Vec::new());
+        let mut app = App::new(Workspace::at(&dir), Vec::new());
         app.setup = Some(crate::init::plan(&dir));
         app.blocked = Some(
             "This directory is not a git repository, so a run has nowhere to work.".to_string(),
@@ -1980,9 +2073,11 @@ mod tests {
         assert!(out.contains("fails on purpose"), "{out}");
         assert!(out.contains("before the first task"), "{out}");
 
-        // A repository with a language it recognises has neither to say.
-        std::fs::write(dir.join("Cargo.toml"), "[package]\n").expect("write");
-        let mut ok = App::new(dir.clone(), Vec::new());
+        // A workspace whose repository has a language it recognises, and a
+        // repository git knows, has neither to say.
+        std::fs::create_dir_all(dir.join("repositories/work")).expect("repository");
+        std::fs::write(dir.join("repositories/work/Cargo.toml"), "[package]\n").expect("write");
+        let mut ok = App::new(Workspace::at(&dir), Vec::new());
         ok.setup = Some(crate::init::plan(&dir));
         let quiet = screen(&mut ok, 100, 30);
         assert!(!quiet.contains("not a git repository"), "{quiet}");
@@ -1994,7 +2089,7 @@ mod tests {
     fn a_slash_in_the_box_offers_the_commands_at_the_box() {
         // Anchored where the typing is, because that is where the eye already
         // is. Typing "/settings" used to start a run whose task was the word.
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         app.prompt = "/".into();
         assert!(app.slashing());
         let out = screen(&mut app, 100, 24);
@@ -2021,7 +2116,7 @@ mod tests {
 
     #[test]
     fn a_slash_that_names_nothing_says_so_rather_than_offering_everything() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         app.prompt = "/xyzzy".into();
         assert!(screen(&mut app, 100, 24).contains("no command by that name"));
         assert_eq!(app.slash_picked(), None);
@@ -2029,7 +2124,7 @@ mod tests {
 
     #[test]
     fn the_settings_show_what_is_this_threads_and_what_is_the_projects() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         app.thread.model = Some("a-model".into());
         app.thread.adapter = Some("claude-code".into());
         app.project_facts = vec![
@@ -2062,7 +2157,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch");
 
-        let mut app = App::new(dir.clone(), Vec::new());
+        let mut app = App::new(Workspace::at(&dir), Vec::new());
         app.remedy = crate::tui::remedy::Remedy::diagnose(&dir);
         app.open(Dialog::Fix);
 
@@ -2095,7 +2190,7 @@ mod tests {
 
     #[test]
     fn the_leaving_dialog_says_what_leaving_costs() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         app.open(Dialog::Leaving);
         let bare = screen(&mut app, 100, 20);
         assert!(bare.contains("Leave the browser?"), "{bare}");
@@ -2111,7 +2206,7 @@ mod tests {
 
     #[test]
     fn an_empty_thread_says_what_to_do_rather_than_showing_nothing() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         let out = screen(&mut app, 100, 18);
         assert!(out.contains("Write a task below"), "{out}");
         assert!(out.contains("reviewed by a different agent"), "{out}");
@@ -2125,7 +2220,7 @@ mod tests {
         // the directory, and in a repository with a history behind it that
         // reads as a browser that has lost it.
         let mut app = App::new(
-            PathBuf::from("/p"),
+            nowhere(),
             (0..8)
                 .map(|i| {
                     summary(
@@ -2163,7 +2258,7 @@ mod tests {
     fn the_regions_are_divided_by_rules_rather_than_by_space_alone() {
         // Four regions separated only by gaps read as one region with holes in
         // it, and the eye re-derives the boundaries every time it looks.
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         let out = screen(&mut app, 100, 18);
         let rules = out
             .lines()
@@ -2179,7 +2274,7 @@ mod tests {
 
     #[test]
     fn the_thread_shows_what_was_asked_and_what_each_agent_did() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         turn(
             &mut app,
             "add a wall-clock ceiling",
@@ -2215,7 +2310,7 @@ mod tests {
 
     #[test]
     fn a_turn_is_closed_by_a_rule_carrying_how_it_ended() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         turn(
             &mut app,
             "one",
@@ -2243,7 +2338,7 @@ mod tests {
         // The vendor's own account of why it stopped is long, and the rule it
         // has to fit on is one line. Cut to fit rather than dropped: dropping
         // it left a bare rule exactly where the reason should have been.
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         turn(
             &mut app,
             "write a long thing",
@@ -2285,7 +2380,7 @@ mod tests {
     fn who_is_speaking_is_a_colour_rather_than_something_to_read() {
         // A transcript should be scannable for "what did the reviewer say"
         // without reading it.
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         turn(
             &mut app,
             "one",
@@ -2303,7 +2398,7 @@ mod tests {
 
     #[test]
     fn the_transcript_marks_only_the_phase_that_is_still_going() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         working(
             &mut app,
             "do a thing",
@@ -2327,7 +2422,7 @@ mod tests {
 
     #[test]
     fn a_failing_check_shows_its_output_without_waiting_for_the_record() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         working(
             &mut app,
             "break the build",
@@ -2347,7 +2442,7 @@ mod tests {
     fn a_run_that_never_started_is_not_reported_as_a_refusal() {
         // "Refused" is a verdict on a change. A run that could not be launched
         // never produced one.
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         app.thread.turns.push(Turn {
             prompt: "do a thing".into(),
             steps: Vec::new(),
@@ -2362,7 +2457,7 @@ mod tests {
 
     #[test]
     fn a_live_transcript_follows_its_own_tail_until_somebody_scrolls_up() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         let mut steps = vec![Step::Entered(Phase::Authoring)];
         steps.extend((0..60).map(|i| said(Phase::Authoring, &format!("line {i}"))));
         working(&mut app, "a talkative agent", steps);
@@ -2381,7 +2476,7 @@ mod tests {
 
     #[test]
     fn the_breadcrumb_says_what_the_next_run_will_stand_on() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         // Nothing to say while the chain is still standing on HEAD.
         assert!(!screen(&mut app, 100, 18).contains("ostraka/"));
 
@@ -2394,7 +2489,7 @@ mod tests {
 
     #[test]
     fn the_box_says_where_typing_goes() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         // It opens with the keys, because the first thing anybody does here is
         // say what they want.
         let writing = screen(&mut app, 100, 18);
@@ -2411,7 +2506,7 @@ mod tests {
 
     #[test]
     fn a_task_of_several_lines_makes_the_box_taller() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         let one = app.prompt_height();
         app.prompt = "first\nsecond\nthird".into();
         assert!(app.prompt_height() > one);
@@ -2424,7 +2519,7 @@ mod tests {
     #[test]
     fn the_runs_dialog_lists_what_was_run_and_narrows_as_it_is_typed_into() {
         let mut app = App::new(
-            PathBuf::from("/p"),
+            nowhere(),
             vec![
                 summary("t1-20260907T000300Z", "add a test", Some(Outcome::Approved)),
                 summary(
@@ -2459,7 +2554,7 @@ mod tests {
     #[test]
     fn a_filter_matching_nothing_says_so_instead_of_looking_broken() {
         let mut app = App::new(
-            PathBuf::from("/p"),
+            nowhere(),
             vec![summary(
                 "t1-20260907T000300Z",
                 "alpha",
@@ -2476,7 +2571,7 @@ mod tests {
 
     #[test]
     fn the_agents_dialog_says_who_is_ready_and_who_was_chosen() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         app.agents = vec![
             Agent {
                 id: "claude-code".into(),
@@ -2506,7 +2601,7 @@ mod tests {
         // The reason someone looks a run up. A passing check's output is
         // noise; a failing one's is the whole point.
         let mut app = App::new(
-            PathBuf::from("/p"),
+            nowhere(),
             vec![summary(
                 "t1-20260907T000300Z",
                 "break the build",
@@ -2540,7 +2635,7 @@ mod tests {
     #[test]
     fn a_record_shows_the_reason_the_reviewer_gave() {
         let mut app = App::new(
-            PathBuf::from("/p"),
+            nowhere(),
             vec![summary(
                 "t1-20260907T000300Z",
                 "do a thing",
@@ -2562,7 +2657,7 @@ mod tests {
     #[test]
     fn the_record_tabs_name_every_pane_and_mark_the_one_showing() {
         let mut app = App::new(
-            PathBuf::from("/p"),
+            nowhere(),
             vec![summary("t1-20260907T000300Z", "a", Some(Outcome::Approved))],
         );
         app.screen = Screen::Record;
@@ -2600,7 +2695,7 @@ mod tests {
     #[test]
     fn the_diff_pane_shows_the_change_and_marks_its_sides() {
         let mut app = App::new(
-            PathBuf::from("/p"),
+            nowhere(),
             vec![summary(
                 "t1-20260907T000300Z",
                 "add a line",
@@ -2621,7 +2716,7 @@ mod tests {
     #[test]
     fn a_run_with_no_commit_names_both_reasons_rather_than_showing_an_empty_pane() {
         let mut app = App::new(
-            PathBuf::from("/p"),
+            nowhere(),
             vec![summary(
                 "t1-20260907T000300Z",
                 "add a line",
@@ -2639,7 +2734,7 @@ mod tests {
     #[test]
     fn scrolling_cannot_run_off_the_end_of_the_content() {
         let mut app = App::new(
-            PathBuf::from("/p"),
+            nowhere(),
             vec![summary(
                 "t1-20260907T000300Z",
                 "look at a diff",
@@ -2666,7 +2761,7 @@ mod tests {
     #[test]
     fn moving_stays_inside_the_list() {
         let mut app = App::new(
-            PathBuf::from("/p"),
+            nowhere(),
             vec![
                 summary("t1-20260907T000300Z", "a", None),
                 summary("t2-20260907T000100Z", "b", None),
@@ -2682,7 +2777,7 @@ mod tests {
 
     #[test]
     fn moving_in_an_empty_list_does_nothing_rather_than_panicking() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         app.move_by(1);
         app.move_by(-1);
         assert_eq!(app.selected, 0);
@@ -2691,7 +2786,7 @@ mod tests {
     #[test]
     fn a_filter_that_hides_the_selection_moves_it_rather_than_dangling() {
         let mut app = App::new(
-            PathBuf::from("/p"),
+            nowhere(),
             vec![
                 summary("t1-20260907T000300Z", "alpha", Some(Outcome::Approved)),
                 summary("t2-20260907T000200Z", "beta", Some(Outcome::Approved)),
@@ -2708,7 +2803,7 @@ mod tests {
     #[test]
     fn a_filter_matches_the_outcome_word_too() {
         let mut app = App::new(
-            PathBuf::from("/p"),
+            nowhere(),
             vec![
                 summary("t1-20260907T000300Z", "one", Some(Outcome::Approved)),
                 summary("t2-20260907T000200Z", "two", Some(Outcome::Rejected)),
@@ -2745,7 +2840,7 @@ mod tests {
     #[test]
     fn the_status_line_totals_each_backend_separately() {
         let mut app = App::new(
-            PathBuf::from("/p"),
+            nowhere(),
             vec![
                 with_usage(
                     summary("t1-20260907T000300Z", "one", Some(Outcome::Approved)),
@@ -2772,7 +2867,7 @@ mod tests {
         // estimate, and a status line that implied otherwise would be lying in
         // the one place this project cannot afford to.
         let mut app = App::new(
-            PathBuf::from("/p"),
+            nowhere(),
             vec![with_usage(
                 summary("t1-20260907T000300Z", "one", Some(Outcome::Approved)),
                 &[("copilot-cli", "reviewer", 10_600, Some(296), true)],
@@ -2785,7 +2880,7 @@ mod tests {
     fn a_backend_that_reports_nothing_is_absent_rather_than_zero() {
         // "Does not say" and "spent nothing" are different claims.
         let mut app = App::new(
-            PathBuf::from("/p"),
+            nowhere(),
             vec![summary(
                 "t1-20260907T000300Z",
                 "one",
@@ -2799,7 +2894,7 @@ mod tests {
 
     #[test]
     fn the_status_line_says_what_is_happening_while_a_run_is_going() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         working(&mut app, "do a thing", vec![Step::Entered(Phase::Gating)]);
         let out = screen(&mut app, 110, 18);
         assert!(out.contains("running"), "{out}");
@@ -2813,7 +2908,7 @@ mod tests {
     #[test]
     fn a_status_message_takes_the_line_from_the_totals_that_do_not_change() {
         let mut app = App::new(
-            PathBuf::from("/p"),
+            nowhere(),
             vec![summary(
                 "t1-20260907T000300Z",
                 "one",
@@ -2831,7 +2926,7 @@ mod tests {
 
     #[test]
     fn a_pending_leader_says_what_it_is_waiting_for() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         app.leader = true;
         let out = screen(&mut app, 120, 16);
         assert!(out.contains("ctrl-x"), "{out}");
@@ -2840,7 +2935,7 @@ mod tests {
 
     #[test]
     fn the_keys_dialog_lists_the_keys_rather_than_a_footer_doing_it_forever() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         app.open(Dialog::Keys);
         let out = screen(&mut app, 110, 26);
         assert!(out.contains("ctrl-x"), "{out}");
@@ -2850,7 +2945,7 @@ mod tests {
 
     #[test]
     fn the_command_palette_names_what_it_can_do_and_marks_the_pick() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         app.open(Dialog::Commands);
         let out = screen(&mut app, 110, 26);
         assert!(out.contains("promote run"), "{out}");
@@ -2864,7 +2959,7 @@ mod tests {
 
     #[test]
     fn a_palette_query_matching_nothing_says_so_rather_than_showing_an_empty_box() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         app.open(Dialog::Commands);
         app.query = "xyzzy".into();
         assert!(screen(&mut app, 110, 26).contains("no command matches that"));
@@ -2906,8 +3001,74 @@ mod tests {
     }
 
     #[test]
+    fn the_screen_fits_whatever_terminal_it_is_given() {
+        let mut app = App::new(
+            nowhere(),
+            vec![summary(
+                "t1-20260907T000300Z",
+                "a task with a reasonably long description on it",
+                Some(Outcome::Approved),
+            )],
+        );
+        for (width, height) in [(46, 12), (60, 16), (80, 24), (120, 40)] {
+            let out = screen(&mut app, width, height);
+            for line in out.lines() {
+                assert!(
+                    line.chars().count() <= width as usize,
+                    "a line ran past {width} columns:\n{out}"
+                );
+            }
+            assert_eq!(out.lines().count(), height as usize, "{out}");
+            // The one sentence somebody needs on first opening is on every
+            // one of them, whole rather than cut in half by the frame.
+            assert!(
+                out.contains("Write a task below"),
+                "at {width}x{height}:\n{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dialog_taller_than_the_terminal_keeps_the_way_out_of_it() {
+        // A dialog whose footer has been cut off the bottom is one somebody is
+        // stuck in.
+        let mut app = App::new(nowhere(), Vec::new());
+        app.open(Dialog::Keys);
+        let out = screen(&mut app, 70, 14);
+        assert!(
+            out.contains("esc closes this"),
+            "the way out was cut:\n{out}"
+        );
+        assert!(
+            out.contains("more line"),
+            "nothing said what was hidden:\n{out}"
+        );
+
+        // And where it fits, nothing is trimmed and nothing says it was.
+        let roomy = screen(&mut app, 70, 30);
+        assert!(roomy.contains("esc closes this"), "{roomy}");
+        assert!(!roomy.contains("more line"), "{roomy}");
+    }
+
+    #[test]
+    fn the_box_does_not_eat_a_short_terminal() {
+        let mut app = App::new(nowhere(), Vec::new());
+        app.prompt = (0..6).map(|i| format!("line {i}\n")).collect();
+        let tall = screen(&mut app, 80, 40);
+        assert!(tall.contains("line 5"), "{tall}");
+
+        // On twelve rows the box gives way to the work it is about.
+        let short = screen(&mut app, 80, 12);
+        assert!(
+            !short.contains("line 5"),
+            "the box took the screen:\n{short}"
+        );
+        assert!(short.contains("Write a task below"), "{short}");
+    }
+
+    #[test]
     fn a_terminal_too_short_for_the_chrome_says_so_rather_than_drawing_nothing() {
-        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut app = App::new(nowhere(), Vec::new());
         assert!(screen(&mut app, 60, 4).contains("too short"));
     }
 }

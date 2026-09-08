@@ -1,12 +1,11 @@
 //! `ostraka replay` — read a finished run back.
 
 use ostraka_runtime::orchestrator;
-use std::path::Path;
 
 type Outcome = Result<bool, Box<dyn std::error::Error>>;
 
-pub fn run(project: &Path, run_id: &str, json: bool) -> Outcome {
-    let records_root = project.join(".ostraka");
+pub fn run(workspace: &crate::workspace::Workspace, run_id: &str, json: bool) -> Outcome {
+    let records_root = workspace.records();
     let (record, events) = orchestrator::replay(&records_root, run_id)?;
 
     if json {

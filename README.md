@@ -17,25 +17,61 @@ agent writes, the project's checks actually execute, a *different* agent
 reviews, and the result is a replayable record.
 
 ```
-ostraka init       # write the files a project needs. Overwrites nothing
-ostraka check      # validate the project config and every adapter profile
+ostraka init       # write the workspace layout. Overwrites nothing
+ostraka check      # validate the workspace, its profiles and its repositories
 ostraka adapters   # list adapter profiles and whether each can run here
 ostraka run "..."  # isolate, execute, gate, review, record
 ostraka replay ID  # read a finished run back
-ostraka runs       # every run this project has recorded
+ostraka runs       # every run this workspace has recorded
 ostraka tui        # write tasks, watch them run, read them back
 ostraka prune      # remove worktrees finished runs left. Branches untouched
 ostraka promote ID # give an approved run a branch. Merges nothing
 ```
 
-`init` writes `ostraka.toml`, the adapter profiles, and two `.gitignore` lines,
-and works out the gate from what it finds: cargo's four checks for a Rust
-project, `npm test` for a Node one. When it cannot tell, it writes a check that
-**fails on purpose** — a gate declaring nothing would approve whatever a
-reviewer waved through, and finding that out later is the wrong way to learn it.
-Nothing already on disk is touched, so running it twice is a no-op and running
-it in a half-configured project completes it. `ostraka tui` offers the same
-thing on `i` when you open it somewhere that is not a project yet.
+## A workspace
+
+Ostraka works from a workspace rather than from inside the repository it is
+working on:
+
+```
+<workspace>/
+  .ostraka/
+    ostraka.toml      how runs are made here
+    adapters/*.toml   the vendor profiles this machine has
+    runs/             what happened                    (not committed)
+    worktrees/        where agents work                (not committed)
+  repositories/<name> what you cloned in to be worked on
+  notes/              what was worked out along the way
+```
+
+Everything the runtime owns is in one directory, so **a repository cloned in is
+left as its owner left it**: no config appears at its root, no worktrees are
+made inside it, and deleting the workspace deletes every trace of Ostraka
+having been used.
+
+**A repository may bring its own `ostraka.toml`.** How a project is verified is
+a property of that project — a workspace holding a Rust repository and a Node
+one cannot have one gate between them — so a repository's own file wins
+entirely where there is one, and the workspace's is the answer where there is
+not. `ostraka check` says which answered for each.
+
+**`notes/` is linked into every worktree.** An agent writing there writes into
+the real directory, so what it worked out survives the run that worked it out —
+including a refused one, which is the run whose notes are worth the most. The
+link points out of the checkout, so none of it lands in the diff a reviewer
+judges: notes are what was learned, the diff is what was changed.
+
+`init` writes that layout and works out the gate from what it finds — cargo's
+four checks for a Rust repository, `npm test` for a Node one. When it cannot
+tell, it writes a check that **fails on purpose**: a gate declaring nothing
+would approve whatever a reviewer waved through, and finding that out later is
+the wrong way to learn it. Nothing already on disk is touched, so running it
+twice is a no-op and running it in a half-finished workspace completes it.
+`ostraka tui` offers the same thing on `i`, and says there what setting up will
+not fix.
+
+Where the workspace holds one repository, nothing has to name it. Where it
+holds several, `--repository` does — and the browser has a picker on `w`.
 
 A real run — Claude Code wrote the change, Codex reviewed it, neither knew the
 other was involved:

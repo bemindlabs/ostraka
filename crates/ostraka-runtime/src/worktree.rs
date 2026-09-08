@@ -99,12 +99,24 @@ pub fn prepare(
     project: &Path,
     worktree: &Path,
     config: &ostraka_core::config::WorktreeConfig,
+    notes: Option<&Path>,
     ceiling: Option<std::time::Duration>,
 ) -> std::result::Result<Vec<String>, SetupProblem> {
     let mut done = Vec::new();
 
-    for name in &config.link {
-        let source = project.join(name);
+    // The workspace's notes, linked rather than copied and rather than
+    // configured. An agent writing here writes into the real directory, so
+    // what it worked out survives a refusal — and because the link points out
+    // of the checkout, none of it lands in the diff a reviewer judges. Notes
+    // are what was learned; the diff is what was changed.
+    let linked: Vec<(String, PathBuf)> = notes
+        .map(|path| ("notes".to_string(), path.to_path_buf()))
+        .into_iter()
+        .chain(config.link.iter().map(|n| (n.clone(), project.join(n))))
+        .collect();
+
+    for (name, source) in linked {
+        let name = &name;
         let target = worktree.join(name);
         if !source.exists() {
             // Said plainly rather than left to surface as an unrunnable check.
@@ -380,6 +392,7 @@ mod tests {
             &dir.join("wt"),
             &prep_config(&["node_modules"], None),
             None,
+            None,
         )
         .expect("prepares");
 
@@ -388,6 +401,58 @@ mod tests {
             std::fs::read_to_string(dir.join("wt/node_modules/marker")).expect("reads"),
             "here"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_workspaces_notes_reach_every_worktree_without_being_configured() {
+        // What an agent works out along the way should survive the run that
+        // worked it out — including a refused one, which is the run whose
+        // notes are worth the most.
+        let dir = scratch("notes");
+        std::fs::create_dir_all(dir.join("notes")).expect("notes");
+        std::fs::create_dir_all(dir.join("project")).expect("project");
+        std::fs::write(dir.join("notes/earlier.md"), "what was worked out").expect("write");
+
+        let done = prepare(
+            &dir.join("project"),
+            &dir.join("wt"),
+            &prep_config(&[], None),
+            Some(&dir.join("notes")),
+            None,
+        )
+        .expect("prepares");
+
+        assert_eq!(done, ["link notes"]);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("wt/notes/earlier.md")).expect("reads"),
+            "what was worked out"
+        );
+
+        // Written through the link, so it lands in the workspace rather than
+        // in a checkout that is about to be thrown away.
+        std::fs::write(dir.join("wt/notes/during.md"), "what was learned").expect("write");
+        assert!(
+            dir.join("notes/during.md").is_file(),
+            "the note stayed in the worktree"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_worktree_without_notes_is_prepared_anyway() {
+        // A workspace nobody has taken notes in is not a broken workspace.
+        let dir = scratch("no-notes");
+        std::fs::create_dir_all(dir.join("project")).expect("project");
+        let done = prepare(
+            &dir.join("project"),
+            &dir.join("wt"),
+            &prep_config(&[], None),
+            None,
+            None,
+        )
+        .expect("prepares");
+        assert!(done.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -401,6 +466,7 @@ mod tests {
             &dir.join("project"),
             &dir.join("wt/deep/deeper"),
             &prep_config(&["node_modules"], None),
+            None,
             None,
         )
         .expect("prepares");
@@ -416,6 +482,7 @@ mod tests {
             &dir.join("project"),
             &dir.join("wt"),
             &prep_config(&["node_modules"], None),
+            None,
             None,
         )
         .expect_err("must refuse");
@@ -436,6 +503,7 @@ mod tests {
             &dir.join("wt"),
             &prep_config(&["vendor"], None),
             None,
+            None,
         )
         .expect("prepares");
         assert!(
@@ -453,6 +521,7 @@ mod tests {
             &dir.join("wt"),
             &prep_config(&[], Some("echo no registry >&2; exit 1")),
             None,
+            None,
         )
         .expect_err("must refuse");
         assert_eq!(problem.step, "setup");
@@ -468,6 +537,7 @@ mod tests {
             &dir.join("wt"),
             &prep_config(&[], Some("pwd > where")),
             None,
+            None,
         )
         .expect("prepares");
         let ran_in = std::fs::read_to_string(dir.join("wt/where")).expect("reads");
@@ -482,6 +552,7 @@ mod tests {
             &dir.join("project"),
             &dir.join("wt"),
             &prep_config(&[], None),
+            None,
             None,
         )
         .expect("prepares");

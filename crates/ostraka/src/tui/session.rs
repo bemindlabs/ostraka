@@ -10,9 +10,9 @@
 //! be different on one of them.
 
 use crate::run;
+use crate::workspace::Workspace;
 use ostraka_core::record::Outcome;
 use ostraka_runtime::progress::{Channel, Phase, Step};
-use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -46,7 +46,7 @@ pub struct Session {
 
 impl Session {
     /// Starts a run on a thread and returns something to watch it with.
-    pub fn start(project: PathBuf, args: run::Args) -> Self {
+    pub fn start(workspace: Workspace, args: run::Args) -> Self {
         let prompt = args.prompt.clone();
         // Before the thread, not inside it. A stop asked for in the same
         // breath as the run — n, a task, enter, s — would otherwise be wiped
@@ -57,7 +57,7 @@ impl Session {
         let (done_out, done_in) = mpsc::channel();
 
         let worker = std::thread::spawn(move || {
-            let result = run::execute(&project, &args, Some(Box::new(Channel(steps_out))))
+            let result = run::execute(&workspace, &args, Some(Box::new(Channel(steps_out))))
                 .map(|report| Finished {
                     run_id: report.record.run_id.clone(),
                     outcome: report.record.outcome,
