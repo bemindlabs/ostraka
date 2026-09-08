@@ -164,7 +164,7 @@ pub fn list(records_root: &Path) -> Result<Vec<RunSummary>> {
 /// the runtime wrote into it. `None` means the run produced no commit, which is
 /// a true answer rather than a missing one.
 pub fn diff(repo: &Path, run_id: &str) -> Result<Option<String>> {
-    for branch in [format!("ostraka/{run_id}"), format!("promoted/{run_id}")] {
+    for branch in candidates(run_id) {
         if !head_is_this_run(repo, &branch, run_id)? {
             continue;
         }
@@ -181,6 +181,30 @@ pub fn diff(repo: &Path, run_id: &str) -> Result<Option<String>> {
         }
     }
     Ok(None)
+}
+
+/// The branch whose head is this run's commit, if it left one here.
+///
+/// The same two places [`diff`] reads from, and the same reason for checking
+/// the head rather than trusting the name: a refused run has a branch too — it
+/// was created before the agent started — whose head is the commit it branched
+/// from. Building on that would silently start from somewhere else's work.
+///
+/// `None` is a true answer: the run produced no commit, or produced it in a
+/// different repository.
+pub fn commit_branch(repo: &Path, run_id: &str) -> Result<Option<String>> {
+    for branch in candidates(run_id) {
+        if head_is_this_run(repo, &branch, run_id)? {
+            return Ok(Some(branch));
+        }
+    }
+    Ok(None)
+}
+
+/// Where a run's commit can be, in the order it is looked for. Named once
+/// because two lists of branch names drift, and the drift is silent.
+fn candidates(run_id: &str) -> [String; 2] {
+    [format!("ostraka/{run_id}"), format!("promoted/{run_id}")]
 }
 
 fn head_is_this_run(repo: &Path, branch: &str, run_id: &str) -> Result<bool> {
