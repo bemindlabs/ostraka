@@ -174,7 +174,22 @@ pub fn execute(
             .policy
             .timeout_secs
             .map(std::time::Duration::from_secs),
-    )?;
+    );
+    // A routing failure is the moment somebody most needs to know that a CLI
+    // this binary can drive is installed and simply has no profile here. The
+    // error already says what it checked; what it could not say is what it
+    // never looked at.
+    let routing = match routing {
+        Ok(routing) => routing,
+        Err(e) => {
+            let ids: Vec<String> = profiles.iter().map(|p| p.id.clone()).collect();
+            let found = crate::discover::unconfigured(&ids);
+            return Err(match crate::discover::suggestion(&found) {
+                Some(said) => format!("{e}\n\n{said}").into(),
+                None => Box::new(e) as Box<dyn std::error::Error>,
+            });
+        }
+    };
 
     let task = TaskSpec {
         // The process, and which run of it. Two runs sharing a task id collide
