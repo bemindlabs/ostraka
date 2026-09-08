@@ -712,7 +712,16 @@ fn fix_key(app: &mut App, code: KeyCode) {
             app.remedy = None;
             app.close();
         }
-        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter if !remedy.done() => {
+        // Only where there is something to run. A step with no commands is one
+        // the browser cannot take, and taking it would mark it done and change
+        // nothing at all.
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter
+            if !remedy.done()
+                && remedy
+                    .steps
+                    .get(remedy.at)
+                    .is_some_and(|step| !step.commands.is_empty()) =>
+        {
             remedy.take_step(&project);
             // Asked again rather than assumed: the steps are what somebody
             // believed would work, and whether they did is a question for the
@@ -1073,6 +1082,23 @@ mod tests {
 
     fn alt(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::ALT)
+    }
+
+    #[test]
+    fn a_step_the_browser_cannot_take_is_not_marked_done_by_pressing_y() {
+        let dir = std::env::temp_dir().join(format!("ostraka-yours-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+
+        let mut a = App::new(Workspace::at(&dir), Vec::new());
+        a.remedy = Some(remedy::Remedy::nothing_cloned(&dir));
+        a.open(Dialog::Fix);
+        handle(&mut a, press(KeyCode::Char('y')), Path::new("/p/.ostraka"));
+
+        let remedy = a.remedy.as_ref().expect("a remedy");
+        assert_eq!(remedy.at, 0, "a step nobody took was counted as taken");
+        assert!(!remedy.done());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -130,7 +130,8 @@ impl Workspace {
         }
         match found.len() {
             0 => Err(format!(
-                "no repositories in {} — clone what you want worked on into it",
+                "no repositories in {} — clone what you want worked on into it, \
+                 or `ostraka tui` starts one",
                 self.repositories_dir().display()
             )
             .into()),
