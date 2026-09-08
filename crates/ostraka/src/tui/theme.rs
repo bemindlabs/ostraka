@@ -46,6 +46,16 @@ pub const PASSED: &str = "\u{2713}";
 /// A run that was refused.
 pub const FAILED: &str = "\u{2717}";
 
+/// Frames for the mark that says something is still happening.
+///
+/// Braille rather than a spinning slash: the Braille Patterns block is neutral
+/// width, so it is one cell everywhere, and it turns without the jitter a
+/// four-frame ASCII spinner has. Which frame is showing is a function of the
+/// event loop's tick, not of the clock — drawing has to stay assertable.
+pub const SPINNER: [&str; 8] = [
+    "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
+];
+
 /// One column of air at the left edge, so nothing starts against the frame.
 pub const GUTTER: u16 = 1;
 

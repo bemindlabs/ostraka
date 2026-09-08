@@ -105,12 +105,10 @@ impl Plan {
     /// own `.gitignore` names four paths under `.ostraka/` rather than the
     /// directory, which is how that was found.
     pub fn runnable(&self) -> bool {
-        let there = |role| {
-            self.files
-                .iter()
-                .any(|f| f.role == role && f.action == Action::AlreadyThere)
-        };
-        there(Role::Config) && there(Role::Profile)
+        self.files
+            .iter()
+            .any(|f| f.role == Role::Config && f.action == Action::AlreadyThere)
+            && has_a_profile(&self.project)
     }
 }
 
@@ -158,6 +156,24 @@ pub fn plan(project: &Path) -> Plan {
         kind,
         files,
     }
+}
+
+/// Whether `adapters/` holds a profile of any name.
+///
+/// Asked of the directory rather than of the plan, and the difference is the
+/// whole point: a plan lists the three profiles `init` would write, so a
+/// project that brought its own under other names has every planned profile
+/// missing while being perfectly able to run. Reading that as "not set up yet"
+/// put the opening screen over a working project — and then a stray keystroke
+/// on that screen wrote three profiles into it that nobody had asked for.
+fn has_a_profile(project: &Path) -> bool {
+    std::fs::read_dir(project.join("adapters"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .any(|e| e.path().extension().is_some_and(|kind| kind == "toml"))
+        })
+        .unwrap_or(false)
 }
 
 fn planned(project: &Path, relative: &str, contents: String, role: Role) -> Planned {
@@ -423,6 +439,31 @@ mod tests {
         let plan = plan(&dir);
         assert!(!plan.complete());
         assert!(!plan.runnable());
+    }
+
+    #[test]
+    fn a_project_that_brought_its_own_adapter_profiles_is_runnable() {
+        // The plan wants three profiles by name. A project with one profile
+        // under a name of its own has none of them, and runs perfectly well —
+        // reading that as "not set up yet" is how the opening screen ended up
+        // over a working project, with a stray key on it writing three
+        // profiles nobody had asked for.
+        let dir = scratch();
+        std::fs::write(dir.join("ostraka.toml"), "# mine\n").expect("write");
+        std::fs::create_dir_all(dir.join("adapters")).expect("adapters");
+        std::fs::write(dir.join("adapters/mine.toml"), "id = \"mine\"\n").expect("write");
+
+        let plan = plan(&dir);
+        assert!(plan.runnable(), "{:?}", plan.files);
+        assert!(!plan.complete(), "init should still offer its own three");
+    }
+
+    #[test]
+    fn an_empty_adapters_directory_is_not_a_profile() {
+        let dir = scratch();
+        std::fs::write(dir.join("ostraka.toml"), "# mine\n").expect("write");
+        std::fs::create_dir_all(dir.join("adapters")).expect("adapters");
+        assert!(!plan(&dir).runnable());
     }
 
     #[test]

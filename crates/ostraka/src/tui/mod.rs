@@ -11,6 +11,7 @@
 //! way and be broken another.
 
 mod command;
+mod session;
 mod theme;
 mod view;
 
@@ -22,10 +23,11 @@ use ostraka_runtime::{index, orchestrator};
 use ratatui::crossterm::event::{
     self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
 };
+use session::Session;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use view::{App, Detail, Dialog, Focus};
+use view::{App, Detail, Dialog, Focus, Typing};
 
 type Outcome = Result<bool, Box<dyn std::error::Error>>;
 
@@ -74,6 +76,11 @@ fn event_loop(
     records_root: &Path,
 ) -> std::io::Result<()> {
     while !app.quit {
+        // The tick is what the spinner turns on. Drawing stays a function of
+        // state that way, and a screen nobody can assert on is a screen that
+        // quietly stops saying what it used to.
+        app.tick = app.tick.wrapping_add(1);
+        take_stock(app, records_root);
         terminal.draw(|frame| view::draw(frame, app))?;
         if !event::poll(TICK)? {
             continue;
@@ -86,7 +93,75 @@ fn event_loop(
         }
         handle(app, key, records_root);
     }
+
+    // Never walk away from a run. Leaving here with a vendor still writing
+    // into a worktree is the thing Ctrl-C was taught to prevent, and closing a
+    // window is not a better reason to do it than pressing a key was.
+    if let Some(session) = app.session.as_mut() {
+        session.stop();
+        session.settle();
+    }
     Ok(())
+}
+
+/// Takes whatever the run has said since the last frame.
+///
+/// Called before drawing rather than after a key, because a run says things
+/// while nobody is pressing anything — which is most of the time it takes.
+fn take_stock(app: &mut App, records_root: &Path) {
+    let ended = match app.session.as_mut() {
+        Some(session) => {
+            let was_live = session.live();
+            session.drain();
+            was_live && !session.live()
+        }
+        None => false,
+    };
+    if ended {
+        finished_run(app, records_root);
+    }
+    // Asked to leave while something was running: the browser stays up until
+    // the run it started has actually stopped, so the last thing on screen is
+    // what happened rather than a terminal that froze on its way out.
+    if app.leaving && !app.situation().running {
+        app.quit = true;
+    }
+}
+
+/// What to do about a run that has just ended.
+fn finished_run(app: &mut App, records_root: &Path) {
+    let (summary, run_id) = match app.session.as_ref() {
+        Some(session) => (
+            session
+                .finished
+                .as_ref()
+                .map(|f| f.summary.clone())
+                .or_else(|| session.failed.clone()),
+            session.finished.as_ref().map(|f| f.run_id.clone()),
+        ),
+        None => (None, None),
+    };
+    app.status = summary;
+    app.follow = true;
+
+    // The record exists now, so the listing can show it.
+    if let Ok(runs) = index::list(records_root) {
+        app.runs = runs;
+        app.refilter();
+    }
+    if let Some(id) = run_id {
+        if let Some(at) = app
+            .matching
+            .iter()
+            .position(|i| app.runs.get(*i).is_some_and(|run| run.run_id == id))
+        {
+            // Selected, so that closing the transcript lands on the run it was
+            // about rather than on whatever was selected before it started.
+            app.selected = at;
+            app.forget_detail();
+            load_detail(app, records_root);
+        }
+    }
 }
 
 fn handle(app: &mut App, key: KeyEvent, records_root: &Path) {
@@ -98,15 +173,14 @@ fn handle(app: &mut App, key: KeyEvent, records_root: &Path) {
         dialog_key(app, key.code, records_root);
         return;
     }
-    if app.filtering {
-        filter_key(app, key.code);
-        load_detail(app, records_root);
+    if app.typing.is_some() {
+        typing_key(app, key.code, records_root);
         return;
     }
     if app.leader {
         app.leader = false;
         if let KeyCode::Char(c) = key.code {
-            if let Some(command) = Command::offered(app.setup.is_some())
+            if let Some(command) = Command::offered(app.situation())
                 .into_iter()
                 .find(|command| command.leader() == c)
             {
@@ -125,18 +199,22 @@ fn handle(app: &mut App, key: KeyEvent, records_root: &Path) {
         KeyCode::Char('k') if control => app.open(Dialog::Commands),
         KeyCode::Char('x') if control => app.leader = true,
         KeyCode::Char('?') => app.open(Dialog::Keys),
-        KeyCode::Char('q') => app.quit = true,
+        KeyCode::Char('q') => leave(app),
         // Escape gives back whatever it can before it gives up the browser: a
-        // filter, then a pane on a narrow terminal, and only then the screen.
+        // finished transcript, then a filter, then a pane on a narrow
+        // terminal, and only then the screen.
         KeyCode::Esc => {
-            if !app.filter.is_empty() {
+            if app.session.as_ref().is_some_and(|s| !s.live()) {
+                app.session = None;
+                app.scroll = 0;
+            } else if !app.filter.is_empty() {
                 app.filter.clear();
                 app.refilter();
                 load_detail(app, records_root);
             } else if app.focus == Focus::Detail {
                 app.focus = Focus::List;
             } else {
-                app.quit = true;
+                leave(app);
             }
         }
         KeyCode::Enter => app.focus = Focus::Detail,
@@ -153,6 +231,7 @@ fn handle(app: &mut App, key: KeyEvent, records_root: &Path) {
             load_detail(app, records_root);
         }
         KeyCode::Char('G') | KeyCode::End => {
+            app.follow = true;
             app.move_by(app.matching.len() as isize);
             load_detail(app, records_root);
         }
@@ -162,6 +241,8 @@ fn handle(app: &mut App, key: KeyEvent, records_root: &Path) {
             perform(app, Command::NextPane, records_root)
         }
         KeyCode::Char('/') => perform(app, Command::Filter, records_root),
+        KeyCode::Char('n') => perform(app, Command::NewRun, records_root),
+        KeyCode::Char('s') => perform(app, Command::Stop, records_root),
         KeyCode::Char('i') => perform(app, Command::Setup, records_root),
         KeyCode::Char('r') => perform(app, Command::Reload, records_root),
         KeyCode::Char('p') => perform(app, Command::Promote, records_root),
@@ -175,8 +256,26 @@ fn handle(app: &mut App, key: KeyEvent, records_root: &Path) {
 /// keeps them from drifting into three slightly different versions of promote.
 fn perform(app: &mut App, command: Command, records_root: &Path) {
     app.status = None;
+
+    // The list is the authority for the bare keys too, not only for the two
+    // routes that read it to draw themselves. Without this, `n` during a run
+    // would open the box the palette had already decided not to offer, and
+    // Enter would replace the session — abandoning the thread still writing
+    // into a worktree, which is the one thing this browser must not do.
+    if !Command::offered(app.situation()).contains(&command) {
+        app.status = Some(unavailable(app, command));
+        return;
+    }
+
     match command {
-        Command::Filter => app.filtering = true,
+        Command::NewRun => app.typing = Some(Typing::Prompt),
+        Command::Stop => {
+            if let Some(session) = app.session.as_mut() {
+                session.stop();
+            }
+            app.status = Some("asked the agent to stop".to_string());
+        }
+        Command::Filter => app.typing = Some(Typing::Filter),
         Command::NextPane => {
             app.detail = app.detail.next();
             app.scroll = 0;
@@ -194,6 +293,22 @@ fn perform(app: &mut App, command: Command, records_root: &Path) {
         Command::Setup => initialise(app, records_root),
         Command::Keys => app.open(Dialog::Keys),
         Command::Quit => app.quit = true,
+    }
+}
+
+/// Why a command is not on offer, said as the reason rather than as a refusal.
+fn unavailable(app: &App, command: Command) -> String {
+    let situation = app.situation();
+    match command {
+        Command::NewRun if situation.running => {
+            "a run is already going \u{2014} s asks it to stop".to_string()
+        }
+        Command::NewRun => {
+            "this directory cannot run anything yet \u{2014} i sets it up".to_string()
+        }
+        Command::Stop => "nothing is running".to_string(),
+        Command::Setup => "this directory is already set up".to_string(),
+        other => format!("{} is not available here", other.name()),
     }
 }
 
@@ -225,28 +340,78 @@ fn dialog_key(app: &mut App, code: KeyCode, records_root: &Path) {
     }
 }
 
-/// Keys while the filter is being typed.
+/// Keys while something is being written into the input line.
 ///
-/// Every command key is a filter character here, deliberately: a filter that
-/// swallowed `q` and then quit on the next keystroke would be worse than one
-/// that needs an explicit way out. Enter keeps it, Escape clears it.
-fn filter_key(app: &mut App, code: KeyCode) {
-    match code {
-        KeyCode::Esc => {
+/// Every command key is a character here, deliberately: a box that swallowed
+/// `q` and then quit on the next keystroke would be worse than one that needs
+/// an explicit way out.
+fn typing_key(app: &mut App, code: KeyCode, records_root: &Path) {
+    let Some(mode) = app.typing else { return };
+    match (mode, code) {
+        // A filter is cheap to retype and expensive to leave on by accident,
+        // so escape clears it.
+        (Typing::Filter, KeyCode::Esc) => {
             app.filter.clear();
-            app.filtering = false;
+            app.typing = None;
             app.refilter();
         }
-        KeyCode::Enter => app.filtering = false,
-        KeyCode::Backspace => {
+        (Typing::Filter, KeyCode::Enter) => app.typing = None,
+        (Typing::Filter, KeyCode::Backspace) => {
             app.filter.pop();
             app.refilter();
         }
-        KeyCode::Char(c) => {
+        (Typing::Filter, KeyCode::Char(c)) => {
             app.filter.push(c);
             app.refilter();
         }
+        // A task is the opposite: it took thought to write, so escape sets it
+        // aside and `n` brings it back rather than starting from nothing.
+        (Typing::Prompt, KeyCode::Esc) => app.typing = None,
+        (Typing::Prompt, KeyCode::Enter) => start_run(app),
+        (Typing::Prompt, KeyCode::Backspace) => {
+            app.prompt.pop();
+        }
+        (Typing::Prompt, KeyCode::Char(c)) => app.prompt.push(c),
         _ => {}
+    }
+    if mode == Typing::Filter {
+        load_detail(app, records_root);
+    }
+}
+
+/// Starts the run that has been written into the input line.
+///
+/// Through `run::execute`, which is what `ostraka run` calls: the gate, the
+/// routing and the record are the same whether the task arrived from a shell
+/// or from a keystroke.
+fn start_run(app: &mut App) {
+    let prompt = app.prompt.trim().to_string();
+    app.typing = None;
+    if prompt.is_empty() {
+        // An empty task would be a run whose diff nobody can explain. Say so
+        // rather than starting one and refusing it two minutes later.
+        app.status = Some("nothing to run — write what the agent should do".to_string());
+        return;
+    }
+    app.prompt.clear();
+    app.status = None;
+    app.follow = true;
+    app.scroll = 0;
+    app.session = Some(Session::start(
+        app.project.clone(),
+        crate::run::Args::for_task(prompt),
+    ));
+}
+
+/// Leaving, which waits for a run rather than abandoning one.
+fn leave(app: &mut App) {
+    match app.session.as_mut().filter(|s| s.live()) {
+        Some(session) => {
+            session.stop();
+            app.leaving = true;
+            app.status = Some("stopping the run — the browser closes when it has".to_string());
+        }
+        None => app.quit = true,
     }
 }
 
@@ -412,11 +577,125 @@ mod tests {
         assert!(!a.quit);
     }
 
+    fn live(app: &mut App) {
+        app.session = Some(Session::recorded(
+            "do a thing",
+            vec![ostraka_runtime::progress::Step::Entered(
+                ostraka_runtime::progress::Phase::Authoring,
+            )],
+            None,
+        ));
+    }
+
+    #[test]
+    fn typing_a_task_does_not_run_commands_by_their_letters() {
+        let mut a = app();
+        handle(&mut a, press(KeyCode::Char('n')), Path::new("/p/.ostraka"));
+        assert_eq!(a.typing, Some(Typing::Prompt));
+
+        for c in "quit".chars() {
+            handle(&mut a, press(KeyCode::Char(c)), Path::new("/p/.ostraka"));
+        }
+        assert_eq!(a.prompt, "quit");
+        assert!(!a.quit, "typing a task quit the browser");
+    }
+
+    #[test]
+    fn escape_sets_a_task_aside_rather_than_losing_it() {
+        // It took thought to write. Coming back to it is the normal way of
+        // working, and a box that cleared on escape would punish looking
+        // something up mid-sentence.
+        let mut a = app();
+        handle(&mut a, press(KeyCode::Char('n')), Path::new("/p/.ostraka"));
+        for c in "half a thought".chars() {
+            handle(&mut a, press(KeyCode::Char(c)), Path::new("/p/.ostraka"));
+        }
+        handle(&mut a, press(KeyCode::Esc), Path::new("/p/.ostraka"));
+        assert_eq!(a.typing, None);
+        assert_eq!(a.prompt, "half a thought");
+
+        handle(&mut a, press(KeyCode::Char('n')), Path::new("/p/.ostraka"));
+        assert_eq!(a.prompt, "half a thought", "the task was lost");
+    }
+
+    #[test]
+    fn an_empty_task_is_not_run() {
+        // A run with no task produces a diff nobody can explain, and the
+        // reviewer would be asked what it thinks of it.
+        let mut a = app();
+        handle(&mut a, press(KeyCode::Char('n')), Path::new("/p/.ostraka"));
+        handle(&mut a, press(KeyCode::Char(' ')), Path::new("/p/.ostraka"));
+        handle(&mut a, press(KeyCode::Enter), Path::new("/p/.ostraka"));
+        assert!(a.session.is_none(), "an empty task started a run");
+        assert!(a.status.is_some(), "and said nothing about why not");
+    }
+
+    #[test]
+    fn quitting_while_a_run_is_going_stops_it_before_leaving() {
+        // Walking away here leaves a vendor writing into a worktree, which is
+        // the thing Ctrl-C was taught to prevent.
+        let mut a = app();
+        live(&mut a);
+        handle(&mut a, press(KeyCode::Char('q')), Path::new("/p/.ostraka"));
+
+        assert!(!a.quit, "the browser left while a run was going");
+        assert!(a.leaving);
+        assert!(a.session.as_ref().expect("a session").stopping);
+        ostraka_adapter::interrupt::clear();
+    }
+
+    #[test]
+    fn escape_closes_a_finished_transcript_before_anything_else() {
+        let mut a = app();
+        a.session = Some(Session::recorded(
+            "do a thing",
+            Vec::new(),
+            Some(session::Finished {
+                run_id: "t1-20260907T000300Z".into(),
+                outcome: None,
+                summary: "refused".into(),
+            }),
+        ));
+        handle(&mut a, press(KeyCode::Esc), Path::new("/p/.ostraka"));
+        assert!(a.session.is_none());
+        assert!(!a.quit, "escape quit while there was a transcript to close");
+    }
+
+    #[test]
+    fn a_second_run_cannot_be_started_over_the_first_by_any_route() {
+        // The palette and the leader read the command list, so they were never
+        // going to offer this. The bare key does not read anything, and it is
+        // the one that would have replaced a live session and walked away from
+        // the thread behind it.
+        let mut a = app();
+        live(&mut a);
+        handle(&mut a, press(KeyCode::Char('n')), Path::new("/p/.ostraka"));
+
+        assert_eq!(a.typing, None, "the box opened for a run that cannot start");
+        assert!(a.session.as_ref().expect("a session").live());
+        assert!(
+            a.status
+                .as_deref()
+                .is_some_and(|s| s.contains("already going")),
+            "{:?}",
+            a.status
+        );
+        assert!(!Command::offered(a.situation()).contains(&Command::NewRun));
+        ostraka_adapter::interrupt::clear();
+    }
+
+    #[test]
+    fn stopping_when_nothing_is_running_says_so_rather_than_doing_nothing() {
+        let mut a = app();
+        handle(&mut a, press(KeyCode::Char('s')), Path::new("/p/.ostraka"));
+        assert_eq!(a.status.as_deref(), Some("nothing is running"));
+    }
+
     #[test]
     fn the_filter_swallows_every_command_key_while_it_is_open() {
         let mut a = app();
         handle(&mut a, press(KeyCode::Char('/')), Path::new("/p/.ostraka"));
-        assert!(a.filtering);
+        assert_eq!(a.typing, Some(Typing::Filter));
 
         for c in "qp".chars() {
             handle(&mut a, press(KeyCode::Char(c)), Path::new("/p/.ostraka"));

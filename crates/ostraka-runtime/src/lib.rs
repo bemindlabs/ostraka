@@ -7,6 +7,7 @@
 pub mod gate;
 pub mod index;
 pub mod orchestrator;
+pub mod progress;
 pub mod promote;
 pub mod record;
 pub mod review;

@@ -118,6 +118,7 @@ pub enum Refusal {
 pub fn run_checks(
     spec: &GateSpec,
     worktree: &Path,
+    finished: &mut dyn FnMut(&CheckRecord),
 ) -> std::result::Result<AllChecksPassed, Refusal> {
     let mut records = Vec::with_capacity(spec.checks.len());
     let mut failed = Vec::new();
@@ -125,6 +126,11 @@ pub fn run_checks(
     let ceiling = spec.timeout_secs.map(Duration::from_secs);
     for check in &spec.checks {
         let record = run_one(check, worktree, ceiling);
+        // Reported one at a time, as each finishes. The gate is usually the
+        // longest part of a run — four cargo checks on this repository take
+        // twelve seconds — and a caller that only learns the outcome at the end
+        // has nothing to show for those twelve seconds but a still screen.
+        finished(&record);
         if check.required && !record.passed() {
             failed.push(check.name.clone());
         }
@@ -362,7 +368,7 @@ mod tests {
         let mut spec = spec(&[("hang", "sleep 120", true)]);
         spec.timeout_secs = Some(1);
         let started = Instant::now();
-        let refusal = run_checks(&spec, Path::new(".")).expect_err("must refuse");
+        let refusal = run_checks(&spec, Path::new("."), &mut ignore).expect_err("must refuse");
         assert!(
             started.elapsed() < Duration::from_secs(20),
             "the ceiling was not enforced"
@@ -384,15 +390,19 @@ mod tests {
     fn a_check_that_finishes_inside_the_ceiling_is_untouched() {
         let mut spec = spec(&[("quick", "echo fine", true)]);
         spec.timeout_secs = Some(30);
-        let passed = run_checks(&spec, Path::new(".")).expect("passes");
+        let passed = run_checks(&spec, Path::new("."), &mut ignore).expect("passes");
         assert!(passed.records()[0].passed());
         assert!(!passed.records()[0].stderr.contains("killed"));
     }
 
     #[test]
     fn checks_actually_run_and_their_output_is_captured() {
-        let passed = run_checks(&spec(&[("echo", "echo hello", true)]), Path::new("."))
-            .expect("check passes");
+        let passed = run_checks(
+            &spec(&[("echo", "echo hello", true)]),
+            Path::new("."),
+            &mut ignore,
+        )
+        .expect("check passes");
         let record = &passed.records()[0];
         assert!(record.passed());
         assert!(record.stdout.contains("hello"));
@@ -400,8 +410,12 @@ mod tests {
 
     #[test]
     fn a_failing_required_check_refuses_the_gate() {
-        let refusal = run_checks(&spec(&[("fail", "exit 1", true)]), Path::new("."))
-            .expect_err("must refuse");
+        let refusal = run_checks(
+            &spec(&[("fail", "exit 1", true)]),
+            Path::new("."),
+            &mut ignore,
+        )
+        .expect_err("must refuse");
         match refusal {
             Refusal::ChecksFailed { failed, records } => {
                 assert_eq!(failed, ["fail"]);
@@ -418,6 +432,7 @@ mod tests {
         let passed = run_checks(
             &spec(&[("advisory", "exit 3", false), ("real", "true", true)]),
             Path::new("."),
+            &mut ignore,
         )
         .expect("optional failure does not block");
         assert_eq!(passed.records().len(), 2);
@@ -429,13 +444,39 @@ mod tests {
         let refusal = run_checks(
             &spec(&[("missing", "definitely-not-a-real-binary-xyz", true)]),
             Path::new("."),
+            &mut ignore,
         )
         .expect_err("must refuse");
         assert!(matches!(refusal, Refusal::ChecksFailed { .. }));
     }
 
+    /// For the tests that are not about who is watching.
+    fn ignore(_: &CheckRecord) {}
+
+    #[test]
+    fn each_check_is_reported_as_it_finishes_rather_than_all_at_the_end() {
+        // The gate is the longest part of a run. A caller that learns the
+        // outcome only at the end has nothing to show for that time.
+        let mut seen: Vec<String> = Vec::new();
+        let refusal = run_checks(
+            &spec(&[
+                ("first", "true", true),
+                ("second", "exit 1", true),
+                ("third", "true", true),
+            ]),
+            Path::new("."),
+            &mut |record| seen.push(format!("{} {}", record.name, record.passed())),
+        )
+        .expect_err("the second check fails");
+
+        assert_eq!(seen, ["first true", "second false", "third true"]);
+        // Reported even for the run that is about to be refused: the failing
+        // check's output is the thing someone is waiting to read.
+        assert!(matches!(refusal, Refusal::ChecksFailed { .. }));
+    }
+
     fn passing_checks() -> AllChecksPassed {
-        run_checks(&spec(&[("ok", "true", true)]), Path::new(".")).expect("passes")
+        run_checks(&spec(&[("ok", "true", true)]), Path::new("."), &mut ignore).expect("passes")
     }
 
     #[test]

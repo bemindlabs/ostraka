@@ -5,6 +5,7 @@
 //! [`crate::gate::MergeToken`], which this module cannot construct.
 
 use crate::gate::{self, MergeToken, Refusal};
+use crate::progress::{Phase, Watcher};
 use crate::record::RunLog;
 use crate::review;
 use crate::route::Routing;
@@ -39,6 +40,10 @@ impl RunReport {
 /// `records_root` is where run logs are written — `.ostraka/` by convention.
 /// The worktree is left in place on completion so the diff can be inspected;
 /// removing it is the caller's decision, not this function's.
+///
+/// `watcher` is told what is happening while it happens, for a caller that has
+/// a screen to keep up to date. It cannot change any of it: see
+/// [`crate::progress`]. `None` behaves exactly as this function always has.
 pub fn run_task(
     repo: &Path,
     config: &Config,
@@ -46,9 +51,11 @@ pub fn run_task(
     task: &TaskSpec,
     reviewer_identity: &ActorId,
     records_root: &Path,
+    watcher: Option<Box<dyn Watcher>>,
 ) -> Result<RunReport> {
     let run_id = format!("{}-{}", task.id, now_rfc3339().replace([':', '-'], ""));
-    let mut log = RunLog::create(records_root, &run_id)?;
+    let mut log = RunLog::create(records_root, &run_id)?.watched_by(watcher);
+    log.enter(Phase::Isolating);
 
     let mut record = RunRecord {
         run_id: run_id.clone(),
@@ -75,6 +82,7 @@ pub fn run_task(
     // 2. Make the checkout usable. A worktree is a fresh checkout, so whatever
     //    git ignores is missing from it — and the agent needs the project's
     //    tools as much as the gate does.
+    log.enter(Phase::Preparing);
     match worktree::prepare(
         repo,
         wt.path(),
@@ -106,6 +114,7 @@ pub fn run_task(
 
     // 3. Execute, streaming events into the log as they arrive so an
     //    interrupted run still leaves an account of how far it got.
+    log.enter(Phase::Authoring);
     let author = drive(routing.author.as_ref(), task, wt.path(), &mut log)?;
     record.usage.extend(author.usage.clone());
 
@@ -183,7 +192,10 @@ pub fn run_task(
     }
 
     // 4. Gate. These commands actually run; their output is captured.
-    let passed = match gate::run_checks(&config.gate, wt.path()) {
+    log.enter(Phase::Gating);
+    let passed = match gate::run_checks(&config.gate, wt.path(), &mut |record| {
+        log_checked(&mut log, record)
+    }) {
         Ok(p) => p,
         Err(refusal) => {
             // Keep the evidence. A failed run is the one someone will need to
@@ -205,6 +217,7 @@ pub fn run_task(
     record.checks = passed.records().to_vec();
 
     // 5. Review, by an adapter that is not the one that wrote the change.
+    log.enter(Phase::Reviewing);
     let diff = worktree::diff(wt.path())?;
     let (verdict, reviewer_usage) =
         collect_verdict(routing.reviewer.as_ref(), task, &diff, wt.path(), &mut log)?;
@@ -252,6 +265,14 @@ pub fn run_task(
         }
         Err(refusal) => finish(log, record, Outcome::Rejected, None, Some(refusal), diff),
     }
+}
+
+/// Reports one finished check.
+///
+/// A free function rather than a closure body so the borrow of the log inside
+/// `run_checks` stays a single obvious line.
+fn log_checked(log: &mut RunLog, record: &ostraka_core::gate::CheckRecord) {
+    log.checked(record);
 }
 
 /// Runs an adapter to completion, logging every event.

@@ -57,11 +57,11 @@ enum Commands {
         prompt: String,
 
         /// Identity accountable for the change.
-        #[arg(long, default_value = "author")]
+        #[arg(long, default_value = run::AUTHOR)]
         author: String,
 
         /// Identity that reviews it. Must differ from the author.
-        #[arg(long, default_value = "reviewer")]
+        #[arg(long, default_value = run::REVIEWER)]
         reviewer: String,
 
         /// Adapter profile that writes the change.
@@ -73,7 +73,7 @@ enum Commands {
         review_adapter: Option<String>,
 
         /// Git ref the worktree branches from.
-        #[arg(long, default_value = "HEAD")]
+        #[arg(long, default_value = run::BASE_REF)]
         base_ref: String,
 
         /// Model hint passed through to the adapter.

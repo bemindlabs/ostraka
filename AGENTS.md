@@ -210,6 +210,16 @@ had a line to add. A missing ignore line is untidy; it is not a directory
 nobody has set up. `Planned` carries a `Role` so that distinction is a field
 rather than a filename compared against a literal.
 
+The second half of that lesson cost more. `runnable` first asked whether the
+plan's *own* profile entries were present — and a plan lists the three profiles
+`init` would write, so a project that brought its own under other names had
+every one of them missing while running perfectly well. The opening screen went
+up over a working project, a stray keystroke on it took the offer, and three
+vendor profiles nobody had asked for landed in a directory that already had
+two. Whether a project has a profile is a question about the directory, so it
+is asked of the directory. Found by driving the browser against a scratch
+project rather than by reasoning about it.
+
 **The desktop application is a second view, not a second product.** `ostraka-app`
 draws with `egui` in a window `eframe` opens: pure Rust, no web runtime, no
 second toolchain — which is the same condition that let `ratatui` in, and the
@@ -237,9 +247,40 @@ Drawing is a pure function of state, so the screen is asserted against a
 rendered buffer rather than looked at. The browser holds no logic: the listing
 is `runtime::index`, the detail is `orchestrator::replay`, and promoting goes
 through `promote::promote` like every other caller — pressing a key cannot
-approve anything. It shows finished runs only; a live view of a run in progress
-needs the orchestrator to stream while something else renders, which is the
-parallel-execution problem and waits for the same answer.
+approve anything.
+
+**It shows a run in progress, and that did not need async.** This reverses a
+decision recorded here — "it shows finished runs only; a live view needs the
+orchestrator to stream while something else renders, which is the
+parallel-execution problem and waits for the same answer" — and the reason it
+gave turned out to be wrong. Rendering *one* run while it happens needs a
+thread and two channels, both `std`. Several runs at once still needs the
+answer that paragraph was waiting for, and is still not offered: the command
+list refuses a second run while one is going, by every route including the bare
+key.
+
+The mechanism is `runtime::progress`. A `Watcher` is handed a `Step` and
+returns nothing, which is the whole guarantee: watching cannot become steering,
+and a screen that has gone away cannot stall a run — the channel watcher drops
+what it cannot deliver. `RunLog` carries it, because every `append` was already
+the sentence "something happened" and a second parameter threaded through six
+functions to say it twice is how the two drift apart. `gate::run_checks`
+reports each check as it finishes, because the gate is the longest part of a run
+— twelve seconds on this repository — and a caller that learns the outcome only
+at the end has nothing to show for that time.
+
+`run::execute` is the one path. `ostraka run` calls it and so does the browser,
+so a run started by typing a task into a box is the run a shell starts: same
+routing, same gate, same record. Two paths would be two pipelines inside one
+release. The browser starting a run does not let it approve one — the gate is
+where that is decided, and it is on the far side of `execute` either way.
+
+Quitting waits. A browser that exited while a vendor was still writing into a
+worktree would undo the thing Ctrl-C was taught to prevent, so `q` during a run
+asks it to stop and stays up until it has. Verified end to end against shell
+script vendors: a run driven from the browser streams, a stopped one records
+`Interrupted`, and quitting mid-run leaves neither an orphan process nor a run
+without a record.
 
 **One box, sixteen colours, and one list of commands.** The screen is separated
 by space and a one-column gutter rather than by borders — a browser that boxes

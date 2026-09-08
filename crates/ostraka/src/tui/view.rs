@@ -16,11 +16,13 @@
 //! where typing goes.
 
 use crate::init::{Action, Plan};
-use crate::tui::command::Command;
+use crate::tui::command::{Command, Situation};
+use crate::tui::session::Session;
 use crate::tui::theme;
-use ostraka_core::gate::Verdict;
+use ostraka_core::gate::{CheckRecord, Verdict};
 use ostraka_core::record::{Event, Outcome, RunRecord};
 use ostraka_runtime::index::{self, BackendUsage, RunSummary};
+use ostraka_runtime::progress::{Phase, Step};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier};
@@ -82,6 +84,16 @@ pub enum Dialog {
     Commands,
 }
 
+/// What the input line is taking, when it is taking anything.
+///
+/// One box with two jobs, and it says which one it is doing. A filter narrows
+/// what is already there; a prompt starts something that is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Typing {
+    Filter,
+    Prompt,
+}
+
 pub struct App {
     pub project: PathBuf,
     /// The project path as the breadcrumb says it: resolved, and shortened to
@@ -100,7 +112,20 @@ pub struct App {
     /// the list rather than disappearing off it.
     pub list_top: usize,
     pub filter: String,
-    pub filtering: bool,
+    /// What is being written into the input line, if anything.
+    pub typing: Option<Typing>,
+    /// The task being composed, kept separately from the filter: abandoning a
+    /// half-written task to look something up and coming back to it is the
+    /// normal way of working, and one string for both would lose it.
+    pub prompt: String,
+    /// The run this browser started, while it is going and after it ends.
+    pub session: Option<Session>,
+    /// Ticks of the event loop. What the spinner is a function of, so that
+    /// drawing is a function of state rather than of the clock.
+    pub tick: u64,
+    /// Whether the transcript sticks to the bottom as the run writes to it.
+    /// Off the moment somebody scrolls up, on again at the end.
+    pub follow: bool,
     /// The full record of the selected run, loaded on demand: a listing holds
     /// summaries, and check output is the thing worth reading on a failure.
     pub record: Option<RunRecord>,
@@ -124,6 +149,9 @@ pub struct App {
     pub pick: usize,
     /// The leader key has been pressed and the next one completes a command.
     pub leader: bool,
+    /// Someone asked to leave while a run was going. The browser stays up
+    /// until that run has actually stopped.
+    pub leaving: bool,
     pub quit: bool,
 }
 
@@ -138,7 +166,11 @@ impl App {
             selected: 0,
             list_top: 0,
             filter: String::new(),
-            filtering: false,
+            typing: None,
+            prompt: String::new(),
+            session: None,
+            tick: 0,
+            follow: true,
             record: None,
             events: Vec::new(),
             diff: None,
@@ -152,6 +184,7 @@ impl App {
             query: String::new(),
             pick: 0,
             leader: false,
+            leaving: false,
             quit: false,
         }
     }
@@ -194,6 +227,11 @@ impl App {
 
     pub fn scroll_by(&mut self, delta: i16) {
         self.scroll = self.scroll.saturating_add_signed(delta);
+        // Scrolling up is someone reading something the tail is about to push
+        // off the screen. Following again is `G`, and the end of the run.
+        if delta < 0 {
+            self.follow = false;
+        }
     }
 
     /// Everything that describes one run, dropped when a different one is shown.
@@ -204,9 +242,17 @@ impl App {
         self.scroll = 0;
     }
 
+    /// What the browser is in the middle of, as the command list reads it.
+    pub fn situation(&self) -> Situation {
+        Situation {
+            unconfigured: self.setup.is_some(),
+            running: self.session.as_ref().is_some_and(|s| s.live()),
+        }
+    }
+
     /// The commands the palette is currently offering.
     pub fn commands(&self) -> Vec<Command> {
-        Command::matching(&self.query, self.setup.is_some())
+        Command::matching(&self.query, self.situation())
     }
 
     pub fn picked(&self) -> Option<Command> {
@@ -316,7 +362,11 @@ fn render_content(frame: &mut Frame, app: &mut App, area: Rect) {
     // Said once, across the whole area, rather than once per column: an empty
     // list and an empty detail are the same fact, and printing it twice reads
     // as two different things having gone wrong.
-    if app.matching.is_empty() {
+    //
+    // Not while a run is being watched. The first run in a repository is
+    // started from an empty list, and "No runs yet" over the top of the run
+    // that is fixing that would be the screen contradicting itself.
+    if app.matching.is_empty() && app.session.is_none() {
         let message = if app.runs.is_empty() {
             "No runs yet. `ostraka run \"\u{2026}\"` makes one."
         } else {
@@ -329,10 +379,15 @@ fn render_content(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    if app.matching.is_empty() {
+        render_transcript(frame, app, theme::inset(area));
+        return;
+    }
+
     if area.width < TWO_COLUMN {
         match app.focus {
             Focus::List => render_list(frame, app, area),
-            Focus::Detail => render_detail(frame, app, theme::inset(area)),
+            Focus::Detail => render_beside(frame, app, theme::inset(area)),
         }
         return;
     }
@@ -347,7 +402,21 @@ fn render_content(frame: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
 
     render_list(frame, app, columns[0]);
-    render_detail(frame, app, theme::inset(columns[1]));
+    render_beside(frame, app, theme::inset(columns[1]));
+}
+
+/// The column next to the list: a run in progress if there is one, and
+/// otherwise the record of the one selected.
+///
+/// A run being watched wins. It is the thing that is changing, it is the
+/// reason the browser was left open, and the selected record will still be
+/// there afterwards — with the new run in the list beside it.
+fn render_beside(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.session.is_some() {
+        render_transcript(frame, app, area);
+    } else {
+        render_detail(frame, app, area);
+    }
 }
 
 /// The runs, two lines each: what was asked, and how it went.
@@ -444,6 +513,148 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(Paragraph::new(lines).scroll((app.scroll, 0)), area);
 }
 
+/// A run as it happens: what was asked, then how far it has got.
+fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
+    let Some(lines) = app
+        .session
+        .as_ref()
+        .map(|session| transcript_lines(session, area.width as usize, app.tick))
+    else {
+        return;
+    };
+    app.page = area.height.saturating_sub(1).max(1);
+
+    let overflow = lines.len().saturating_sub(area.height as usize) as u16;
+    // Stuck to the bottom while the run writes to it, which is what a live log
+    // has to do to be worth watching, and released the moment somebody scrolls
+    // up to read something.
+    if app.follow {
+        app.scroll = overflow;
+    }
+    app.scroll = app.scroll.min(overflow);
+    frame.render_widget(Paragraph::new(lines).scroll((app.scroll, 0)), area);
+}
+
+fn transcript_lines(session: &Session, width: usize, tick: u64) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for (i, part) in wrap(&session.prompt, width.saturating_sub(2))
+        .into_iter()
+        .enumerate()
+    {
+        lines.push(Line::from(vec![
+            Span::styled(
+                if i == 0 { theme::CURSOR } else { " " },
+                theme::on(theme::ACCENT),
+            ),
+            Span::raw(" "),
+            Span::styled(part, theme::bold()),
+        ]));
+    }
+    lines.push(Line::from(""));
+
+    for step in &session.steps {
+        match step {
+            Step::Entered(phase) => lines.push(phase_line(*phase, session.phase, tick)),
+            Step::Said { event, .. } => {
+                let (kind, text, colour) = describe_event(event);
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{} {kind} ", theme::CONTINUE), theme::muted()),
+                    Span::styled(truncate(&text, width.saturating_sub(8)), theme::on(colour)),
+                ]));
+            }
+            Step::Checked(record) => lines.extend(checked_lines(record)),
+        }
+    }
+
+    lines.push(Line::from(""));
+    if let Some(finished) = &session.finished {
+        let (_, colour) = marker(finished.outcome);
+        lines.push(Line::from(Span::styled(
+            finished.summary.clone(),
+            theme::on(colour),
+        )));
+        lines.push(dim(format!("{}  \u{b7}  esc closes this", finished.run_id)));
+    } else if let Some(why) = &session.failed {
+        // Not a verdict on the change. The run did not get far enough to have
+        // one, and reporting "refused" here would say it did.
+        lines.push(Line::from(Span::styled(
+            format!("the run did not finish \u{2014} {why}"),
+            theme::on(theme::BAD),
+        )));
+        lines.push(dim("esc closes this".to_string()));
+    } else if session.stopping {
+        lines.push(dim(
+            "stopping \u{2014} the agent is being asked to stop".to_string()
+        ));
+    }
+    lines
+}
+
+/// A phase heading, marked while it is the one happening.
+fn phase_line(phase: Phase, current: Option<Phase>, tick: u64) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        phase.title(),
+        theme::accent().add_modifier(Modifier::BOLD),
+    )];
+    if current == Some(phase) {
+        let frame = theme::SPINNER[tick as usize % theme::SPINNER.len()];
+        spans.push(Span::styled(format!("  {frame}"), theme::accent()));
+    }
+    Line::from(spans)
+}
+
+/// One finished check, under the rail, with its output if it failed.
+fn checked_lines(record: &CheckRecord) -> Vec<Line<'static>> {
+    let (mark, word, colour) = check_mark(record);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(format!("{} ", theme::CONTINUE), theme::muted()),
+        Span::styled(format!("{mark} {word}"), theme::on(colour)),
+        Span::styled(
+            format!("  {:<10} {}ms", record.name, record.duration_ms),
+            theme::text(),
+        ),
+    ])];
+    if !record.passed() {
+        for line in tail(&record.stderr, 12)
+            .into_iter()
+            .chain(tail(&record.stdout, 12))
+        {
+            lines.push(dim(format!("{}      {line}", theme::CONTINUE)));
+        }
+    }
+    lines
+}
+
+/// How a check is said, in the one place that decides it.
+fn check_mark(record: &CheckRecord) -> (&'static str, &'static str, Color) {
+    if record.passed() {
+        (theme::PASSED, "pass", theme::OK)
+    } else {
+        (theme::FAILED, "FAIL", theme::BAD)
+    }
+}
+
+/// What an event is, said the same way wherever it is shown.
+fn describe_event(event: &Event) -> (&'static str, String, Color) {
+    match event {
+        Event::Message { text, .. } => ("said", text.replace('\n', " "), theme::TEXT),
+        Event::ToolUse { name, .. } => ("tool", name.clone(), theme::ACCENT),
+        Event::Error { message, .. } => ("err ", message.replace('\n', " "), theme::BAD),
+        Event::Finished {
+            exit_code,
+            files_touched,
+        } => (
+            "done",
+            format!(
+                "exit {}, {} file(s)",
+                exit_code.map(|c| c.to_string()).unwrap_or("?".into()),
+                files_touched.len()
+            ),
+            theme::MUTED,
+        ),
+    }
+}
+
 /// The three panes, named, with the one you are in marked.
 ///
 /// A row of names rather than a hint saying which key shows the next one: the
@@ -474,25 +685,31 @@ fn render_prompt(frame: &mut Frame, app: &App, area: Rect) {
         width: area.width.saturating_sub(theme::GUTTER * 2),
         ..area
     };
-    let block = theme::panel(app.filtering);
-    let text = if app.filtering {
-        Line::from(vec![
+    let block = theme::panel(app.typing.is_some());
+    let text = match app.typing {
+        // A prompt and a filter are different enough that the box says which
+        // it is taking. One starts something; the other narrows what is there,
+        // and typing a task into a filter would be a quiet way to lose it.
+        Some(Typing::Prompt) => Line::from(vec![
+            Span::styled("\u{203a}  ", theme::accent()),
+            Span::styled(app.prompt.clone(), theme::text()),
+            Span::styled(theme::CURSOR, theme::accent()),
+            Span::styled("     enter to run \u{b7} esc sets it aside", theme::muted()),
+        ]),
+        Some(Typing::Filter) => Line::from(vec![
             Span::styled("/  ", theme::accent()),
             Span::styled(app.filter.clone(), theme::text()),
             Span::styled(theme::CURSOR, theme::accent()),
-        ])
-    } else if app.filter.is_empty() {
-        Line::from(vec![
-            Span::styled("/  ", theme::muted()),
-            Span::styled("filter runs\u{2026}", theme::muted()),
-            Span::styled("     ctrl-k for commands", theme::muted()),
-        ])
-    } else {
-        Line::from(vec![
+        ]),
+        None if !app.filter.is_empty() => Line::from(vec![
             Span::styled("/  ", theme::accent()),
             Span::styled(app.filter.clone(), theme::text()),
             Span::styled("     esc to clear", theme::muted()),
-        ])
+        ]),
+        None => Line::from(Span::styled(
+            "n  new run     /  filter runs     ctrl-k  commands     ?  keys",
+            theme::muted(),
+        )),
     };
     frame.render_widget(
         Paragraph::new(text).block(block.padding(Padding::horizontal(1))),
@@ -513,7 +730,7 @@ fn status_bar(app: &App, width: u16) -> Line<'static> {
     }
     if app.leader {
         let mut spans = vec![Span::styled("ctrl-x  ", theme::on(theme::WARN))];
-        for (i, command) in Command::offered(app.setup.is_some()).iter().enumerate() {
+        for (i, command) in Command::offered(app.situation()).iter().enumerate() {
             if i > 0 {
                 spans.push(Span::styled(" \u{b7} ", theme::muted()));
             }
@@ -532,11 +749,33 @@ fn status_bar(app: &App, width: u16) -> Line<'static> {
         ));
     }
 
-    let left = vec![
-        Span::styled("ostraka", theme::bold()),
-        Span::styled(format!(" {}", env!("CARGO_PKG_VERSION")), theme::muted()),
-        Span::styled(format!("  \u{b7}  {}", counted(app)), theme::muted()),
-    ];
+    let left = match app.session.as_ref().filter(|s| s.live()) {
+        // While something is happening, the left of this line is what is
+        // happening. The counts it displaces cannot change until the run ends.
+        Some(session) => vec![
+            Span::styled(
+                if session.stopping {
+                    "stopping"
+                } else {
+                    "running"
+                },
+                theme::on(theme::WARN).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "  {}  \u{b7}  {}s",
+                    session.phase.map(Phase::title).unwrap_or("\u{2026}"),
+                    session.elapsed_secs
+                ),
+                theme::muted(),
+            ),
+        ],
+        None => vec![
+            Span::styled("ostraka", theme::bold()),
+            Span::styled(format!(" {}", env!("CARGO_PKG_VERSION")), theme::muted()),
+            Span::styled(format!("  \u{b7}  {}", counted(app)), theme::muted()),
+        ],
+    };
     let right = tokens(app);
 
     let left_width: usize = left.iter().map(|s| s.content.chars().count()).sum();
@@ -684,6 +923,8 @@ fn render_setup(frame: &mut Frame, app: &App, area: Rect) {
 /// Every key the screen answers to, in one place someone can read.
 fn render_keys(frame: &mut Frame, screen: Rect) {
     let rows: Vec<(&str, &str)> = vec![
+        ("n", "write a task and run it"),
+        ("s", "ask a running agent to stop"),
         ("j / k", "move between runs"),
         ("g / G", "first run / last run"),
         ("space / b", "scroll the pane"),
@@ -804,11 +1045,7 @@ fn check_lines(app: &App, run: &RunSummary) -> Vec<Line<'static>> {
 
     let mut lines = Vec::new();
     for check in &record.checks {
-        let (mark, word, colour) = if check.passed() {
-            (theme::PASSED, "pass", theme::OK)
-        } else {
-            (theme::FAILED, "FAIL", theme::BAD)
-        };
+        let (mark, word, colour) = check_mark(check);
         lines.push(Line::from(vec![
             Span::styled(format!("{mark} "), theme::on(colour)),
             Span::styled(word, theme::on(colour)),
@@ -837,26 +1074,10 @@ fn event_lines(app: &App) -> Vec<Line<'static>> {
     }
     let mut lines = Vec::new();
     for event in &app.events {
-        let (kind, text, colour) = match event {
-            Event::Message { text, .. } => ("said", text.clone(), theme::TEXT),
-            Event::ToolUse { name, .. } => ("tool", name.clone(), theme::ACCENT),
-            Event::Error { message, .. } => ("err ", message.clone(), theme::BAD),
-            Event::Finished {
-                exit_code,
-                files_touched,
-            } => (
-                "done",
-                format!(
-                    "exit {}, {} file(s)",
-                    exit_code.map(|c| c.to_string()).unwrap_or("?".into()),
-                    files_touched.len()
-                ),
-                theme::MUTED,
-            ),
-        };
+        let (kind, text, colour) = describe_event(event);
         lines.push(Line::from(vec![
             Span::styled(format!("{kind} "), theme::muted()),
-            Span::styled(text.replace('\n', " "), theme::on(colour)),
+            Span::styled(text, theme::on(colour)),
         ]));
     }
     lines
@@ -1581,15 +1802,32 @@ mod tests {
         // text. A placeholder is what makes that legible without a legend.
         let mut app = App::new(PathBuf::from("/p"), Vec::new());
         let idle = screen(&mut app, 100, 12);
+        assert!(idle.contains("new run"), "{idle}");
         assert!(idle.contains("filter runs"), "{idle}");
-        assert!(idle.contains("ctrl-k for commands"), "{idle}");
+        assert!(idle.contains("ctrl-k"), "{idle}");
         assert!(idle.contains("\u{256d}"), "the box is not drawn:\n{idle}");
 
-        app.filtering = true;
+        app.typing = Some(Typing::Filter);
         app.filter = "typed".into();
-        let typing = screen(&mut app, 100, 12);
-        assert!(typing.contains("typed"), "{typing}");
-        assert!(!typing.contains("filter runs\u{2026}"), "{typing}");
+        let filtering = screen(&mut app, 100, 12);
+        assert!(filtering.contains("typed"), "{filtering}");
+        assert!(!filtering.contains("new run"), "{filtering}");
+    }
+
+    #[test]
+    fn the_box_says_whether_it_is_taking_a_task_or_a_filter() {
+        // Two jobs, one box. Typing a task into a filter would narrow the list
+        // to nothing and lose the sentence, which is a quiet way to fail.
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        app.typing = Some(Typing::Prompt);
+        app.prompt = "add a wall-clock ceiling".into();
+        let out = screen(&mut app, 100, 12);
+        assert!(out.contains("add a wall-clock ceiling"), "{out}");
+        assert!(out.contains("enter to run"), "{out}");
+        // Set aside, not dropped: escape keeps the text, and the box has to
+        // say the thing it actually does.
+        assert!(out.contains("sets it aside"), "{out}");
+        assert!(!out.contains("filter runs"), "{out}");
     }
 
     #[test]
@@ -1637,6 +1875,195 @@ mod tests {
         let out = screen(&mut app, 110, 14);
         assert!(out.contains("ctrl-x"), "{out}");
         assert!(out.contains("promote run"), "{out}");
+    }
+
+    use crate::tui::session::Finished;
+
+    fn check(name: &str, code: i32, stderr: &str) -> CheckRecord {
+        CheckRecord {
+            name: name.to_string(),
+            cmd: name.to_string(),
+            exit_code: Some(code),
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+            duration_ms: 126,
+        }
+    }
+
+    fn said(phase: Phase, text: &str) -> Step {
+        Step::Said {
+            phase,
+            event: Event::Message {
+                text: text.to_string(),
+                raw: None,
+            },
+        }
+    }
+
+    #[test]
+    fn a_run_in_progress_takes_the_column_beside_the_list() {
+        // What is changing wins the pane. The selected record will still be
+        // there afterwards; the run will not.
+        let mut app = App::new(
+            PathBuf::from("/p"),
+            vec![summary(
+                "t1-20260907T000300Z",
+                "an older run",
+                Some(Outcome::Approved),
+            )],
+        );
+        app.session = Some(Session::recorded(
+            "add a wall-clock ceiling to the gate",
+            vec![
+                Step::Entered(Phase::Isolating),
+                Step::Entered(Phase::Authoring),
+                said(
+                    Phase::Authoring,
+                    "editing crates/ostraka-runtime/src/gate.rs",
+                ),
+            ],
+            None,
+        ));
+        let out = screen(&mut app, 110, 22);
+        assert!(out.contains("add a wall-clock ceiling"), "{out}");
+        assert!(out.contains("isolate"), "{out}");
+        assert!(out.contains("editing crates"), "{out}");
+        // The list is still there beside it.
+        assert!(out.contains("an older run"), "{out}");
+    }
+
+    #[test]
+    fn the_transcript_marks_only_the_phase_that_is_still_going() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        app.session = Some(Session::recorded(
+            "do a thing",
+            vec![
+                Step::Entered(Phase::Authoring),
+                Step::Entered(Phase::Gating),
+            ],
+            None,
+        ));
+        let spinning = |app: &mut App| {
+            screen(app, 110, 22)
+                .lines()
+                .filter(|line| theme::SPINNER.iter().any(|f| line.contains(f)))
+                .count()
+        };
+        assert_eq!(spinning(&mut app), 1, "one phase is running, not two");
+
+        // And it turns, so a long phase does not look like a hung screen.
+        let first = screen(&mut app, 110, 22);
+        app.tick += 1;
+        assert_ne!(first, screen(&mut app, 110, 22), "the mark did not move");
+    }
+
+    #[test]
+    fn a_failing_check_shows_its_output_without_waiting_for_the_record() {
+        // The whole point of streaming the gate: the record does not exist
+        // until the run ends, and the failing check is what someone is waiting
+        // to read.
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        app.session = Some(Session::recorded(
+            "break the build",
+            vec![
+                Step::Entered(Phase::Gating),
+                Step::Checked(check("format", 0, "")),
+                Step::Checked(check("test", 101, "assertion failed: left == right")),
+            ],
+            None,
+        ));
+        let out = screen(&mut app, 110, 22);
+        assert!(out.contains("pass"), "{out}");
+        assert!(out.contains("FAIL"), "{out}");
+        assert!(out.contains("assertion failed"), "{out}");
+    }
+
+    #[test]
+    fn a_finished_run_says_how_it_ended_and_how_to_leave_it() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        app.session = Some(Session::recorded(
+            "do a thing",
+            vec![Step::Entered(Phase::Reviewing)],
+            Some(Finished {
+                run_id: "t1-20260907T000300Z".into(),
+                outcome: Some(Outcome::Approved),
+                summary: "approved \u{2014} nothing merged".into(),
+            }),
+        ));
+        let out = screen(&mut app, 110, 22);
+        assert!(out.contains("nothing merged"), "{out}");
+        assert!(out.contains("t1-20260907T000300Z"), "{out}");
+        assert!(out.contains("esc closes this"), "{out}");
+    }
+
+    #[test]
+    fn a_run_that_never_started_is_not_reported_as_a_refusal() {
+        // "Refused" is a verdict on a change. A run that could not be launched
+        // never produced one, and saying it was refused would put a judgement
+        // in the record's mouth that nobody made.
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut session = Session::recorded("do a thing", Vec::new(), None);
+        session.failed = Some("no adapter profile can run here".into());
+        app.session = Some(session);
+
+        let out = screen(&mut app, 110, 22);
+        assert!(out.contains("did not finish"), "{out}");
+        assert!(out.contains("no adapter profile"), "{out}");
+        assert!(!out.contains("refused"), "{out}");
+    }
+
+    #[test]
+    fn the_first_run_in_an_empty_repository_is_not_hidden_by_no_runs_yet() {
+        // The list is empty precisely because this run has not finished. The
+        // screen contradicting itself there would be its first impression.
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        app.session = Some(Session::recorded(
+            "the very first task",
+            vec![Step::Entered(Phase::Authoring)],
+            None,
+        ));
+        let out = screen(&mut app, 100, 16);
+        assert!(out.contains("the very first task"), "{out}");
+        assert!(!out.contains("No runs yet"), "{out}");
+    }
+
+    #[test]
+    fn the_status_line_says_what_is_happening_while_a_run_is_going() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        app.session = Some(Session::recorded(
+            "do a thing",
+            vec![Step::Entered(Phase::Gating)],
+            None,
+        ));
+        let out = screen(&mut app, 110, 16);
+        assert!(out.contains("running"), "{out}");
+        assert!(out.contains("gate"), "{out}");
+        assert!(out.contains("41s"), "{out}");
+
+        app.session.as_mut().expect("a session").stopping = true;
+        assert!(screen(&mut app, 110, 16).contains("stopping"));
+    }
+
+    #[test]
+    fn a_live_transcript_follows_its_own_tail_until_somebody_scrolls_up() {
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        let mut steps = vec![Step::Entered(Phase::Authoring)];
+        steps.extend((0..60).map(|i| said(Phase::Authoring, &format!("line {i}"))));
+        app.session = Some(Session::recorded("a talkative agent", steps, None));
+
+        let following = screen(&mut app, 100, 20);
+        assert!(
+            following.contains("line 59"),
+            "the tail was not shown:\n{following}"
+        );
+
+        app.scroll_by(-30);
+        assert!(!app.follow, "scrolling up did not release the tail");
+        let held = screen(&mut app, 100, 20);
+        assert!(
+            !held.contains("line 59"),
+            "the view snapped back to the tail:\n{held}"
+        );
     }
 
     /// A usage row shaped the way a vendor reports it: a split, or — when

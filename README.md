@@ -23,7 +23,7 @@ ostraka adapters   # list adapter profiles and whether each can run here
 ostraka run "..."  # isolate, execute, gate, review, record
 ostraka replay ID  # read a finished run back
 ostraka runs       # every run this project has recorded
-ostraka tui        # browse them in the terminal
+ostraka tui        # browse them in the terminal, and start new ones
 ostraka prune      # remove worktrees finished runs left. Branches untouched
 ostraka promote ID # give an approved run a branch. Merges nothing
 ```
@@ -114,10 +114,40 @@ itself — a combined figure shown as a total, a rounded one marked with a tilde
 and a backend that reports nothing left out rather than shown as zero. A message
 about what just happened takes the line while it is worth reading.
 
+`n` writes a task and runs it, and the pane beside the list becomes the run: the
+phase it is in, what the agent said, each gate check as it finishes, the
+reviewer's verdict, and how it ended. `s` asks it to stop, which records
+`Interrupted` — its own outcome, and not a verdict on the change. Quitting during
+a run asks it to stop and waits, rather than leaving a vendor writing into a
+worktree.
+
+It is the same run `ostraka run` starts. The browser calls the function the
+command calls, so the routing, the gate and the record do not depend on which
+one you used — and starting a run from a key still cannot approve one.
+
+One at a time. Several at once is the parallel-execution question, and it is not
+answered yet.
+
+```
+▌ add a wall-clock ceiling to the gate
+
+isolate
+prepare
+author
+│ said reading crates/ostraka-runtime/src/gate.rs
+│ said done
+│ done exit 0, 2 file(s)
+gate  ⠹
+│ ✓ pass  format      126ms
+│ ✓ pass  lint       5836ms
+```
+
 Tab cycles checks, events and diff, and the row above the pane names all three
 rather than a footer naming the next one. `/` filters on the task text, the run
 id or the outcome word. `ctrl-k` opens the commands by name, `ctrl-x` reaches the
-same ones as a chord, and `?` lists every key. Below about seventy columns the
+same ones as a chord, and `?` lists every key. The list of commands is the
+authority for all three, so a key cannot do what the palette has decided not to
+offer. Below about seventy columns the
 detail moves behind Enter rather than sharing a width neither pane can use. A run
 that produced no commit says so rather than showing the commit its branch happens
 to point at, which is a thing it used to do.
