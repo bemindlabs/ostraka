@@ -742,6 +742,63 @@ fn only_what_is_installed_is_ever_offered() {
     );
 }
 
+#[test]
+fn the_browser_shows_what_a_run_left_before_it_removes_any_of_it() {
+    // A list before an action, the way the command line is a dry run before
+    // `--apply`. Removing a directory is not a keystroke to offer without
+    // saying what it will take.
+    let _guard = exclusive();
+    let scratch = project("prune", 0);
+    let mut d = Driver::open(scratch.path());
+
+    // A refused run keeps its worktree on purpose — it is the evidence — and
+    // that is exactly what fills a disk later.
+    std::fs::write(
+        scratch.path().join(".ostraka/ostraka.toml"),
+        "[gate]\nchecks = [{ name = \"check\", cmd = \"false\", required = true }]\n\n\
+         [gate.review]\nmust_differ_from_author = true\n",
+    )
+    .expect("config");
+    d.task("write a file");
+    assert!(!d.last().approved(), "the gate let it through");
+
+    d.ctrl('x').key(KeyCode::Char('u'));
+    assert_eq!(d.app.dialog, Some(Dialog::Prune));
+    assert_eq!(
+        d.app.leftovers.len(),
+        1,
+        "the refused run's worktree is not listed"
+    );
+    let left = d.app.leftovers[0].path.clone();
+    assert!(left.is_dir(), "the fixture is wrong: nothing is there");
+    // The thing somebody is actually afraid of, said before the key is pressed.
+    d.shows("Branches and run records are untouched");
+
+    // Esc leaves it alone.
+    d.key(KeyCode::Esc);
+    assert!(left.is_dir(), "esc removed something");
+
+    d.ctrl('x').key(KeyCode::Char('u'));
+    d.key(KeyCode::Char('y'));
+    assert!(!left.exists(), "y did not remove the worktree");
+    assert_eq!(d.app.dialog, None);
+
+    // The branch the run made is still there, which is the whole posture: a
+    // checkout can be made again and a commit cannot.
+    let run_id = d
+        .last()
+        .finished
+        .as_ref()
+        .map(|f| f.run_id.clone())
+        .expect("a finished run");
+    let out = Command::new("git")
+        .args(["rev-parse", "--verify", &format!("ostraka/{run_id}")])
+        .current_dir(repo_of(&scratch))
+        .output()
+        .expect("git");
+    assert!(out.status.success(), "the branch went with the worktree");
+}
+
 /// Rewrites the writer in a fixture into one whose context fills halfway
 /// through, which is what a token limit actually looks like from here: part of
 /// a change on disk, a non-zero exit, and the reason on stderr.

@@ -104,6 +104,8 @@ pub enum Dialog {
     Fix,
     Settings,
     Repos,
+    /// What finished runs left, and whether to clear it.
+    Prune,
 }
 
 /// One adapter profile, as the agents dialog shows it.
@@ -160,6 +162,8 @@ pub struct App {
     /// Present when this directory is not a project yet: what `init` would
     /// write. `None` once there is nothing left to write.
     pub setup: Option<Plan>,
+    /// The worktrees `Command::Prune` found, held while the dialog asks.
+    pub leftovers: Vec<crate::prune::Leftover>,
     /// Why a run cannot work here, when something is in the way that setting
     /// the project up does not fix. `None` means nothing known is wrong.
     pub blocked: Option<String>,
@@ -209,6 +213,7 @@ impl App {
             page: 10,
             status: None,
             setup: None,
+            leftovers: Vec::new(),
             blocked: None,
             remedy: None,
             project_facts: Vec::new(),
@@ -514,6 +519,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Dialog::Fix) => render_fix(frame, app, screen),
         Some(Dialog::Settings) => render_settings(frame, app, screen),
         Some(Dialog::Repos) => render_repos(frame, app, screen),
+        Some(Dialog::Prune) => render_prune(frame, app, screen),
         None => {}
     }
 
@@ -1636,6 +1642,7 @@ fn render_keys(frame: &mut Frame, screen: Rect) {
         ("w", "the repositories, and n starts one"),
         ("tab", "checks, events, diff \u{2014} on a record"),
         ("p", "promote a record; merges nothing"),
+        ("u", "clear the worktrees finished runs left"),
         ("pgup / pgdn", "scroll"),
         ("ctrl-k", "commands"),
         ("ctrl-x", "leader: the same commands, one key away"),
@@ -1776,6 +1783,58 @@ fn render_runs(frame: &mut Frame, app: &App, screen: Rect) {
 /// reviewer that is a *different binary* from the author, which is the
 /// property that makes a review worth having. This is for when it is not:
 /// naming one is a decision, and a decision is honoured.
+/// What finished runs left, and the one key that clears it.
+///
+/// A list before an action, the way the command line is a dry run before
+/// `--apply`. Removing a directory is not a keystroke to offer without saying
+/// what it will take, and the sentence about branches is there because that is
+/// the thing somebody is actually afraid of.
+fn render_prune(frame: &mut Frame, app: &App, screen: Rect) {
+    let width = 84u16.min(screen.width);
+    let mut lines = vec![
+        Line::from(Span::styled("worktrees finished runs left", theme::bold())),
+        theme::rule(width.saturating_sub(6)),
+    ];
+
+    if app.leftovers.is_empty() {
+        lines.push(dim("nothing to prune".to_string()));
+    } else {
+        for l in &app.leftovers {
+            let shown = l
+                .path
+                .strip_prefix(&app.workspace.root)
+                .unwrap_or(&l.path)
+                .display()
+                .to_string();
+            lines.push(Line::from(vec![
+                Span::styled("  ", theme::text()),
+                Span::styled(truncate(&shown, 70), theme::text()),
+            ]));
+        }
+        lines.push(Line::from(""));
+        lines.push(dim(
+            "Branches and run records are untouched. A worktree can be made again; \
+             the commit a run produced is what matters and it stays."
+                .to_string(),
+        ));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(dim(if app.leftovers.is_empty() {
+        "esc closes this".to_string()
+    } else {
+        "y removes them \u{b7} esc leaves them alone".to_string()
+    }));
+
+    let area = theme::centred(screen, width, lines.len() as u16 + 2);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(theme::fit(lines, area.height))
+            .block(theme::panel(true).padding(Padding::horizontal(2))),
+        area,
+    );
+}
+
 fn render_agents(frame: &mut Frame, app: &App, screen: Rect) {
     let width = 84u16.min(screen.width);
     let named = |chosen: &Option<String>| match chosen {
