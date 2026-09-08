@@ -50,7 +50,12 @@ pub fn run(project_dir: &Path) -> Outcome {
     let mut app = App::new(project_dir.to_path_buf(), index::list(&records_root)?);
     // Opened somewhere that is not a project yet: say what is missing and offer
     // to write it, rather than showing an empty list that looks like a bug.
-    app.setup = Some(init::plan(project_dir)).filter(|plan| !plan.complete());
+    //
+    // `runnable`, not `complete`: the browser asks whether this directory can
+    // be run, and `init` asks whether it has anything left to write. Those are
+    // different questions, and asking the second one put "not an Ostraka
+    // project yet" across a screen with three recorded runs behind it.
+    app.setup = Some(init::plan(project_dir)).filter(|plan| !plan.runnable());
     load_detail(&mut app, &records_root);
 
     // Installs a panic hook that restores the terminal first. Without it a

@@ -62,11 +62,24 @@ pub enum Action {
     AlreadyThere,
 }
 
+/// What a file is to the project, which decides who has to care it is missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// Without this there is no project. `ostraka.toml`.
+    Config,
+    /// One vendor profile. A project needs at least one; which one is a choice.
+    Profile,
+    /// Keeps a run's working evidence out of history. Its absence is untidy,
+    /// not broken.
+    Ignore,
+}
+
 #[derive(Debug, Clone)]
 pub struct Planned {
     pub path: PathBuf,
     pub contents: String,
     pub action: Action,
+    pub role: Role,
 }
 
 #[derive(Debug, Clone)]
@@ -77,9 +90,27 @@ pub struct Plan {
 }
 
 impl Plan {
-    /// True when there is nothing left to do.
+    /// True when there is nothing left to do. What `init` asks.
     pub fn complete(&self) -> bool {
         self.files.iter().all(|f| f.action == Action::AlreadyThere)
+    }
+
+    /// True when this directory can be run as it stands.
+    ///
+    /// Deliberately weaker than `complete`, and it is the question the browser
+    /// asks. A project with a config and a profile runs, whether or not its
+    /// `.gitignore` has picked up the two lines `init` also offers — and
+    /// answering "this directory is not an Ostraka project yet" across a
+    /// screen that has runs to show gets it plainly wrong. This repository's
+    /// own `.gitignore` names four paths under `.ostraka/` rather than the
+    /// directory, which is how that was found.
+    pub fn runnable(&self) -> bool {
+        let there = |role| {
+            self.files
+                .iter()
+                .any(|f| f.role == role && f.action == Action::AlreadyThere)
+        };
+        there(Role::Config) && there(Role::Profile)
     }
 }
 
@@ -105,13 +136,19 @@ const IGNORED: [&str; 2] = ["/.ostraka/", "/worktrees/"];
 
 pub fn plan(project: &Path) -> Plan {
     let kind = Kind::detect(project);
-    let mut files = vec![planned(project, "ostraka.toml", config_for(kind))];
+    let mut files = vec![planned(
+        project,
+        "ostraka.toml",
+        config_for(kind),
+        Role::Config,
+    )];
 
     for (name, contents) in TEMPLATES {
         files.push(planned(
             project,
             &format!("adapters/{name}"),
             contents.to_string(),
+            Role::Profile,
         ));
     }
     files.push(gitignore(project));
@@ -123,7 +160,7 @@ pub fn plan(project: &Path) -> Plan {
     }
 }
 
-fn planned(project: &Path, relative: &str, contents: String) -> Planned {
+fn planned(project: &Path, relative: &str, contents: String, role: Role) -> Planned {
     let path = project.join(relative);
     let action = if path.exists() {
         Action::AlreadyThere
@@ -134,6 +171,7 @@ fn planned(project: &Path, relative: &str, contents: String) -> Planned {
         path,
         contents,
         action,
+        role,
     }
 }
 
@@ -155,6 +193,7 @@ fn gitignore(project: &Path) -> Planned {
             path,
             contents: String::new(),
             action: Action::AlreadyThere,
+            role: Role::Ignore,
         };
     }
 
@@ -171,6 +210,7 @@ fn gitignore(project: &Path) -> Planned {
         } else {
             Action::Append
         },
+        role: Role::Ignore,
     }
 }
 
@@ -355,6 +395,43 @@ mod tests {
         // unrunnable gate is worse than not detecting it.
         let config = ostraka_core::config::Config::parse(&config_for(Kind::Node)).expect("parses");
         assert_eq!(config.worktree.link, ["node_modules"]);
+    }
+
+    #[test]
+    fn a_project_whose_gitignore_covers_the_ground_differently_is_still_runnable() {
+        // This repository's own `.gitignore` names four paths under `.ostraka/`
+        // rather than the directory, written before `init` existed. `init` is
+        // right that the line it offers is not there, and the browser was
+        // wrong to read that as a directory nobody had set up yet.
+        let dir = scratch();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\n").expect("write");
+        apply(&plan(&dir), false).expect("applies");
+        std::fs::write(
+            dir.join(".gitignore"),
+            "/target\n/worktrees/\n/.ostraka/runs/\n/.ostraka/vendor-home/\n",
+        )
+        .expect("rewrite");
+
+        let plan = plan(&dir);
+        assert!(!plan.complete(), "init should still offer the missing line");
+        assert!(plan.runnable(), "a configured project read as unconfigured");
+    }
+
+    #[test]
+    fn a_directory_with_nothing_in_it_is_neither_complete_nor_runnable() {
+        let dir = scratch();
+        let plan = plan(&dir);
+        assert!(!plan.complete());
+        assert!(!plan.runnable());
+    }
+
+    #[test]
+    fn a_config_with_no_profile_beside_it_is_not_runnable_yet() {
+        // Half-configured is the case the opening screen exists for: there is
+        // a config, and nothing it can invoke.
+        let dir = scratch();
+        std::fs::write(dir.join("ostraka.toml"), "# mine\n").expect("write");
+        assert!(!plan(&dir).runnable());
     }
 
     #[test]

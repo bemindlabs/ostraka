@@ -199,6 +199,17 @@ repository beside it. They are copies of `adapters/*.toml`, and
 `check-hygiene.sh` fails if the two drift — the same treatment as the gate
 written out in both `ci.yml` and `ostraka.toml`.
 
+**`init` asks whether anything is left to write; the browser asks whether this
+runs.** Two questions, and they are not the same one. `Plan::complete` is the
+first and `Plan::runnable` — a config, and at least one profile beside it — is
+the second. The browser asked the first for as long as it existed, which put
+"This directory is not an Ostraka project yet" across a screen with three
+recorded runs behind it, because this repository's own `.gitignore` names four
+paths under `.ostraka/` rather than the directory and so `init` correctly still
+had a line to add. A missing ignore line is untidy; it is not a directory
+nobody has set up. `Planned` carries a `Role` so that distinction is a field
+rather than a filename compared against a literal.
+
 **The desktop application is a second view, not a second product.** `ostraka-app`
 draws with `egui` in a window `eframe` opens: pure Rust, no web runtime, no
 second toolchain — which is the same condition that let `ratatui` in, and the
