@@ -5,6 +5,7 @@ mod check;
 mod discover;
 mod init;
 mod init_cmd;
+mod offer;
 mod promote;
 mod prune;
 mod replay;
