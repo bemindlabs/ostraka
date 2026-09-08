@@ -289,10 +289,16 @@ person — richer routing, and a live view of a run in progress.
 
 ```console
 curl -fsSL https://ostraka.sh/install | sh     # a binary, no toolchain
-brew install bemindlabs/ostraka/ostraka
 npm install -g ostraka                          # downloads the same binary
 cargo install ostraka                           # builds from source
+
+brew tap bemindlabs/ostraka https://github.com/bemindlabs/ostraka
+brew install ostraka
 ```
+
+The tap takes a URL because the formula lives in this repository rather than in a
+second one named `homebrew-ostraka`. Without the URL, `brew` appends that prefix
+itself and looks somewhere that does not exist.
 
 None of these are live yet — the names are chosen and unclaimed. Every path
 above resolves the same artifact, `ostraka-<tag>-<target>.tar.gz`, and a check

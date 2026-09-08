@@ -1,6 +1,15 @@
-# Homebrew formula, kept in-repo so `brew tap bemindlabs/ostraka` needs no
-# second repository. The release workflow rewrites the version and the sha256
-# fields; the artifact name it parses is fixed by that workflow.
+# Homebrew formula, kept in-repo so a tap needs no second repository — which
+# works, but only when the tap is given this repository's URL:
+#
+#   brew tap bemindlabs/ostraka https://github.com/bemindlabs/ostraka
+#
+# `brew tap user/repo` on its own resolves to `github.com/user/homebrew-repo`.
+# The prefix is brew's, not the user's, so the bare two-argument form looks for
+# a repository that does not exist. The README carries the URL form for that
+# reason; changing one without the other breaks installing from a tap.
+#
+# The release workflow rewrites the version and the sha256 fields; the artifact
+# name it parses is fixed by that workflow.
 class Ostraka < Formula
   desc "Run agent fleets you can actually review"
   homepage "https://github.com/bemindlabs/ostraka"

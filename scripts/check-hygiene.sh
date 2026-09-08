@@ -200,4 +200,31 @@ for doc in README.md AGENTS.md PHILOSOPHY.md adapters/README.md; do
 done
 [ "$missing" -eq 0 ] && ok "every relative link in the shipped docs resolves"
 
+# 9. The two things about distribution that nothing else here can see.
+#
+#    A tap in a repository not named `homebrew-<something>` is only reachable
+#    when `brew tap` is given a URL — brew appends the prefix itself otherwise
+#    and looks somewhere that does not exist. The formula shipped for a release
+#    while the README offered the bare two-argument form, which resolves to a
+#    repository nobody has created. Check 6 compares the artifact *name* across
+#    the three installers; it has nothing to say about where a formula is
+#    served from.
+if [ -f Formula/ostraka.rb ]; then
+    if grep -qE 'brew tap +bemindlabs/ostraka +https://github.com/bemindlabs/ostraka' README.md; then
+        ok "the brew instructions tap this repository by URL"
+    else
+        bad "README.md must tap by URL, or brew looks for bemindlabs/homebrew-ostraka"
+        note "brew tap bemindlabs/ostraka https://github.com/bemindlabs/ostraka"
+    fi
+fi
+
+#    And every file the npm package promises to ship has to exist. `npm publish`
+#    does not fail on a missing one — it publishes a package whose page is
+#    blank, which is only ever noticed on the day the name is claimed.
+missing_npm=0
+for file in $(sed -n '/"files"/,/]/p' npm/package.json | grep -oE '"[^"]+\.[a-z]+"' | tr -d '"'); do
+    [ -f "npm/$file" ] || { bad "npm/package.json ships $file, which does not exist"; missing_npm=1; }
+done
+[ "$missing_npm" -eq 0 ] && ok "every file the npm package ships exists"
+
 exit $fail
