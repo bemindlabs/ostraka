@@ -376,6 +376,35 @@ A stopped vendor is its own outcome, never a verdict on the change. `TimedOut`
 and `Interrupted` are distinct from `AuthorFailed`, because "the clock ran out"
 and "the operator changed their mind" are not "the agent could not do it".
 
+**An author that did not exit cleanly did not finish, and half a change is not
+reviewed.** This was a hole, and it was found by testing what a token limit
+actually looks like rather than by reasoning about it. A vendor whose context
+window fills mid-task exits non-zero *with part of the change already on disk* —
+so the worktree was not empty, the `AuthorFailed` branch did not apply, and the
+half-written change went to the gate, passed it, was reviewed and was approved.
+A merge token for half of what was asked.
+
+The principle was already written down one paragraph up, for the killed author:
+what is on disk is half of whatever it was doing, and half a change is not a
+change anybody should be asked to review. A context window running out is a
+stop like any other; only who stopped it differs. A non-zero exit is now a
+refusal whether or not the worktree is empty.
+
+The cost is named rather than glossed: a vendor that exits non-zero for a
+harmless reason now has finished work refused rather than reviewed. That is the
+safe direction and it is recoverable — a refused run keeps its worktree, the
+record carries the vendor's own words, and running it again is one command. The
+unsafe direction was not recoverable, because nobody was told.
+
+Five shapes are pinned down in `milestone_one`, and one journey through the
+browser in `tui::flows`: an author out of context halfway, a reviewer out of
+context, a reviewer cut off mid-sentence before its verdict line, a reviewer
+that answered twice because it retried after a limit, and the count a run spent
+being recorded on the way out — which is the run somebody most wants the number
+for. The browser shows the vendor's sentence on the rule that closes the turn;
+it used to drop that label for being too long, which put a bare rule exactly
+where the reason should have been.
+
 Two things only a real terminal revealed. A shell killed at the ceiling leaves
 its children alive, and they hold the pipe open — so waiting for EOF after a
 kill waits on precisely the process the ceiling gave up on; output is collected

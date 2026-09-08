@@ -156,17 +156,26 @@ pub fn run_task(
         );
     }
 
-    if touched.is_empty() {
-        let refusal = if author.exit_code == Some(0) {
-            Refusal::NoChange
-        } else {
-            Refusal::AuthorFailed {
-                code: author
-                    .exit_code
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "no exit code".to_string()),
-                diagnostics: author.diagnostics.clone(),
-            }
+    // An author that did not exit cleanly did not finish, and what is on disk
+    // is half of whatever it was doing. Half a change is not a change anybody
+    // should be asked to review — the same reasoning that refuses a killed
+    // author, and the same situation: a context window running out is a stop
+    // like any other, and only who stopped it differs.
+    //
+    // Being this strict costs something, and it is worth naming: a vendor that
+    // exits non-zero for a harmless reason now has finished work refused
+    // rather than reviewed. That is the safe direction and it is recoverable —
+    // a refused run keeps its worktree, the record carries the vendor's own
+    // words, and running it again is one command. The unsafe direction is not:
+    // a half-written change that happened to compile was gated, reviewed and
+    // approved, which is what this used to do.
+    if author.exit_code != Some(0) {
+        let refusal = Refusal::AuthorFailed {
+            code: author
+                .exit_code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "no exit code".to_string()),
+            diagnostics: author.diagnostics.clone(),
         };
         return finish(
             log,
@@ -174,6 +183,17 @@ pub fn run_task(
             Outcome::Rejected,
             None,
             Some(refusal),
+            String::new(),
+        );
+    }
+
+    if touched.is_empty() {
+        return finish(
+            log,
+            record,
+            Outcome::Rejected,
+            None,
+            Some(Refusal::NoChange),
             String::new(),
         );
     }
@@ -287,10 +307,9 @@ fn drive(
         log.append(&event)?;
     }
     let outcome = session.finish();
-    // An author that failed for an external reason still produced a diff the
-    // gate will judge on its merits. Record why anyway: an empty diff whose
-    // cause is in the log is diagnosable, and one whose cause was discarded
-    // looks like an agent that simply did nothing.
+    // Recorded whether or not anything else reads it. A run that ended badly
+    // and whose cause was discarded looks like an agent that simply did
+    // nothing, and the transcript is where somebody goes to find out which.
     if let Some(diagnostics) = &outcome.diagnostics {
         log.append(&Event::Error {
             message: format!("author exited abnormally: {diagnostics}"),

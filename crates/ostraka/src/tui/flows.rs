@@ -401,6 +401,68 @@ fn a_refused_run_is_not_the_ground_the_next_one_stands_on() {
     d.shows("FAIL");
 }
 
+/// Rewrites the writer in a fixture into one whose context fills halfway
+/// through, which is what a token limit actually looks like from here: part of
+/// a change on disk, a non-zero exit, and the reason on stderr.
+fn out_of_context(dir: &Path) {
+    std::fs::write(
+        dir.join("writer.sh"),
+        "#!/bin/sh\n\
+         case \"$1\" in --probe) echo ok; exit 0;; esac\n\
+         echo 'reading the repository'\n\
+         printf 'half a line\\n' >> wrote.txt\n\
+         echo 'Error: prompt is too long: 210000 tokens > 200000 maximum' >&2\n\
+         exit 1\n",
+    )
+    .expect("script");
+}
+
+#[test]
+fn a_task_whose_agent_runs_out_of_tokens_is_refused_and_says_why() {
+    // The dangerous shape: the vendor had written part of the change when its
+    // context filled, so the worktree is not empty and the exit code is not
+    // zero. Half a change is not a change anybody should be asked to review,
+    // and the chain must not stand on one.
+    let _guard = exclusive();
+    let scratch = project("out-of-tokens", 0);
+    out_of_context(scratch.path());
+    let mut d = Driver::open(scratch.path());
+    // Pinned, so which of the two scripts authors is not left to routing.
+    d.app.thread.adapter = Some("writer".into());
+    d.app.thread.review_adapter = Some("reader".into());
+
+    d.task("write something long");
+
+    assert!(!d.last().approved(), "a half-written change was approved");
+    assert_eq!(
+        d.app.thread.base_ref, "HEAD",
+        "the chain stood on a change that ran out"
+    );
+
+    // The vendor's own account of why, both where it said it and on the rule
+    // that closes the turn.
+    let screen = d.screen();
+    assert!(screen.contains("prompt is too long"), "{screen}");
+    assert!(
+        screen.contains("could not run"),
+        "the outcome did not say why:\n{screen}"
+    );
+
+    // The reviewer was never asked. There was nothing finished to review, and
+    // asking would have spent a second vendor to be told so.
+    assert!(
+        !screen.contains("review"),
+        "a reviewer was called on half a change:\n{screen}"
+    );
+
+    // And what it managed to write is kept, because that is the evidence.
+    let left = std::fs::read_dir(scratch.path().join("worktrees"))
+        .expect("a worktrees directory")
+        .filter_map(|e| e.ok())
+        .find(|e| e.path().join("wrote.txt").is_file());
+    assert!(left.is_some(), "the evidence was thrown away");
+}
+
 #[test]
 fn a_run_can_be_stopped_from_the_browser_and_is_not_called_a_verdict() {
     let _guard = exclusive();

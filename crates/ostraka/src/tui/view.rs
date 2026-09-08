@@ -1588,6 +1588,49 @@ mod tests {
     }
 
     #[test]
+    fn a_run_that_ran_out_of_tokens_says_so_where_the_outcome_goes() {
+        // The vendor's own account of why it stopped is long, and the rule it
+        // has to fit on is one line. Cut to fit rather than dropped: dropping
+        // it left a bare rule exactly where the reason should have been.
+        let mut app = App::new(PathBuf::from("/p"), Vec::new());
+        turn(
+            &mut app,
+            "write a long thing",
+            vec![
+                Step::Entered(Phase::Authoring),
+                Step::Said {
+                    phase: Phase::Authoring,
+                    event: Event::Error {
+                        message: "author exited abnormally: Error: prompt is too long: \
+                                  210000 tokens > 200000 maximum"
+                            .into(),
+                        raw: None,
+                    },
+                },
+            ],
+            Some(finished(
+                "t1-20260908T000100Z",
+                Outcome::Rejected,
+                "refused \u{2014} the author could not run (exit 1): Error: prompt is too \
+                 long: 210000 tokens > 200000 maximum",
+            )),
+        );
+
+        let out = screen(&mut app, 100, 22);
+        // On the rule that closes the turn, cut but not lost.
+        let closing = out
+            .lines()
+            .find(|line| line.contains(theme::RULE) && line.contains("the author could not run"))
+            .unwrap_or_default();
+        assert!(
+            !closing.is_empty(),
+            "the reason vanished from the rule:\n{out}"
+        );
+        // And in the transcript, where the vendor said it.
+        assert!(out.contains("prompt is too long"), "{out}");
+    }
+
+    #[test]
     fn who_is_speaking_is_a_colour_rather_than_something_to_read() {
         // A transcript should be scannable for "what did the reviewer say"
         // without reading it.

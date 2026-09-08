@@ -129,10 +129,24 @@ pub fn labelled_rule(width: u16, label: &str, colour: Color) -> ratatui::text::L
     use ratatui::text::{Line, Span};
     let width = width as usize;
     let label = label.trim();
-    if label.is_empty() || width < label.chars().count() + 6 {
+    if label.is_empty() || width < 12 {
         return rule(width as u16);
     }
+    // Cut to fit rather than dropped. The label that overflows is the long
+    // one, and the long one is a vendor explaining why it stopped — which is
+    // the sentence somebody is looking for. Dropping it left a bare rule where
+    // the reason should have been.
     let after = 2;
+    let room = width - after - 2;
+    let label: String = if label.chars().count() > room {
+        label
+            .chars()
+            .take(room.saturating_sub(1))
+            .chain(std::iter::once('\u{2026}'))
+            .collect()
+    } else {
+        label.to_string()
+    };
     let before = width - label.chars().count() - after - 2;
     Line::from(vec![
         Span::styled(RULE.repeat(before), muted()),
