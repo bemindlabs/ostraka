@@ -174,3 +174,45 @@ fn main() -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("ostraka").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn from_and_base_ref_are_alternatives_and_only_one_of_them_may_be_given() {
+        // The pair carries a real hazard: `--base-ref` has a default, and an
+        // argument declared `conflicts_with` a defaulted one would reject every
+        // invocation if clap counted the default as having been supplied. It
+        // does not — but "it does not" is a fact about a dependency, and the
+        // failure if it changed is that `--from` stops working entirely rather
+        // than misbehaving somewhere visible. So it is pinned here.
+        let cli = parse(&["run", "a task", "--from", "t1"]).expect("--from alone parses");
+        let Commands::Run { from, base_ref, .. } = &cli.command else {
+            panic!("not the run command")
+        };
+        assert_eq!(from.as_deref(), Some("t1"));
+        assert_eq!(base_ref, run::BASE_REF, "the default still applies");
+
+        // And naming both is refused, because one says which run and the other
+        // says which ref: a run given both would have to ignore one of them.
+        // `Cli` is not `Debug`, so the error is taken by hand.
+        let err = match parse(&["run", "a task", "--from", "t1", "--base-ref", "other"]) {
+            Ok(_) => panic!("--from and --base-ref were accepted together"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        // Neither is required, and the default is what a run gets.
+        let cli = parse(&["run", "a task"]).expect("a bare run parses");
+        let Commands::Run { from, base_ref, .. } = &cli.command else {
+            panic!("not the run command")
+        };
+        assert_eq!(from.as_deref(), None);
+        assert_eq!(base_ref, run::BASE_REF);
+    }
+}
