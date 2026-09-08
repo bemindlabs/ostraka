@@ -22,6 +22,7 @@
 
 use crate::init::{Action, Plan};
 use crate::tui::command::{Command, Situation};
+use crate::tui::pane::Pane;
 use crate::tui::remedy::Remedy;
 use crate::tui::theme;
 use crate::tui::thread::{Thread, Turn};
@@ -114,9 +115,9 @@ pub struct Agent {
 
 pub struct App {
     pub workspace: Workspace,
-    /// The repository being worked in. `None` where the workspace holds none,
-    /// or holds several and nobody has said which.
-    pub repository: Option<Repository>,
+    /// The lines of work open here, and which one has the screen.
+    pub panes: Vec<Pane>,
+    pub at: usize,
     /// The project path as the breadcrumb says it: resolved, and shortened to
     /// `~` where it sits under the operator's home.
     ///
@@ -141,25 +142,16 @@ pub struct App {
     /// `None` until asked for; `Some(None)` once asked and not found.
     pub diff: Option<Option<String>>,
     pub detail: Detail,
-    /// The work being done here: a chain of runs, each on the one before it.
-    pub thread: Thread,
     /// The adapter profiles this project has, probed when first asked for.
     /// Not at startup: probing runs every vendor's binary, and a browser that
     /// took three seconds to open would be a browser nobody left open.
     pub agents: Vec<Agent>,
     pub screen: Screen,
     pub focus: Focus,
-    /// The task being written.
-    pub prompt: String,
-    /// How far back into what has been asked here the box has been walked.
-    pub history_at: Option<usize>,
     pub scroll: u16,
     /// Height of the content at the last draw, so a page key can move by a
     /// page rather than by a number somebody guessed.
     pub page: u16,
-    /// Whether the transcript sticks to the bottom as the run writes to it.
-    /// Off the moment somebody scrolls up, on again at the end.
-    pub follow: bool,
     pub status: Option<String>,
     /// Present when this directory is not a project yet: what `init` would
     /// write. `None` once there is nothing left to write.
@@ -195,7 +187,8 @@ impl App {
         Self {
             where_shown: where_we_are(&workspace.root),
             workspace,
-            repository: None,
+            panes: vec![Pane::default()],
+            at: 0,
             runs,
             matching,
             selected: 0,
@@ -205,15 +198,11 @@ impl App {
             events: Vec::new(),
             diff: None,
             detail: Detail::Checks,
-            thread: Thread::default(),
             agents: Vec::new(),
             screen: Screen::Work,
             focus: Focus::Prompt,
-            prompt: String::new(),
-            history_at: None,
             scroll: 0,
             page: 10,
-            follow: true,
             status: None,
             setup: None,
             blocked: None,
@@ -228,6 +217,76 @@ impl App {
             tick: 0,
             quit: false,
         }
+    }
+
+    /// The pane with the screen.
+    pub fn pane(&self) -> &Pane {
+        self.panes
+            .get(self.at)
+            .expect("a browser always has a pane")
+    }
+
+    pub fn pane_mut(&mut self) -> &mut Pane {
+        let at = self.at;
+        self.panes.get_mut(at).expect("a browser always has a pane")
+    }
+
+    /// The line of work on the screen.
+    pub fn thread(&self) -> &Thread {
+        &self.pane().thread
+    }
+
+    pub fn thread_mut(&mut self) -> &mut Thread {
+        &mut self.pane_mut().thread
+    }
+
+    pub fn repository(&self) -> Option<&Repository> {
+        self.pane().repository.as_ref()
+    }
+
+    /// Any pane at all. One run happens at a time across the whole browser,
+    /// because a stop is one flag and two runs would both answer it.
+    pub fn anything_running(&self) -> bool {
+        self.panes.iter().any(Pane::running)
+    }
+
+    /// Opens another line of work, in the same repository as this one.
+    ///
+    /// The repository is carried over because a second pane is usually a
+    /// second thing to do in the same place; `w` moves it somewhere else.
+    pub fn open_pane(&mut self) {
+        let repository = self.pane().repository.clone();
+        self.panes.push(Pane::new(repository));
+        self.at = self.panes.len() - 1;
+        self.scroll = 0;
+    }
+
+    /// Moves to the next pane, wrapping.
+    pub fn next_pane(&mut self, delta: isize) {
+        if self.panes.len() < 2 {
+            return;
+        }
+        let count = self.panes.len() as isize;
+        self.at = ((self.at as isize + delta).rem_euclid(count)) as usize;
+        self.scroll = 0;
+    }
+
+    /// Closes this one, unless it is the only one or something is going in it.
+    ///
+    /// Returns what to say when it declines. A pane closed out from under a
+    /// run would abandon the thread writing into a worktree, and a browser
+    /// with no panes is a browser with nothing to type into.
+    pub fn close_pane(&mut self) -> Option<String> {
+        if self.pane().running() {
+            return Some("this pane is running \u{2014} s asks it to stop".to_string());
+        }
+        if self.panes.len() < 2 {
+            return Some("this is the only pane".to_string());
+        }
+        self.panes.remove(self.at);
+        self.at = self.at.min(self.panes.len() - 1);
+        self.scroll = 0;
+        None
     }
 
     pub fn current(&self) -> Option<&RunSummary> {
@@ -268,7 +327,7 @@ impl App {
         // Scrolling up is someone reading something the tail is about to push
         // off the screen. Following again is `G`, and the end of the run.
         if delta < 0 {
-            self.follow = false;
+            self.pane_mut().follow = false;
         }
     }
 
@@ -284,8 +343,9 @@ impl App {
     pub fn situation(&self) -> Situation {
         Situation {
             unconfigured: self.setup.is_some(),
-            running: self.thread.running(),
+            running: self.anything_running(),
             blocked: self.blocked.is_some(),
+            panes: self.panes.len(),
         }
     }
 
@@ -323,26 +383,27 @@ impl App {
 
     /// Walks back and forward through what has been asked here.
     pub fn recall(&mut self, delta: isize) {
-        let history = &self.thread.history;
+        let history = self.pane().thread.history.clone();
         if history.is_empty() {
             return;
         }
-        let at = match (self.history_at, delta) {
+        let at = match (self.pane_mut().history_at, delta) {
             (None, d) if d < 0 => history.len() - 1,
             (None, _) => return,
             (Some(at), d) => match at.checked_add_signed(d) {
                 Some(next) if next < history.len() => next,
                 // Forward past the newest is back to what was being written.
                 Some(_) => {
-                    self.history_at = None;
-                    self.prompt.clear();
+                    self.pane_mut().history_at = None;
+                    self.pane_mut().prompt.clear();
                     return;
                 }
                 None => 0,
             },
         };
-        self.history_at = Some(at);
-        self.prompt = history[at].clone();
+        self.pane_mut().history_at = Some(at);
+        let said = history[at].clone();
+        self.pane_mut().prompt = said;
     }
 
     /// True while what is in the box is a command being picked rather than a
@@ -354,13 +415,13 @@ impl App {
     pub fn slashing(&self) -> bool {
         self.focus == Focus::Prompt
             && self.dialog.is_none()
-            && self.prompt.starts_with('/')
-            && !self.prompt.contains(char::is_whitespace)
+            && self.pane().prompt.starts_with('/')
+            && !self.pane().prompt.contains(char::is_whitespace)
     }
 
     /// The commands the slash in the box is offering.
     pub fn slash_matches(&self) -> Vec<Command> {
-        let word = self.prompt.trim_start_matches('/').to_lowercase();
+        let word = self.pane().prompt.trim_start_matches('/').to_lowercase();
         let offered = Command::offered(self.situation());
         // A word that names a command exactly is that command, not the first
         // of everything it is a prefix of — and it is how `/help` and `/l`
@@ -384,7 +445,7 @@ impl App {
 
     /// How many rows the input box wants, border included.
     fn prompt_height(&self) -> u16 {
-        let lines = self.prompt.lines().count().clamp(1, PROMPT_LINES);
+        let lines = self.pane().prompt.lines().count().clamp(1, PROMPT_LINES);
         lines as u16 + 2
     }
 }
@@ -394,10 +455,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // At most a third of a short terminal: a box that grew to six lines on a
     // twelve-row screen would leave four rows for the work it is about.
     let box_height = app.prompt_height().min((screen.height / 3).max(3));
+    // The bar costs a row and only appears once there is something to
+    // navigate: one line of work needs no bar saying which one it is.
+    let bar = u16::from(app.panes.len() > 1);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
+            Constraint::Length(bar),
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(box_height),
@@ -406,12 +471,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .split(screen);
 
     frame.render_widget(breadcrumb(app, screen.width), theme::inset(rows[0]));
+    if bar == 1 {
+        frame.render_widget(
+            Paragraph::new(pane_bar(app, rows[1].width.saturating_sub(theme::GUTTER))),
+            theme::inset(rows[1]),
+        );
+    }
     frame.render_widget(
-        Paragraph::new(theme::rule(rows[1].width.saturating_sub(theme::GUTTER))),
-        theme::inset(rows[1]),
+        Paragraph::new(theme::rule(rows[2].width.saturating_sub(theme::GUTTER))),
+        theme::inset(rows[2]),
     );
 
-    let content = theme::inset(rows[2]);
+    let content = theme::inset(rows[3]);
     if app.setup.is_some() {
         render_setup(frame, app, content);
     } else {
@@ -421,13 +492,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
     }
 
-    render_prompt(frame, app, rows[3]);
+    render_prompt(frame, app, rows[4]);
     if app.slashing() {
-        render_slash(frame, app, rows[3]);
+        render_slash(frame, app, rows[4]);
     }
     frame.render_widget(
-        Paragraph::new(status_bar(app, rows[4].width.saturating_sub(theme::GUTTER))),
-        theme::inset(rows[4]),
+        Paragraph::new(status_bar(app, rows[5].width.saturating_sub(theme::GUTTER))),
+        theme::inset(rows[5]),
     );
 
     match app.dialog {
@@ -460,7 +531,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 fn breadcrumb(app: &App, width: u16) -> Paragraph<'static> {
     // Room is reserved for the branch only when there is one to say. A path
     // cut short to leave space for nothing is a path cut short for nothing.
-    let room = if app.thread.continuing() {
+    let room = if app.thread().continuing() {
         width.saturating_sub(38)
     } else {
         width.saturating_sub(2)
@@ -471,21 +542,60 @@ fn breadcrumb(app: &App, width: u16) -> Paragraph<'static> {
     )];
     // Which repository, because a workspace can hold several and a task goes
     // into exactly one of them.
-    if let Some(repo) = &app.repository {
+    if let Some(repo) = &app.pane().repository {
         spans.push(Span::styled("  ", theme::muted()));
         spans.push(Span::styled(repo.name.clone(), theme::accent()));
     }
     // What the next run will stand on, where that is not simply `HEAD`. It
     // belongs beside the path because it is the same kind of fact: where you
     // are working.
-    if app.thread.continuing() {
+    if app.thread().continuing() {
         spans.push(Span::styled("   on ", theme::muted()));
         spans.push(Span::styled(
-            truncate(&app.thread.base_ref, 28),
+            truncate(&app.thread().base_ref, 28),
             theme::accent(),
         ));
     }
     Paragraph::new(Line::from(spans))
+}
+
+/// The lines of work open here, and which one has the screen.
+///
+/// Numbered, because the number is what a keystroke takes, and marked where
+/// something is running — a run in a pane nobody is looking at is still a run,
+/// and a bar that did not say so would be a bar that hid it.
+fn pane_bar(app: &App, width: u16) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (i, pane) in app.panes.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("   ", theme::muted()));
+        }
+        let here = i == app.at;
+        spans.push(Span::styled(
+            format!("{} ", i + 1),
+            if here {
+                theme::accent()
+            } else {
+                theme::muted()
+            },
+        ));
+        spans.push(Span::styled(
+            truncate(&pane.title(), 18),
+            if here {
+                theme::accent().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else {
+                theme::muted()
+            },
+        ));
+        if pane.running() {
+            spans.push(Span::styled(" \u{b7}", theme::on(theme::WARN)));
+        }
+    }
+    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    if used + 16 <= width as usize {
+        spans.push(Span::styled("    ctrl-t new", theme::muted()));
+    }
+    Line::from(spans)
 }
 
 /// A project path as a person would write it.
@@ -506,14 +616,14 @@ fn where_we_are(project: &Path) -> String {
 /// The thread: everything asked here, and what came of it.
 fn render_work(frame: &mut Frame, app: &mut App, area: Rect) {
     app.page = area.height.saturating_sub(1).max(1);
-    if app.thread.is_empty() {
+    if app.thread().is_empty() {
         frame.render_widget(Paragraph::new(opening(app, area.width, area.height)), area);
         return;
     }
 
-    let lines = thread_lines(&app.thread, area.width, app.tick);
+    let lines = thread_lines(app.thread(), area.width, app.tick);
     let overflow = lines.len().saturating_sub(area.height as usize) as u16;
-    if app.follow {
+    if app.pane().follow {
         app.scroll = overflow;
     }
     app.scroll = app.scroll.min(overflow);
@@ -589,11 +699,11 @@ fn opening(app: &App, width: u16, height: u16) -> Vec<Line<'static>> {
     }
     // A chain says where the next one will start, which is the other half of
     // "where did I get to".
-    if app.thread.continuing() {
+    if app.thread().continuing() {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("The next one starts from ", theme::muted()),
-            Span::styled(app.thread.base_ref.clone(), theme::accent()),
+            Span::styled(app.thread().base_ref.clone(), theme::accent()),
             Span::styled(".", theme::muted()),
         ]));
     }
@@ -821,13 +931,14 @@ fn render_prompt(frame: &mut Frame, app: &App, area: Rect) {
     let writing = app.focus == Focus::Prompt && app.dialog.is_none();
     let block = theme::panel(writing).padding(Padding::horizontal(1));
 
-    let text: Vec<Line<'static>> = if !writing && app.prompt.is_empty() {
+    let text: Vec<Line<'static>> = if !writing && app.pane().prompt.is_empty() {
         vec![Line::from(Span::styled(
             "n  write a task     l  runs     ctrl-k  commands     ?  keys",
             theme::muted(),
         ))]
     } else {
         let mut lines: Vec<Line<'static>> = app
+            .pane()
             .prompt
             .lines()
             .map(|line| Line::from(Span::styled(line.to_string(), theme::text())))
@@ -840,7 +951,7 @@ fn render_prompt(frame: &mut Frame, app: &App, area: Rect) {
             let last = lines.len() - 1;
             let mut spans = lines[last].spans.clone();
             spans.push(Span::styled(theme::CURSOR, theme::accent()));
-            if app.prompt.is_empty() {
+            if app.pane().prompt.is_empty() {
                 spans.push(Span::styled(
                     "  say what the agent should do \u{b7} enter runs it",
                     theme::muted(),
@@ -932,7 +1043,7 @@ fn render_repos(frame: &mut Frame, app: &App, screen: Rect) {
     }
     for (i, repo) in repositories.iter().enumerate() {
         let here = i == app.pick;
-        let working = app.repository.as_ref().is_some_and(|r| r.name == repo.name);
+        let working = app.repository().is_some_and(|r| r.name == repo.name);
         lines.push(Line::from(vec![
             Span::styled(if here { theme::CURSOR } else { " " }, theme::accent()),
             Span::styled(
@@ -1046,25 +1157,24 @@ pub fn settings_rows(app: &App) -> Vec<(&'static str, String, bool)> {
     vec![
         (
             "repository",
-            app.repository
-                .as_ref()
+            app.repository()
                 .map(|r| r.name.clone())
                 .unwrap_or_else(|| "\u{2014}".into()),
             false,
         ),
-        ("author", app.thread.author.clone(), true),
-        ("reviewer", app.thread.reviewer.clone(), true),
+        ("author", app.thread().author.clone(), true),
+        ("reviewer", app.thread().reviewer.clone(), true),
         (
             "model",
-            app.thread
+            app.thread()
                 .model
                 .clone()
                 .unwrap_or_else(|| "\u{2014}".into()),
             true,
         ),
-        ("writes", chosen(&app.thread.adapter), false),
-        ("reviews", chosen(&app.thread.review_adapter), false),
-        ("starts from", app.thread.base_ref.clone(), false),
+        ("writes", chosen(&app.thread().adapter), false),
+        ("reviews", chosen(&app.thread().review_adapter), false),
+        ("starts from", app.thread().base_ref.clone(), false),
     ]
 }
 
@@ -1094,7 +1204,7 @@ fn status_bar(app: &App, width: u16) -> Line<'static> {
         ));
     }
 
-    let left = match app.thread.live.as_ref().filter(|s| s.live()) {
+    let left = match app.thread().live.as_ref().filter(|s| s.live()) {
         Some(session) => vec![
             Span::styled(
                 if session.stopping {
@@ -1414,14 +1524,14 @@ fn render_leaving(frame: &mut Frame, app: &App, screen: Rect) {
         "Leave the browser?",
         theme::bold(),
     ))];
-    if app.thread.running() {
+    if app.anything_running() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "A run is going. Leaving asks it to stop and waits for it.",
             theme::on(theme::WARN),
         )));
     }
-    if !app.prompt.trim().is_empty() {
+    if !app.pane().prompt.trim().is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "The task in the box is not written down anywhere.",
@@ -1456,6 +1566,8 @@ fn render_keys(frame: &mut Frame, screen: Rect) {
         ("up / down", "what you have asked here before"),
         ("esc", "put the task aside, and take the keys back"),
         ("n", "take the box back"),
+        ("ctrl-t", "another line of work, open beside this one"),
+        ("ctrl-] / ctrl-[", "move between them"),
         ("s", "ask a running agent to stop"),
         ("l", "the runs recorded here"),
         ("tab", "checks, events, diff \u{2014} on a record"),
@@ -1606,8 +1718,8 @@ fn render_agents(frame: &mut Frame, app: &App, screen: Rect) {
         Some(id) => (id.clone(), theme::ACCENT),
         None => ("automatic".to_string(), theme::MUTED),
     };
-    let (author, author_colour) = named(&app.thread.adapter);
-    let (reviewer, reviewer_colour) = named(&app.thread.review_adapter);
+    let (author, author_colour) = named(&app.thread().adapter);
+    let (reviewer, reviewer_colour) = named(&app.thread().review_adapter);
 
     let mut lines = vec![
         Line::from(vec![
@@ -1625,10 +1737,10 @@ fn render_agents(frame: &mut Frame, app: &App, screen: Rect) {
     for (i, agent) in app.agents.iter().enumerate() {
         let here = i == app.pick;
         let mut role = String::new();
-        if app.thread.adapter.as_deref() == Some(agent.id.as_str()) {
+        if app.thread().adapter.as_deref() == Some(agent.id.as_str()) {
             role.push_str("writes ");
         }
-        if app.thread.review_adapter.as_deref() == Some(agent.id.as_str()) {
+        if app.thread().review_adapter.as_deref() == Some(agent.id.as_str()) {
             role.push_str("reviews");
         }
         let (mark, colour) = if agent.ready {
@@ -1903,6 +2015,7 @@ mod tests {
     use ostraka_core::identity::ActorId;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use std::path::PathBuf;
 
     fn summary(run_id: &str, prompt: &str, outcome: Option<Outcome>) -> RunSummary {
         RunSummary {
@@ -1968,7 +2081,7 @@ mod tests {
 
     /// A turn that is over, put straight into the thread.
     fn turn(app: &mut App, prompt: &str, steps: Vec<Step>, ended: Option<Finished>) {
-        app.thread.turns.push(Turn {
+        app.thread_mut().turns.push(Turn {
             prompt: prompt.to_string(),
             steps,
             finished: ended,
@@ -1977,7 +2090,7 @@ mod tests {
     }
 
     fn working(app: &mut App, prompt: &str, steps: Vec<Step>) {
-        app.thread.live = Some(Session::recorded(prompt, steps, None));
+        app.thread_mut().live = Some(Session::recorded(prompt, steps, None));
     }
 
     /// A workspace that is not on disk, for the screens that do not touch it.
@@ -2090,13 +2203,13 @@ mod tests {
         // Anchored where the typing is, because that is where the eye already
         // is. Typing "/settings" used to start a run whose task was the word.
         let mut app = App::new(nowhere(), Vec::new());
-        app.prompt = "/".into();
+        app.pane_mut().prompt = "/".into();
         assert!(app.slashing());
         let out = screen(&mut app, 100, 24);
         assert!(out.contains("/settings"), "{out}");
         assert!(out.contains("/runs"), "{out}");
 
-        app.prompt = "/set".into();
+        app.pane_mut().prompt = "/set".into();
         let narrowed = screen(&mut app, 100, 24);
         assert!(narrowed.contains("/settings"), "{narrowed}");
         assert!(!narrowed.contains("/runs"), "{narrowed}");
@@ -2104,12 +2217,12 @@ mod tests {
 
         // A word that is a command's own name reaches it even where the name
         // is not its slug.
-        app.prompt = "/help".into();
+        app.pane_mut().prompt = "/help".into();
         assert_eq!(app.slash_picked(), Some(Command::Keys));
 
         // A task is a task however it starts. The shape being recognised is
         // one word behind a slash, not any line beginning with one.
-        app.prompt = "/tmp/x is where it goes".into();
+        app.pane_mut().prompt = "/tmp/x is where it goes".into();
         assert!(!app.slashing());
         assert!(!screen(&mut app, 100, 24).contains("/settings"));
     }
@@ -2117,7 +2230,7 @@ mod tests {
     #[test]
     fn a_slash_that_names_nothing_says_so_rather_than_offering_everything() {
         let mut app = App::new(nowhere(), Vec::new());
-        app.prompt = "/xyzzy".into();
+        app.pane_mut().prompt = "/xyzzy".into();
         assert!(screen(&mut app, 100, 24).contains("no command by that name"));
         assert_eq!(app.slash_picked(), None);
     }
@@ -2125,8 +2238,8 @@ mod tests {
     #[test]
     fn the_settings_show_what_is_this_threads_and_what_is_the_projects() {
         let mut app = App::new(nowhere(), Vec::new());
-        app.thread.model = Some("a-model".into());
-        app.thread.adapter = Some("claude-code".into());
+        app.thread_mut().model = Some("a-model".into());
+        app.thread_mut().adapter = Some("claude-code".into());
         app.project_facts = vec![
             ("gate".into(), "format, test".into()),
             ("agent stops".into(), "900s".into()),
@@ -2197,7 +2310,7 @@ mod tests {
         assert!(bare.contains("stay"), "{bare}");
         assert!(!bare.contains("A run is going"), "{bare}");
 
-        app.prompt = "a task half written".into();
+        app.pane_mut().prompt = "a task half written".into();
         working(&mut app, "something", vec![Step::Entered(Phase::Authoring)]);
         let costly = screen(&mut app, 100, 22);
         assert!(costly.contains("A run is going"), "{costly}");
@@ -2250,7 +2363,7 @@ mod tests {
         // And what to do next is still said.
         assert!(out.contains("Write a task below"), "{out}");
 
-        app.thread.base_ref = "ostraka/t1-20260908T000100Z".into();
+        app.thread_mut().base_ref = "ostraka/t1-20260908T000100Z".into();
         assert!(screen(&mut app, 100, 26).contains("The next one starts from"));
     }
 
@@ -2443,7 +2556,7 @@ mod tests {
         // "Refused" is a verdict on a change. A run that could not be launched
         // never produced one.
         let mut app = App::new(nowhere(), Vec::new());
-        app.thread.turns.push(Turn {
+        app.thread_mut().turns.push(Turn {
             prompt: "do a thing".into(),
             steps: Vec::new(),
             finished: None,
@@ -2469,7 +2582,7 @@ mod tests {
         );
 
         app.scroll_by(-30);
-        assert!(!app.follow, "scrolling up did not release the tail");
+        assert!(!app.pane().follow, "scrolling up did not release the tail");
         let held = screen(&mut app, 100, 20);
         assert!(!held.contains("line 59"), "the view snapped back:\n{held}");
     }
@@ -2480,7 +2593,7 @@ mod tests {
         // Nothing to say while the chain is still standing on HEAD.
         assert!(!screen(&mut app, 100, 18).contains("ostraka/"));
 
-        app.thread.base_ref = "ostraka/t1-20260908T000100Z".into();
+        app.thread_mut().base_ref = "ostraka/t1-20260908T000100Z".into();
         let out = screen(&mut app, 100, 18);
         let breadcrumb = out.lines().next().unwrap_or_default();
         assert!(breadcrumb.contains(" on "), "{out}");
@@ -2508,7 +2621,7 @@ mod tests {
     fn a_task_of_several_lines_makes_the_box_taller() {
         let mut app = App::new(nowhere(), Vec::new());
         let one = app.prompt_height();
-        app.prompt = "first\nsecond\nthird".into();
+        app.pane_mut().prompt = "first\nsecond\nthird".into();
         assert!(app.prompt_height() > one);
 
         let out = screen(&mut app, 100, 20);
@@ -2591,7 +2704,7 @@ mod tests {
         assert!(out.contains("claude-code"), "{out}");
         assert!(out.contains("not found on PATH"), "{out}");
 
-        app.thread.adapter = Some("claude-code".into());
+        app.thread_mut().adapter = Some("claude-code".into());
         let chosen = screen(&mut app, 110, 24);
         assert!(chosen.contains("writes"), "{chosen}");
     }
@@ -2901,7 +3014,7 @@ mod tests {
         assert!(out.contains("gate"), "{out}");
         assert!(out.contains("41s"), "{out}");
 
-        app.thread.live.as_mut().expect("a session").stopping = true;
+        app.thread_mut().live.as_mut().expect("a session").stopping = true;
         assert!(screen(&mut app, 110, 18).contains("stopping"));
     }
 
@@ -3001,6 +3114,44 @@ mod tests {
     }
 
     #[test]
+    fn the_pane_bar_appears_only_when_there_is_something_to_navigate() {
+        let mut app = App::new(nowhere(), Vec::new());
+        // One line of work needs no bar saying which one it is.
+        assert!(!screen(&mut app, 100, 20).contains("ctrl-t new"));
+
+        app.open_pane();
+        let out = screen(&mut app, 100, 20);
+        assert!(out.contains("1 new"), "{out}");
+        assert!(out.contains("2 new"), "{out}");
+        assert!(out.contains("ctrl-t new"), "{out}");
+    }
+
+    #[test]
+    fn a_pane_is_named_for_where_it_works_and_marked_while_it_runs() {
+        // A run in a pane nobody is looking at is still a run, and a bar that
+        // did not say so would be a bar that hid it.
+        let mut app = App::new(nowhere(), Vec::new());
+        app.pane_mut().repository = Some(Repository {
+            name: "scratch".into(),
+            path: PathBuf::from("/p/repositories/scratch"),
+        });
+        working(&mut app, "something", vec![Step::Entered(Phase::Authoring)]);
+        app.open_pane();
+
+        let out = screen(&mut app, 100, 20);
+        let bar = out.lines().nth(1).unwrap_or_default();
+        assert!(bar.contains("scratch"), "{out}");
+        // The new pane carried the repository over, and the running one is
+        // marked even though the screen is on the other.
+        assert!(
+            bar.contains(theme::CURSOR) || bar.contains('\u{b7}'),
+            "{bar}"
+        );
+        assert_eq!(app.at, 1);
+        assert!(app.anything_running(), "the run was lost by switching pane");
+    }
+
+    #[test]
     fn the_screen_fits_whatever_terminal_it_is_given() {
         let mut app = App::new(
             nowhere(),
@@ -3053,7 +3204,7 @@ mod tests {
     #[test]
     fn the_box_does_not_eat_a_short_terminal() {
         let mut app = App::new(nowhere(), Vec::new());
-        app.prompt = (0..6).map(|i| format!("line {i}\n")).collect();
+        app.pane_mut().prompt = (0..6).map(|i| format!("line {i}\n")).collect();
         let tall = screen(&mut app, 80, 40);
         assert!(tall.contains("line 5"), "{tall}");
 

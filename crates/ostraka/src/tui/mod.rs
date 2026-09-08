@@ -13,6 +13,7 @@
 mod command;
 #[cfg(test)]
 mod flows;
+mod pane;
 mod remedy;
 mod session;
 mod theme;
@@ -103,7 +104,7 @@ fn open(workspace: &Workspace, records_root: &Path) -> Result<App, Box<dyn std::
     let mut app = App::new(workspace.clone(), index::list(records_root)?);
     // The one there is, where there is one. A workspace with several waits to
     // be told which, because picking would be picking.
-    app.repository = workspace.repository(None).ok();
+    app.pane_mut().repository = workspace.repository(None).ok();
     // Opened somewhere that is not a project yet: say what is missing and offer
     // to write it, rather than showing an empty list that looks like a bug.
     //
@@ -146,7 +147,9 @@ fn event_loop(
     // Never walk away from a run. Leaving here with a vendor still writing
     // into a worktree is the thing Ctrl-C was taught to prevent, and closing a
     // window is not a better reason to do it than pressing a key was.
-    app.thread.settle_worker();
+    for pane in &mut app.panes {
+        pane.thread.settle_worker();
+    }
     Ok(())
 }
 
@@ -155,10 +158,18 @@ fn event_loop(
 /// Called before drawing rather than after a key, because a run says things
 /// while nobody is pressing anything — which is most of the time it takes.
 fn take_stock(app: &mut App, records_root: &Path) {
-    if let Some(ended) = app.thread.settle() {
-        finished_run(app, records_root, Some(ended));
-    } else if !app.thread.running() && app.leaving {
-        app.quit = true;
+    // Every pane, not the one on screen. A run keeps going in a pane somebody
+    // has switched away from, and a transcript that stopped updating because
+    // nobody was looking at it would be a transcript that lied about where the
+    // run got to.
+    let mut ended = None;
+    for at in 0..app.panes.len() {
+        if let Some(run_id) = app.panes[at].thread.settle() {
+            ended = Some((at, run_id));
+        }
+    }
+    if let Some((at, run_id)) = ended {
+        finished_run(app, records_root, at, Some(run_id));
     }
     // Asked to leave while something was running: the browser stays up until
     // the run it started has actually stopped, so the last thing on screen is
@@ -169,15 +180,20 @@ fn take_stock(app: &mut App, records_root: &Path) {
 }
 
 /// What to do about a run that has just ended.
-fn finished_run(app: &mut App, records_root: &Path, run_id: Option<String>) {
-    let last = app.thread.turns.last();
-    app.status = last.and_then(|turn| {
+fn finished_run(app: &mut App, records_root: &Path, at: usize, run_id: Option<String>) {
+    let last = app.panes[at].thread.turns.last();
+    let said = last.and_then(|turn| {
         turn.finished
             .as_ref()
             .map(|f| f.summary.clone())
             .or_else(|| turn.failed.clone())
     });
-    app.follow = true;
+    // Named where it happened, because it may not have been where you were.
+    app.status = match (said, app.panes.len() > 1 && at != app.at) {
+        (Some(said), true) => Some(format!("{}: {said}", app.panes[at].title())),
+        (said, _) => said,
+    };
+    app.panes[at].follow = true;
 
     // The record exists now, so the listing can show it.
     if let Ok(runs) = index::list(records_root) {
@@ -212,6 +228,15 @@ fn handle(app: &mut App, key: KeyEvent, records_root: &Path) {
             return;
         }
         KeyCode::Char('c') if control => return leave(app),
+        // Panes are switched between while the box has the keys, so they are
+        // chords rather than letters.
+        KeyCode::Char('t') if control => return perform(app, Command::NewPane, records_root),
+        KeyCode::Char(']') if control => return perform(app, Command::NextPane, records_root),
+        KeyCode::Char('[') if control => {
+            app.next_pane(-1);
+            to_work(app);
+            return;
+        }
         _ => {}
     }
 
@@ -259,11 +284,13 @@ fn prompt_key(app: &mut App, key: KeyEvent, records_root: &Path) {
     match key.code {
         // A task worth writing sometimes takes a paragraph, and a box that
         // could not hold one would push the work back out to the shell.
-        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => app.prompt.push('\n'),
-        KeyCode::Char('j') if control => app.prompt.push('\n'),
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
+            app.pane_mut().prompt.push('\n')
+        }
+        KeyCode::Char('j') if control => app.pane_mut().prompt.push('\n'),
         KeyCode::Enter if app.slashing() => {
             let picked = app.slash_picked();
-            app.prompt.clear();
+            app.pane_mut().prompt.clear();
             app.pick = 0;
             match picked {
                 Some(command) => perform(app, command, records_root),
@@ -279,8 +306,8 @@ fn prompt_key(app: &mut App, key: KeyEvent, records_root: &Path) {
         // after looking something up is the normal way of working.
         KeyCode::Esc => app.focus = Focus::Keys,
         KeyCode::Backspace => {
-            app.prompt.pop();
-            app.history_at = None;
+            app.pane_mut().prompt.pop();
+            app.pane_mut().history_at = None;
             app.pick = 0;
         }
         KeyCode::Up => app.recall(-1),
@@ -288,8 +315,8 @@ fn prompt_key(app: &mut App, key: KeyEvent, records_root: &Path) {
         KeyCode::PageUp => app.scroll_by(-(app.page as i16)),
         KeyCode::PageDown => app.scroll_by(app.page as i16),
         KeyCode::Char(c) => {
-            app.prompt.push(c);
-            app.history_at = None;
+            app.pane_mut().prompt.push(c);
+            app.pane_mut().history_at = None;
             app.pick = 0;
         }
         _ => {}
@@ -323,8 +350,11 @@ fn command_key(app: &mut App, key: KeyEvent, records_root: &Path) {
         KeyCode::Char('r') => perform(app, Command::Reload, records_root),
         KeyCode::Char('p') => perform(app, Command::Promote, records_root),
         KeyCode::Tab | KeyCode::Right | KeyCode::Left => {
-            perform(app, Command::NextPane, records_root)
+            perform(app, Command::NextDetail, records_root)
         }
+        KeyCode::Char('t') => perform(app, Command::NewPane, records_root),
+        KeyCode::Char(']') => perform(app, Command::NextPane, records_root),
+        KeyCode::Char('X') => perform(app, Command::ClosePane, records_root),
         KeyCode::Char('j') | KeyCode::Down => {
             app.move_by(1);
             load_detail(app, records_root);
@@ -338,7 +368,7 @@ fn command_key(app: &mut App, key: KeyEvent, records_root: &Path) {
             load_detail(app, records_root);
         }
         KeyCode::Char('G') | KeyCode::End => {
-            app.follow = true;
+            app.pane_mut().follow = true;
             app.move_by(app.matching.len() as isize);
             load_detail(app, records_root);
         }
@@ -352,7 +382,7 @@ fn command_key(app: &mut App, key: KeyEvent, records_root: &Path) {
 fn to_work(app: &mut App) {
     app.screen = Screen::Work;
     app.focus = Focus::Prompt;
-    app.follow = true;
+    app.pane_mut().follow = true;
     app.scroll = 0;
 }
 
@@ -379,7 +409,7 @@ fn perform(app: &mut App, command: Command, records_root: &Path) {
             app.focus = Focus::Prompt;
         }
         Command::Stop => {
-            app.thread.stop();
+            app.thread_mut().stop();
             app.status = Some("asked the agent to stop".to_string());
         }
         Command::Fix => open_fix(app),
@@ -395,7 +425,7 @@ fn perform(app: &mut App, command: Command, records_root: &Path) {
                 .workspace
                 .repositories()
                 .iter()
-                .position(|r| Some(&r.name) == app.repository.as_ref().map(|c| &c.name))
+                .position(|r| Some(&r.name) == app.repository().map(|c| &c.name))
                 .unwrap_or(0);
         }
         Command::Agents => {
@@ -403,14 +433,30 @@ fn perform(app: &mut App, command: Command, records_root: &Path) {
             app.open(Dialog::Agents);
         }
         Command::Fresh => {
-            app.thread = thread::Thread::default();
+            *app.thread_mut() = thread::Thread::default();
             app.status = Some("a fresh thread \u{2014} the next run starts from HEAD".to_string());
             to_work(app);
         }
-        Command::NextPane => {
+        Command::NextDetail => {
             app.detail = app.detail.next();
             app.scroll = 0;
             load_detail(app, records_root);
+        }
+        Command::NewPane => {
+            app.open_pane();
+            to_work(app);
+            app.status = Some(format!("pane {} of {}", app.at + 1, app.panes.len()));
+        }
+        Command::NextPane => {
+            app.next_pane(1);
+            to_work(app);
+        }
+        Command::ClosePane => {
+            if let Some(why) = app.close_pane() {
+                app.status = Some(why);
+            } else {
+                to_work(app);
+            }
         }
         Command::Promote => app.status = Some(promote_selected(app)),
         Command::Reload => match index::list(records_root) {
@@ -439,6 +485,7 @@ fn unavailable(app: &App, command: Command) -> String {
         }
         Command::Stop => "nothing is running".to_string(),
         Command::Fix => "nothing is in the way".to_string(),
+        Command::NextPane | Command::ClosePane => "this is the only pane".to_string(),
         Command::Setup => "this directory is already set up".to_string(),
         other => format!("{} is not available here", other.name()),
     }
@@ -523,7 +570,7 @@ fn dialog_key(app: &mut App, key: KeyEvent, records_root: &Path) {
 /// file somebody edits, and a browser showing what it said an hour ago would
 /// be showing the wrong thing precisely when they had just changed it.
 fn project_facts(app: &App) -> Vec<(String, String)> {
-    let Some(repo) = app.repository.as_ref() else {
+    let Some(repo) = app.repository() else {
         return Vec::new();
     };
     let Ok(config) = app.workspace.config_for(repo) else {
@@ -610,10 +657,10 @@ fn apply_setting(app: &mut App, row: Option<&'static str>, value: String) {
     match row {
         // An empty identity would end up in a commit trailer as nothing at
         // all, so it is refused rather than written.
-        Some("author") if !value.is_empty() => app.thread.author = value,
-        Some("reviewer") if !value.is_empty() => app.thread.reviewer = value,
+        Some("author") if !value.is_empty() => app.thread_mut().author = value,
+        Some("reviewer") if !value.is_empty() => app.thread_mut().reviewer = value,
         Some("model") => {
-            app.thread.model = (!value.is_empty()).then_some(value);
+            app.thread_mut().model = (!value.is_empty()).then_some(value);
         }
         _ => {}
     }
@@ -628,7 +675,7 @@ fn apply_setting(app: &mut App, row: Option<&'static str>, value: String) {
 /// one yet the answer is to clone something in — which is a step only a person
 /// can take, because nobody here knows the URL.
 fn blocking(app: &App) -> Option<remedy::Remedy> {
-    match app.repository.as_ref() {
+    match app.repository() {
         Some(repo) => remedy::Remedy::diagnose(&repo.path),
         None => Some(remedy::Remedy::nothing_cloned(
             &app.workspace.repositories_dir(),
@@ -652,8 +699,7 @@ fn open_fix(app: &mut App) {
 /// quietly on somebody's behalf.
 fn fix_key(app: &mut App, code: KeyCode) {
     let project = app
-        .repository
-        .as_ref()
+        .repository()
         .map(|r| r.path.clone())
         .unwrap_or_else(|| app.workspace.root.clone());
     let Some(remedy) = app.remedy.as_mut() else {
@@ -671,11 +717,10 @@ fn fix_key(app: &mut App, code: KeyCode) {
             // believed would work, and whether they did is a question for the
             // directory.
             if remedy.done() && !remedy.failed {
-                app.repository = app
-                    .workspace
-                    .repository(None)
-                    .ok()
-                    .or(app.repository.take());
+                let found = app.workspace.repository(None).ok();
+                if found.is_some() {
+                    app.pane_mut().repository = found;
+                }
                 app.blocked = blocking(app).map(|r| r.problem);
             }
         }
@@ -693,11 +738,11 @@ fn repos_key(app: &mut App, code: KeyCode, records_root: &Path) {
         KeyCode::Up => app.pick = app.pick.saturating_sub(1),
         KeyCode::Enter => {
             if let Some(repo) = repositories.get(app.pick) {
-                app.repository = Some(repo.clone());
+                app.pane_mut().repository = Some(repo.clone());
                 // A thread is a chain of runs in one repository. Moving to
                 // another one starts a new chain rather than continuing this
                 // one somewhere it was never made.
-                app.thread = thread::Thread::default();
+                *app.thread_mut() = thread::Thread::default();
                 app.blocked = blocking(app).map(|r| r.problem);
                 app.status = Some(format!("working in {}", repo.name));
                 let _ = records_root;
@@ -716,11 +761,11 @@ fn agents_key(app: &mut App, code: KeyCode) {
         KeyCode::Esc | KeyCode::Enter => app.close(),
         KeyCode::Down => app.pick = (app.pick + 1).min(ids.len().saturating_sub(1)),
         KeyCode::Up => app.pick = app.pick.saturating_sub(1),
-        KeyCode::Char('a') => app.thread.adapter = here,
-        KeyCode::Char('r') => app.thread.review_adapter = here,
+        KeyCode::Char('a') => app.thread_mut().adapter = here,
+        KeyCode::Char('r') => app.thread_mut().review_adapter = here,
         KeyCode::Char('x') => {
-            app.thread.adapter = None;
-            app.thread.review_adapter = None;
+            app.thread_mut().adapter = None;
+            app.thread_mut().review_adapter = None;
         }
         _ => {}
     }
@@ -732,14 +777,14 @@ fn agents_key(app: &mut App, code: KeyCode) {
 /// routing and the record are the same whether the task arrived from a shell
 /// or from a keystroke.
 fn start_run(app: &mut App) {
-    let prompt = app.prompt.trim().to_string();
+    let prompt = app.pane_mut().prompt.trim().to_string();
     if prompt.is_empty() {
         // An empty task would be a run whose diff nobody can explain. Say so
         // rather than starting one and refusing it two minutes later.
         app.status = Some("nothing to run \u{2014} write what the agent should do".to_string());
         return;
     }
-    if app.thread.running() {
+    if app.anything_running() {
         app.status = Some(unavailable(app, Command::NewRun));
         return;
     }
@@ -757,13 +802,14 @@ fn start_run(app: &mut App) {
         return;
     }
     app.blocked = None;
-    app.prompt.clear();
-    app.history_at = None;
+    app.pane_mut().prompt.clear();
+    app.pane_mut().history_at = None;
     app.status = None;
-    app.follow = true;
+    app.pane_mut().follow = true;
     app.screen = Screen::Work;
-    let repository = app.repository.as_ref().map(|r| r.name.clone());
-    app.thread.start(app.workspace.clone(), repository, prompt);
+    let repository = app.repository().map(|r| r.name.clone());
+    let workspace = app.workspace.clone();
+    app.thread_mut().start(workspace, repository, prompt);
 }
 
 /// Leaving, asked rather than assumed.
@@ -783,8 +829,8 @@ fn leave(app: &mut App) {
 /// Waits for a run rather than abandoning one: leaving with a vendor still
 /// writing into a worktree is the thing Ctrl-C was taught to prevent.
 fn depart(app: &mut App) {
-    if app.thread.running() {
-        app.thread.stop();
+    if app.anything_running() {
+        app.thread_mut().stop();
         app.leaving = true;
         app.status = Some("stopping the run \u{2014} the browser closes when it has".to_string());
     } else {
@@ -891,7 +937,7 @@ mod tests {
     }
 
     fn running(app: &mut App) {
-        app.thread.live = Some(Session::recorded(
+        app.thread_mut().live = Some(Session::recorded(
             "a task",
             vec![ostraka_runtime::progress::Step::Entered(
                 ostraka_runtime::progress::Phase::Authoring,
@@ -908,7 +954,7 @@ mod tests {
         let mut a = app();
         assert_eq!(a.focus, Focus::Prompt);
         typed(&mut a, "quit");
-        assert_eq!(a.prompt, "quit");
+        assert_eq!(a.pane().prompt, "quit");
         assert!(!a.quit, "typing a command's name ran it");
     }
 
@@ -924,7 +970,7 @@ mod tests {
 
         handle(&mut a, control('x'), Path::new("/p/.ostraka"));
         assert!(a.leader);
-        assert_eq!(a.prompt, "half a task", "the chords ate the task");
+        assert_eq!(a.pane().prompt, "half a task", "the chords ate the task");
     }
 
     #[test]
@@ -933,12 +979,12 @@ mod tests {
         typed(&mut a, "half a thought");
         handle(&mut a, press(KeyCode::Esc), Path::new("/p/.ostraka"));
         assert_eq!(a.focus, Focus::Keys);
-        assert_eq!(a.prompt, "half a thought");
+        assert_eq!(a.pane().prompt, "half a thought");
 
         // And n takes the box back with the task still in it.
         handle(&mut a, press(KeyCode::Char('n')), Path::new("/p/.ostraka"));
         assert_eq!(a.focus, Focus::Prompt);
-        assert_eq!(a.prompt, "half a thought");
+        assert_eq!(a.pane().prompt, "half a thought");
     }
 
     #[test]
@@ -966,7 +1012,8 @@ mod tests {
         assert_eq!(a.dialog, None, "answering no left the question open");
         assert!(!a.quit, "answering no left anyway");
         assert_eq!(
-            a.prompt, "a task in progress",
+            a.pane().prompt,
+            "a task in progress",
             "the task was lost by asking"
         );
 
@@ -984,7 +1031,114 @@ mod tests {
         handle(&mut a, press(KeyCode::Char('z')), Path::new("/p/.ostraka"));
         assert!(!a.leader);
         assert!(!a.quit);
-        assert!(a.prompt.is_empty(), "the leader's letter reached the box");
+        assert!(
+            a.pane().prompt.is_empty(),
+            "the leader's letter reached the box"
+        );
+    }
+
+    fn alt(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::ALT)
+    }
+
+    #[test]
+    fn a_pane_is_opened_and_moved_between_without_leaving_the_box() {
+        // Switching lines of work happens while typing, so it is a chord
+        // rather than a letter.
+        let mut a = app();
+        assert_eq!(a.panes.len(), 1);
+
+        handle(&mut a, control('t'), Path::new("/p/.ostraka"));
+        assert_eq!(a.panes.len(), 2);
+        assert_eq!(a.at, 1);
+
+        handle(&mut a, control(']'), Path::new("/p/.ostraka"));
+        assert_eq!(a.at, 0, "the next pane wrapped the wrong way");
+        handle(&mut a, control('['), Path::new("/p/.ostraka"));
+        assert_eq!(a.at, 1);
+    }
+
+    #[test]
+    fn each_pane_keeps_its_own_task() {
+        // The point of a second pane: a half-written thought survives going
+        // and looking at something else.
+        let mut a = app();
+        typed(&mut a, "the first thought");
+        handle(&mut a, control('t'), Path::new("/p/.ostraka"));
+        assert!(
+            a.pane().prompt.is_empty(),
+            "a new pane opened with the old task in it"
+        );
+
+        typed(&mut a, "the second");
+        handle(&mut a, control(']'), Path::new("/p/.ostraka"));
+        assert_eq!(a.pane().prompt, "the first thought");
+        handle(&mut a, control(']'), Path::new("/p/.ostraka"));
+        assert_eq!(a.pane().prompt, "the second");
+    }
+
+    #[test]
+    fn one_run_at_a_time_across_every_pane() {
+        // Not a property of panes. The request to stop is a single flag,
+        // because a signal is single, so two runs would both answer it.
+        let mut a = app();
+        running(&mut a);
+        handle(&mut a, control('t'), Path::new("/p/.ostraka"));
+        assert!(!a.pane().running(), "the new pane inherited the run");
+
+        typed(&mut a, "a second task somewhere else");
+        handle(&mut a, press(KeyCode::Enter), Path::new("/p/.ostraka"));
+        assert!(a.pane().thread.live.is_none(), "a second run was started");
+        assert!(
+            a.status
+                .as_deref()
+                .is_some_and(|s| s.contains("already going")),
+            "{:?}",
+            a.status
+        );
+        ostraka_adapter::interrupt::clear();
+    }
+
+    #[test]
+    fn a_pane_is_not_closed_out_from_under_a_run() {
+        // Closing it would abandon the thread writing into a worktree.
+        let mut a = app();
+        handle(&mut a, control('t'), Path::new("/p/.ostraka"));
+        running(&mut a);
+        a.focus = Focus::Keys;
+        handle(&mut a, press(KeyCode::Char('X')), Path::new("/p/.ostraka"));
+
+        assert_eq!(a.panes.len(), 2, "a running pane was closed");
+        assert!(
+            a.status.as_deref().is_some_and(|s| s.contains("running")),
+            "{:?}",
+            a.status
+        );
+        ostraka_adapter::interrupt::clear();
+    }
+
+    #[test]
+    fn the_only_pane_is_not_closed() {
+        // A browser with no panes is a browser with nothing to type into.
+        let mut a = app();
+        a.focus = Focus::Keys;
+        handle(&mut a, press(KeyCode::Char('X')), Path::new("/p/.ostraka"));
+        assert_eq!(a.panes.len(), 1);
+        assert_eq!(a.status.as_deref(), Some("this is the only pane"));
+    }
+
+    #[test]
+    fn a_closed_pane_leaves_the_screen_on_one_that_is_still_there() {
+        let mut a = app();
+        handle(&mut a, control('t'), Path::new("/p/.ostraka"));
+        handle(&mut a, control('t'), Path::new("/p/.ostraka"));
+        assert_eq!(a.at, 2);
+
+        a.focus = Focus::Keys;
+        handle(&mut a, press(KeyCode::Char('X')), Path::new("/p/.ostraka"));
+        assert_eq!(a.panes.len(), 2);
+        assert_eq!(a.at, 1, "the screen landed on a pane that is gone");
+        let _ = alt(KeyCode::Char('1'));
     }
 
     #[test]
@@ -995,8 +1149,11 @@ mod tests {
         handle(&mut a, press(KeyCode::Enter), Path::new("/p/.ostraka"));
 
         assert_eq!(a.dialog, Some(Dialog::Settings));
-        assert!(a.thread.live.is_none(), "a run was started for a command");
-        assert!(a.prompt.is_empty(), "the command was left in the box");
+        assert!(a.thread().live.is_none(), "a run was started for a command");
+        assert!(
+            a.pane().prompt.is_empty(),
+            "the command was left in the box"
+        );
     }
 
     #[test]
@@ -1015,7 +1172,7 @@ mod tests {
         handle(&mut a, press(KeyCode::Enter), Path::new("/p/.ostraka"));
 
         assert_eq!(a.editing, None);
-        assert_eq!(a.thread.author, "archon");
+        assert_eq!(a.thread().author, "archon");
     }
 
     #[test]
@@ -1028,7 +1185,7 @@ mod tests {
             handle(&mut a, press(KeyCode::Backspace), Path::new("/p/.ostraka"));
         }
         handle(&mut a, press(KeyCode::Enter), Path::new("/p/.ostraka"));
-        assert_eq!(a.thread.author, "author", "an identity was emptied");
+        assert_eq!(a.thread().author, "author", "an identity was emptied");
     }
 
     #[test]
@@ -1054,7 +1211,10 @@ mod tests {
         handle(&mut a, press(KeyCode::Char('q')), Path::new("/p/.ostraka"));
         assert_eq!(a.dialog, None, "the dialog did not take the key");
         assert!(!a.quit, "q reached the browser through an open dialog");
-        assert!(a.prompt.is_empty(), "q reached the box through a dialog");
+        assert!(
+            a.pane().prompt.is_empty(),
+            "q reached the box through a dialog"
+        );
     }
 
     #[test]
@@ -1089,23 +1249,23 @@ mod tests {
             Path::new("/p/.ostraka"),
         );
         typed(&mut a, "second line");
-        assert_eq!(a.prompt, "first line\nsecond line");
-        assert!(a.thread.live.is_none(), "a newline started the run");
+        assert_eq!(a.pane().prompt, "first line\nsecond line");
+        assert!(a.thread().live.is_none(), "a newline started the run");
     }
 
     #[test]
     fn the_box_offers_back_what_has_been_asked_here() {
         let mut a = app();
-        a.thread.history = vec!["first task".into(), "second task".into()];
+        a.thread_mut().history = vec!["first task".into(), "second task".into()];
         handle(&mut a, press(KeyCode::Up), Path::new("/p/.ostraka"));
-        assert_eq!(a.prompt, "second task");
+        assert_eq!(a.pane().prompt, "second task");
         handle(&mut a, press(KeyCode::Up), Path::new("/p/.ostraka"));
-        assert_eq!(a.prompt, "first task");
+        assert_eq!(a.pane().prompt, "first task");
         handle(&mut a, press(KeyCode::Down), Path::new("/p/.ostraka"));
-        assert_eq!(a.prompt, "second task");
+        assert_eq!(a.pane().prompt, "second task");
         // Forward past the newest is back to an empty box.
         handle(&mut a, press(KeyCode::Down), Path::new("/p/.ostraka"));
-        assert!(a.prompt.is_empty());
+        assert!(a.pane().prompt.is_empty());
     }
 
     #[test]
@@ -1115,7 +1275,7 @@ mod tests {
         let mut a = app();
         typed(&mut a, "   ");
         handle(&mut a, press(KeyCode::Enter), Path::new("/p/.ostraka"));
-        assert!(a.thread.live.is_none(), "an empty task started a run");
+        assert!(a.thread().live.is_none(), "an empty task started a run");
         assert!(a.status.is_some(), "and said nothing about why not");
     }
 
@@ -1127,7 +1287,7 @@ mod tests {
         handle(&mut a, press(KeyCode::Enter), Path::new("/p/.ostraka"));
 
         assert_eq!(
-            a.thread.live.as_ref().expect("a session").prompt,
+            a.thread().live.as_ref().expect("a session").prompt,
             "a task",
             "the live run was replaced"
         );
@@ -1152,7 +1312,7 @@ mod tests {
 
         assert!(!a.quit, "the browser left while a run was going");
         assert!(a.leaving);
-        assert!(a.thread.live.as_ref().expect("a session").stopping);
+        assert!(a.thread().live.as_ref().expect("a session").stopping);
         ostraka_adapter::interrupt::clear();
     }
 
@@ -1182,13 +1342,13 @@ mod tests {
         a.open(Dialog::Agents);
 
         handle(&mut a, press(KeyCode::Char('a')), Path::new("/p/.ostraka"));
-        assert_eq!(a.thread.adapter.as_deref(), Some("writer"));
+        assert_eq!(a.thread().adapter.as_deref(), Some("writer"));
         handle(&mut a, press(KeyCode::Down), Path::new("/p/.ostraka"));
         handle(&mut a, press(KeyCode::Char('r')), Path::new("/p/.ostraka"));
-        assert_eq!(a.thread.review_adapter.as_deref(), Some("reader"));
+        assert_eq!(a.thread().review_adapter.as_deref(), Some("reader"));
 
         handle(&mut a, press(KeyCode::Char('x')), Path::new("/p/.ostraka"));
-        assert_eq!(a.thread.adapter, None);
-        assert_eq!(a.thread.review_adapter, None);
+        assert_eq!(a.thread().adapter, None);
+        assert_eq!(a.thread().review_adapter, None);
     }
 }

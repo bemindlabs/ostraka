@@ -225,16 +225,16 @@ impl Driver {
 
     /// Types a task, runs it, and waits for it to be over.
     fn task(&mut self, text: &str) -> &mut Self {
-        let done = self.app.thread.turns.len() + 1;
+        let done = self.app.thread().turns.len() + 1;
         self.typed(text).key(KeyCode::Enter);
         self.until("the run to finish", move |app| {
-            app.thread.turns.len() == done
+            app.thread().turns.len() == done
         })
     }
 
     /// The last turn in the thread.
     fn last(&self) -> &super::thread::Turn {
-        self.app.thread.turns.last().expect("a finished turn")
+        self.app.thread().turns.last().expect("a finished turn")
     }
 
     fn screen(&mut self) -> String {
@@ -306,7 +306,7 @@ fn setting_up_a_directory_leaves_a_browser_that_can_run_something() {
     d.typed("a task this directory cannot take")
         .key(KeyCode::Enter);
     d.shows("cannot run anything yet");
-    assert!(d.app.thread.live.is_none());
+    assert!(d.app.thread().live.is_none());
 
     d.ctrl('x').key(KeyCode::Char('i'));
     d.hides("not an Ostraka project yet");
@@ -362,11 +362,15 @@ fn a_task_in_a_repository_git_does_not_know_offers_the_steps_out_of_it() {
 
     d.typed("write a file").key(KeyCode::Enter);
     assert!(
-        d.app.thread.live.is_none(),
+        d.app.thread().live.is_none(),
         "a run was started with nowhere to work"
     );
     assert_eq!(d.app.dialog, Some(Dialog::Fix));
-    assert_eq!(d.app.prompt, "write a file", "the task was thrown away");
+    assert_eq!(
+        d.app.pane().prompt,
+        "write a file",
+        "the task was thrown away"
+    );
     d.shows("not a git repository");
     d.shows("git init");
 
@@ -460,7 +464,7 @@ fn the_second_task_starts_where_the_first_one_finished() {
     let scratch = project("thread", 0);
     let mut d = Driver::open(scratch.path());
 
-    assert_eq!(d.app.thread.base_ref, "HEAD");
+    assert_eq!(d.app.thread().base_ref, "HEAD");
     d.task("write a file");
     let first = d
         .last()
@@ -469,12 +473,12 @@ fn the_second_task_starts_where_the_first_one_finished() {
         .map(|f| f.run_id.clone())
         .expect("a finished run");
     assert!(d.last().approved(), "the first run was not approved");
-    assert_eq!(d.app.thread.base_ref, format!("ostraka/{first}"));
+    assert_eq!(d.app.thread().base_ref, format!("ostraka/{first}"));
     // And it says so, where you are rather than buried in a menu.
     d.shows("on ");
 
     d.task("write it again");
-    assert_eq!(d.app.thread.turns.len(), 2);
+    assert_eq!(d.app.thread().turns.len(), 2);
 
     // The proof is in git: the second run's branch has the first run's commit
     // behind it, which is what "starting where the last one finished" means.
@@ -510,7 +514,8 @@ fn a_refused_run_is_not_the_ground_the_next_one_stands_on() {
     d.task("write a file");
     assert!(!d.last().approved());
     assert_eq!(
-        d.app.thread.base_ref, "HEAD",
+        d.app.thread().base_ref,
+        "HEAD",
         "the chain advanced through a refusal"
     );
     d.shows("FAIL");
@@ -543,14 +548,15 @@ fn a_task_whose_agent_runs_out_of_tokens_is_refused_and_says_why() {
     out_of_context(scratch.path());
     let mut d = Driver::open(scratch.path());
     // Pinned, so which of the two scripts authors is not left to routing.
-    d.app.thread.adapter = Some("writer".into());
-    d.app.thread.review_adapter = Some("reader".into());
+    d.app.thread_mut().adapter = Some("writer".into());
+    d.app.thread_mut().review_adapter = Some("reader".into());
 
     d.task("write something long");
 
     assert!(!d.last().approved(), "a half-written change was approved");
     assert_eq!(
-        d.app.thread.base_ref, "HEAD",
+        d.app.thread().base_ref,
+        "HEAD",
         "the chain stood on a change that ran out"
     );
 
@@ -588,10 +594,10 @@ fn a_run_can_be_stopped_from_the_browser_and_is_not_called_a_verdict() {
     // In the same breath as starting it, which is the ordering that used to
     // lose the request to the run clearing the flag behind it.
     d.ctrl('x').key(KeyCode::Char('s'));
-    assert!(d.app.thread.live.as_ref().expect("a session").stopping);
+    assert!(d.app.thread().live.as_ref().expect("a session").stopping);
     d.shows("stopping");
 
-    d.until("the run to stop", |app| app.thread.turns.len() == 1);
+    d.until("the run to stop", |app| app.thread().turns.len() == 1);
     d.shows("stopped by the operator");
     ostraka_adapter::interrupt::clear();
 }
@@ -675,14 +681,14 @@ fn the_agents_dialog_names_who_writes_and_who_reviews() {
 
     d.key(KeyCode::Char('a'));
     d.shows("writes");
-    assert!(d.app.thread.adapter.is_some());
+    assert!(d.app.thread().adapter.is_some());
     d.key(KeyCode::Down).key(KeyCode::Char('r'));
-    assert!(d.app.thread.review_adapter.is_some());
-    assert_ne!(d.app.thread.adapter, d.app.thread.review_adapter);
+    assert!(d.app.thread().review_adapter.is_some());
+    assert_ne!(d.app.thread().adapter, d.app.thread().review_adapter);
     d.key(KeyCode::Esc);
 
     // And a run started afterwards is run by the pair that was named.
-    let author = d.app.thread.adapter.clone().expect("an author");
+    let author = d.app.thread().adapter.clone().expect("an author");
     d.task("write a file");
     assert_eq!(
         d.app.current().map(|r| r.adapter.clone()),
@@ -697,11 +703,11 @@ fn a_fresh_thread_goes_back_to_head() {
     let scratch = project("fresh", 0);
     let mut d = Driver::open(scratch.path());
     d.task("write a file");
-    assert!(d.app.thread.continuing());
+    assert!(d.app.thread().continuing());
 
     d.ctrl('x').key(KeyCode::Char('f'));
-    assert_eq!(d.app.thread.base_ref, "HEAD");
-    assert!(d.app.thread.turns.is_empty());
+    assert_eq!(d.app.thread().base_ref, "HEAD");
+    assert!(d.app.thread().turns.is_empty());
     // The thread is empty; the directory is not, and the screen says which.
     d.shows("Write a task below");
     d.shows("Last asked here");

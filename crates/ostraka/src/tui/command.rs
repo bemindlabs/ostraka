@@ -16,9 +16,12 @@
 pub struct Situation {
     /// This directory cannot be run until something is written into it.
     pub unconfigured: bool,
-    /// A run is going. There is one at a time — running several at once is the
-    /// parallel-execution question, and it is not answered yet.
+    /// A run is going, anywhere in the browser. There is one at a time —
+    /// running several at once is the parallel-execution question, and it is
+    /// not answered yet.
     pub running: bool,
+    /// How many lines of work are open.
+    pub panes: usize,
     /// Something outside the project's own configuration is in the way, and
     /// the browser knows the steps out of it.
     pub blocked: bool,
@@ -35,7 +38,10 @@ pub enum Command {
     Agents,
     Settings,
     Fresh,
+    NewPane,
     NextPane,
+    ClosePane,
+    NextDetail,
     Promote,
     Reload,
     Setup,
@@ -46,7 +52,7 @@ pub enum Command {
 impl Command {
     /// In the order the palette offers them: what someone reaches for most,
     /// first.
-    pub const ALL: [Command; 14] = [
+    pub const ALL: [Command; 17] = [
         Command::NewRun,
         Command::Stop,
         Command::Fix,
@@ -55,7 +61,10 @@ impl Command {
         Command::Agents,
         Command::Settings,
         Command::Fresh,
+        Command::NewPane,
         Command::NextPane,
+        Command::ClosePane,
+        Command::NextDetail,
         Command::Promote,
         Command::Reload,
         Command::Setup,
@@ -73,7 +82,10 @@ impl Command {
             Command::Agents => "agents",
             Command::Settings => "settings",
             Command::Fresh => "start a fresh thread",
+            Command::NewPane => "new pane",
             Command::NextPane => "next pane",
+            Command::ClosePane => "close this pane",
+            Command::NextDetail => "next section",
             Command::Promote => "promote run",
             Command::Reload => "reload runs",
             Command::Setup => "set up this directory",
@@ -93,7 +105,10 @@ impl Command {
             Command::Agents => "a",
             Command::Settings => ",",
             Command::Fresh => "f",
-            Command::NextPane => "tab",
+            Command::NewPane => "t",
+            Command::NextPane => "]",
+            Command::ClosePane => "X",
+            Command::NextDetail => "tab",
             Command::Promote => "p",
             Command::Reload => "r",
             Command::Setup => "i",
@@ -117,7 +132,10 @@ impl Command {
             Command::Agents => 'a',
             Command::Settings => ',',
             Command::Fresh => 'f',
-            Command::NextPane => 't',
+            Command::NewPane => 't',
+            Command::NextPane => ']',
+            Command::ClosePane => 'c',
+            Command::NextDetail => 'd',
             Command::Promote => 'p',
             Command::Reload => 'r',
             Command::Setup => 'i',
@@ -136,7 +154,10 @@ impl Command {
             Command::Agents => "choose who writes and who reviews",
             Command::Settings => "what this thread and this project are set to",
             Command::Fresh => "forget the chain; start again from HEAD",
-            Command::NextPane => "checks, then events, then the diff",
+            Command::NewPane => "another line of work, open beside this one",
+            Command::NextPane => "move to the next line of work",
+            Command::ClosePane => "close this line of work",
+            Command::NextDetail => "checks, then events, then the diff",
             Command::Promote => "give an approved run a branch; merges nothing",
             Command::Reload => "read the run records again",
             Command::Setup => "write the files a project needs to be run",
@@ -160,7 +181,10 @@ impl Command {
             Command::Agents => "agents",
             Command::Settings => "settings",
             Command::Fresh => "fresh",
-            Command::NextPane => "pane",
+            Command::NewPane => "pane",
+            Command::NextPane => "next",
+            Command::ClosePane => "close",
+            Command::NextDetail => "detail",
             Command::Promote => "promote",
             Command::Reload => "reload",
             Command::Setup => "init",
@@ -206,6 +230,9 @@ impl Command {
                 // Throwing the chain away underneath a run that is standing on
                 // it is not something to offer.
                 Command::Fresh => !situation.running,
+                // Only where there is more than one line of work to move
+                // between or close.
+                Command::NextPane | Command::ClosePane => situation.panes > 1,
                 _ => true,
             })
             .collect()
@@ -233,6 +260,7 @@ mod tests {
         unconfigured: false,
         running: false,
         blocked: false,
+        panes: 1,
     };
 
     #[test]
@@ -288,7 +316,10 @@ mod tests {
     fn an_empty_query_offers_everything_that_makes_sense() {
         // Everything but stopping a run that is not going, setting up a
         // directory that is already set up, and fixing what is not broken.
-        assert_eq!(Command::matching("", IDLE).len(), Command::ALL.len() - 3);
+        // Everything but stopping a run that is not going, setting up a
+        // directory that is already set up, fixing what is not broken, and
+        // moving between or closing panes there is only one of.
+        assert_eq!(Command::matching("", IDLE).len(), Command::ALL.len() - 5);
     }
 
     #[test]
@@ -299,6 +330,16 @@ mod tests {
         };
         assert!(Command::offered(blocked).contains(&Command::Fix));
         assert!(!Command::offered(IDLE).contains(&Command::Fix));
+    }
+
+    #[test]
+    fn moving_between_panes_is_offered_only_where_there_are_several() {
+        let several = Situation { panes: 3, ..IDLE };
+        assert!(Command::offered(several).contains(&Command::NextPane));
+        assert!(Command::offered(several).contains(&Command::ClosePane));
+        assert!(!Command::offered(IDLE).contains(&Command::NextPane));
+        // Opening one is always on offer; there is always room for another.
+        assert!(Command::offered(IDLE).contains(&Command::NewPane));
     }
 
     #[test]

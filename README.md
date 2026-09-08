@@ -173,6 +173,14 @@ it printed, what the reviewer said, the diff read from the commit, and `p` to
 promote it. `?` lists every key, and `q` asks before it leaves —
 quitting can discard the task in the box and stop a run that is going.
 
+`ctrl-t` opens another line of work beside this one — its own thread, its own
+repository, its own half-written task — and `ctrl-]` moves between them. They
+are switched between rather than shown side by side: two transcripts on an
+eighty-column terminal are two transcripts nobody can read. Runs still happen
+one at a time across all of them, because the request to stop is a single flag;
+a pane with something going is marked on the bar, and says so by name when it
+finishes.
+
 Typing `/` in the box offers the commands at the box, filtered as you type;
 `/settings` shows what this thread and this project are set to. Opening a
 repository that has runs behind it summarises the last few rather than claiming

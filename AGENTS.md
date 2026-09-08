@@ -273,6 +273,27 @@ with fifty runs behind it that read as a browser that had lost them. The
 opening screen summarises the five most recent — enough to recognise where the
 work got to, and not a second list.
 
+**Panes are switched between, not shown side by side.** A pane is a line of
+work — a thread, the repository it runs in, and the task being written into it
+— and everything else belongs to the workspace and stays where it is. Two
+transcripts on an eighty-column terminal are two transcripts nobody can read,
+and the width is what this screen spends on the thing being read; which pane you
+are in is a row at the top, and it only appears once there is more than one.
+
+**One run at a time across every pane, and that is not a property of panes.**
+The request to stop is a single flag because a signal is single, so two runs
+going at once would both stop when either was asked to. Running several is the
+parallel-execution question and panes do not answer it: what they buy is keeping
+several lines of work *open*, not running them together. Every pane is drained
+each tick, though — a run keeps going in a pane somebody has switched away from,
+and a transcript that stopped updating because nobody was looking at it would be
+a transcript that lied. A run that ends in a pane you are not in names that pane
+when it says so, and the bar marks it while it goes.
+
+A pane is not closed out from under a run, and the last one is not closed at
+all: the first would abandon the thread writing into a worktree, and the second
+would leave a browser with nothing to type into.
+
 **A slash in the box offers the commands at the box.** Typing `/settings` used
 to start a run whose task was the word "settings". The menu is anchored to the
 input rather than centred, because that is where the eye already is; the
