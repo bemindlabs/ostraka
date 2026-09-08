@@ -4,6 +4,7 @@
 //! and can approve none of them: the only thing that ends a run favourably is a
 //! [`crate::gate::MergeToken`], which this module cannot construct.
 
+use crate::author;
 use crate::gate::{self, MergeToken, Refusal};
 use crate::progress::{Phase, Watcher};
 use crate::record::RunLog;
@@ -133,7 +134,15 @@ pub fn run_task(
     // 3. Execute, streaming events into the log as they arrive so an
     //    interrupted run still leaves an account of how far it got.
     log.enter(Phase::Authoring);
-    let author = drive(routing.author.as_ref(), task, wt.path(), &mut log)?;
+    // A separate spec, the way review builds one. `task.prompt` is the
+    // operator's sentence and it is read again further down — by the record and
+    // by the commit message — so composing in place would put this preamble in
+    // both, where it is neither what was asked nor part of the audit trail.
+    let authoring = TaskSpec {
+        prompt: author::author_prompt(&task.prompt, places.notes.is_some()),
+        ..task.clone()
+    };
+    let author = drive(routing.author.as_ref(), &authoring, wt.path(), &mut log)?;
     record.usage.extend(author.usage.clone());
 
     // 3. Read what was actually touched, from git rather than from the agent.
