@@ -215,6 +215,7 @@ pub fn execute(
 
     let worktrees = workspace.worktrees(&config);
     let notes = workspace.notes_if_present();
+    let skills = workspace.skills_if_present();
     let records = workspace.records();
     let places = Places {
         repo: &repo.path,
@@ -222,6 +223,7 @@ pub fn execute(
         records: &records,
         name: &repo.name,
         notes: notes.as_deref(),
+        skills: skills.as_deref(),
     };
 
     Ok(orchestrator::run_task(

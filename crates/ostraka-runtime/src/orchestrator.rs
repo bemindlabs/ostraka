@@ -56,6 +56,10 @@ pub struct Places<'a> {
     /// The workspace's notes, linked into the worktree so what an agent works
     /// out survives the run. `None` where there are none.
     pub notes: Option<&'a Path>,
+    /// The workspace's skills, linked in the same way and for the mirror
+    /// reason: what people wrote down for a run to follow. `None` where there
+    /// are none.
+    pub skills: Option<&'a Path>,
 }
 
 /// Runs one task through the whole pipeline.
@@ -106,6 +110,7 @@ pub fn run_task(
         wt.path(),
         &config.worktree,
         places.notes,
+        places.skills,
         config.gate.timeout_secs.map(std::time::Duration::from_secs),
     ) {
         Ok(steps) => {
@@ -142,7 +147,11 @@ pub fn run_task(
     // `[worktree]` is an intention; a repository that tracks its own `notes/`
     // keeps it, and telling an agent otherwise would point it at the diff.
     let authoring = TaskSpec {
-        prompt: author::author_prompt(&task.prompt, worktree::notes_linked(wt.path())),
+        prompt: author::author_prompt(
+            &task.prompt,
+            worktree::linked(wt.path(), "notes"),
+            worktree::linked(wt.path(), "skills"),
+        ),
         ..task.clone()
     };
     let author = drive(routing.author.as_ref(), &authoring, wt.path(), &mut log)?;
