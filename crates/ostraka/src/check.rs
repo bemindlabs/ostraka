@@ -40,7 +40,8 @@ pub fn run(workspace: &Workspace, json: bool) -> Outcome {
     let repositories = workspace.repositories();
     if repositories.is_empty() {
         problems.push(format!(
-            "no repositories in {} — clone what you want worked on into it",
+            "no repositories in {} — clone what you want worked on into it, \
+             or `ostraka tui` starts one",
             workspace.repositories_dir().display()
         ));
     }

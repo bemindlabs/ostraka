@@ -1476,25 +1476,37 @@ fn render_fix(frame: &mut Frame, app: &App, screen: Rect) {
             (" ", theme::MUTED)
         };
         let here = i == remedy.at;
-        lines.push(Line::from(vec![
-            Span::styled(format!("{mark} "), theme::on(colour)),
-            Span::styled(
-                format!("{}  ", i + 1),
-                if here {
-                    theme::accent()
-                } else {
-                    theme::muted()
-                },
-            ),
-            Span::styled(
-                step.said.clone(),
-                if here {
-                    theme::text().add_modifier(Modifier::BOLD)
-                } else {
-                    theme::text()
-                },
-            ),
-        ]));
+        let voice = if here {
+            theme::text().add_modifier(Modifier::BOLD)
+        } else {
+            theme::text()
+        };
+        // Wrapped like everything else. A step is a sentence, and the one that
+        // overflows is the one telling you what to do about it.
+        for (line, part) in wrap(&step.said, inner.saturating_sub(5))
+            .into_iter()
+            .enumerate()
+        {
+            if line == 0 {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{mark} "), theme::on(colour)),
+                    Span::styled(
+                        format!("{}  ", i + 1),
+                        if here {
+                            theme::accent()
+                        } else {
+                            theme::muted()
+                        },
+                    ),
+                    Span::styled(part, voice),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::raw("     "),
+                    Span::styled(part, voice),
+                ]));
+            }
+        }
         // Only for the step about to be taken. What the others will do is not
         // what anybody is deciding about right now.
         if !here {
@@ -1530,12 +1542,24 @@ fn render_fix(frame: &mut Frame, app: &App, screen: Rect) {
             "Nothing is in the way now. esc closes this.",
             theme::on(theme::OK),
         ))
-    } else {
+    } else if remedy
+        .steps
+        .get(remedy.at)
+        .is_some_and(|step| !step.commands.is_empty())
+    {
         Line::from(vec![
             Span::styled("y", theme::accent()),
             Span::styled("  do this step      ", theme::muted()),
             Span::styled("s", theme::accent()),
             Span::styled("  skip it      ", theme::muted()),
+            Span::styled("esc", theme::accent()),
+            Span::styled("  close", theme::muted()),
+        ])
+    } else {
+        // Offering `y` for a step with nothing to run would mark it done and
+        // change nothing, which is worse than saying it is not ours to take.
+        Line::from(vec![
+            Span::styled("This one is yours to do.      ", theme::muted()),
             Span::styled("esc", theme::accent()),
             Span::styled("  close", theme::muted()),
         ])
@@ -2334,6 +2358,27 @@ mod tests {
         let broken = screen(&mut app, 100, 30);
         assert!(broken.contains("Author identity unknown"), "{broken}");
         assert!(!broken.contains("do this step"), "{broken}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_step_only_a_person_can_take_is_not_offered_as_one_to_press() {
+        // Pressing `y` on a step with nothing to run would mark it done and
+        // change nothing, which is worse than saying it is not ours to take.
+        let dir = std::env::temp_dir().join(format!("ostraka-view-yours-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+
+        let mut app = App::new(Workspace::at(&dir), Vec::new());
+        app.remedy = Some(crate::tui::remedy::Remedy::nothing_cloned(&dir));
+        app.open(Dialog::Fix);
+
+        let out = screen(&mut app, 100, 26);
+        assert!(out.contains("yours to do"), "{out}");
+        assert!(!out.contains("do this step"), "{out}");
+        // And the sentence telling you what to do is whole rather than cut at
+        // the frame, which is where the other half of the answer lives.
+        assert!(out.contains("start one"), "{out}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
