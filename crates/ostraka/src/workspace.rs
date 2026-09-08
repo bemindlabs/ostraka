@@ -83,6 +83,30 @@ impl Workspace {
         self.root.join("notes")
     }
 
+    /// The skills directory: procedures this workspace provides to every agent
+    /// it runs, whoever the vendor is.
+    ///
+    /// The counterpart to `notes/` and the opposite direction of travel. Notes
+    /// are what runs worked out and wrote down; skills are what people wrote
+    /// down for runs to follow. Both are the workspace's, both are linked into
+    /// every worktree, and neither is part of the change a reviewer judges.
+    ///
+    /// A workspace directory rather than a vendor one on purpose. Every CLI
+    /// here has some private notion of skills or plugins, kept in a home
+    /// directory that isolation deliberately relocates — so a run that depended
+    /// on those would give a different answer on a different machine, which is
+    /// the thing isolation exists to prevent. A skill the workspace owns is one
+    /// every vendor gets and every machine reproduces.
+    pub fn skills(&self) -> PathBuf {
+        self.root.join("skills")
+    }
+
+    /// The skills directory, if it is there. Absent is not an error.
+    pub fn skills_if_present(&self) -> Option<PathBuf> {
+        let skills = self.skills();
+        skills.is_dir().then_some(skills)
+    }
+
     /// The notes directory, if it is there. Absent is not an error: a
     /// workspace without one is a workspace nobody has taken notes in.
     pub fn notes_if_present(&self) -> Option<PathBuf> {

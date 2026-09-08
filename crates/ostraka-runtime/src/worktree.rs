@@ -154,7 +154,16 @@ pub struct SetupProblem {
 /// name. The property the sentence rests on is that it points *out* of the
 /// checkout, so that is what is checked.
 pub fn notes_linked(worktree: &Path) -> bool {
-    let path = worktree.join("notes");
+    linked(worktree, "notes")
+}
+
+/// Whether one of the workspace's directories reached this worktree as a link.
+///
+/// The same question for `skills/` as for `notes/`, and the same reason for
+/// asking the worktree rather than the configuration: naming a directory in
+/// `[worktree]` is an intention, and what the checkout brought stays.
+pub fn linked(worktree: &Path, name: &str) -> bool {
+    let path = worktree.join(name);
     let Ok(meta) = std::fs::symlink_metadata(&path) else {
         return false;
     };
@@ -172,6 +181,7 @@ pub fn prepare(
     worktree: &Path,
     config: &ostraka_core::config::WorktreeConfig,
     notes: Option<&Path>,
+    skills: Option<&Path>,
     ceiling: Option<std::time::Duration>,
 ) -> std::result::Result<Vec<String>, SetupProblem> {
     let mut done = Vec::new();
@@ -184,6 +194,7 @@ pub fn prepare(
     let linked: Vec<(String, PathBuf)> = notes
         .map(|path| ("notes".to_string(), path.to_path_buf()))
         .into_iter()
+        .chain(skills.map(|path| ("skills".to_string(), path.to_path_buf())))
         .chain(config.link.iter().map(|n| (n.clone(), project.join(n))))
         .collect();
 
@@ -466,6 +477,7 @@ mod tests {
             &prep_config(&["node_modules"], None),
             None,
             None,
+            None,
         )
         .expect("prepares");
 
@@ -492,6 +504,7 @@ mod tests {
             &dir.join("wt"),
             &prep_config(&[], None),
             Some(&dir.join("notes")),
+            None,
             None,
         )
         .expect("prepares");
@@ -523,6 +536,7 @@ mod tests {
             &prep_config(&[], None),
             None,
             None,
+            None,
         )
         .expect("prepares");
         assert!(done.is_empty());
@@ -541,6 +555,7 @@ mod tests {
             &prep_config(&["node_modules"], None),
             None,
             None,
+            None,
         )
         .expect("prepares");
         let link = std::fs::read_link(dir.join("wt/deep/deeper/node_modules")).expect("a link");
@@ -555,6 +570,7 @@ mod tests {
             &dir.join("project"),
             &dir.join("wt"),
             &prep_config(&["node_modules"], None),
+            None,
             None,
             None,
         )
@@ -577,6 +593,7 @@ mod tests {
             &prep_config(&["vendor"], None),
             None,
             None,
+            None,
         )
         .expect("prepares");
         assert!(
@@ -595,6 +612,7 @@ mod tests {
             &prep_config(&[], Some("echo no registry >&2; exit 1")),
             None,
             None,
+            None,
         )
         .expect_err("must refuse");
         assert_eq!(problem.step, "setup");
@@ -611,6 +629,7 @@ mod tests {
             &prep_config(&[], Some("pwd > where")),
             None,
             None,
+            None,
         )
         .expect("prepares");
         let ran_in = std::fs::read_to_string(dir.join("wt/where")).expect("reads");
@@ -625,6 +644,7 @@ mod tests {
             &dir.join("project"),
             &dir.join("wt"),
             &prep_config(&[], None),
+            None,
             None,
             None,
         )
