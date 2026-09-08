@@ -146,6 +146,7 @@ fn what_is_linked_into_a_worktree_is_not_part_of_the_change() {
         records: &records,
         name: "work",
         notes: Some(&notes),
+        skills: None,
     };
     let report = orchestrator::run_task(
         &places,
@@ -208,6 +209,7 @@ fn an_author_that_changed_nothing_is_reported_as_such_and_not_sent_to_a_reviewer
         records: &records,
         name: "work",
         notes: None,
+        skills: None,
     };
     let report = orchestrator::run_task(
         &places,
@@ -251,6 +253,7 @@ fn a_run_the_operator_stopped_says_so_rather_than_blaming_the_agent() {
         records: &records,
         name: "work",
         notes: None,
+        skills: None,
     };
     // Scoped so the signalling thread cannot outlive this test and set the
     // flag underneath another one.
@@ -306,6 +309,7 @@ fn an_author_that_could_not_run_is_refused_in_its_own_words_without_calling_a_re
         records: &records,
         name: "work",
         notes: None,
+        skills: None,
     };
     let report = orchestrator::run_task(
         &places,
@@ -356,6 +360,7 @@ fn an_approved_run_produces_a_token_a_commit_and_a_replayable_record() {
         records: &records,
         name: "work",
         notes: None,
+        skills: None,
     };
     let report = orchestrator::run_task(
         &places,
@@ -416,6 +421,7 @@ fn a_failing_check_refuses_before_any_reviewer_is_consulted() {
         records: &records,
         name: "work",
         notes: None,
+        skills: None,
     };
     let report = orchestrator::run_task(
         &places,
@@ -470,6 +476,7 @@ fn a_rejecting_reviewer_blocks_a_change_whose_checks_all_passed() {
         records: &records,
         name: "work",
         notes: None,
+        skills: None,
     };
     let report = orchestrator::run_task(
         &places,
@@ -510,6 +517,7 @@ fn a_silent_reviewer_is_a_rejection_not_a_pass() {
         records: &records,
         name: "work",
         notes: None,
+        skills: None,
     };
     let report = orchestrator::run_task(
         &places,
@@ -546,6 +554,7 @@ fn the_author_cannot_review_their_own_change_end_to_end() {
         records: &records,
         name: "work",
         notes: None,
+        skills: None,
     };
     let report = orchestrator::run_task(
         &places,
@@ -617,6 +626,7 @@ fn run_pair(
         records: &records,
         name: "work",
         notes: None,
+        skills: None,
     };
     orchestrator::run_task(
         &places,
@@ -832,6 +842,7 @@ fn an_author_is_told_about_the_notes_and_the_record_is_not() {
         records: &records,
         name: "work",
         notes: Some(&notes),
+        skills: None,
     };
     let report = orchestrator::run_task(
         &places,
@@ -939,6 +950,7 @@ fn a_repository_that_keeps_its_own_notes_is_not_told_they_are_someone_elses() {
         records: &records,
         name: "work",
         notes: Some(&workspace_notes),
+        skills: None,
     };
     let report = orchestrator::run_task(
         &places,
@@ -955,5 +967,86 @@ fn a_repository_that_keeps_its_own_notes_is_not_told_they_are_someone_elses() {
     assert_eq!(
         seen, "add a file",
         "the author was told about notes that were never linked:\n{seen}"
+    );
+}
+
+#[test]
+fn a_workspace_skill_reaches_the_agent_and_stays_out_of_the_change() {
+    // The mirror of notes and the reason skills belong to the workspace rather
+    // than to a vendor: every CLI here keeps its own idea of skills in a home
+    // directory that isolation relocates, so a run depending on those would
+    // answer differently on a different machine. One the workspace owns is one
+    // every vendor gets and every machine reproduces.
+    let f = fixture("skills");
+    let skills = f.repo.join("workspace-skills");
+    std::fs::create_dir_all(&skills).expect("skills dir");
+    std::fs::write(
+        skills.join("house-style.md"),
+        "every file ends with a newline\n",
+    )
+    .expect("write");
+    let notes = f.repo.join("workspace-notes");
+    std::fs::create_dir_all(&notes).expect("notes dir");
+
+    let writer = agent(
+        &f.repo,
+        "writer",
+        // Proves it can read the skill, and keeps the instruction it was given.
+        // Both land in notes/, which outlives the worktree an approved run
+        // releases.
+        "printf '%s' \"$1\" > notes/seen-prompt.txt\n\
+         cat skills/house-style.md > notes/read-skill.txt\n\
+         echo new > added.txt",
+    );
+    let reviewer = agent(&f.repo, "reviewer", &verdict("APPROVE"));
+    let routing = route::select(
+        &[writer, reviewer],
+        Some("writer"),
+        Some("reviewer"),
+        &f.repo.join(".ostraka/vendor-home"),
+        None,
+    )
+    .unwrap();
+
+    let (worktrees, records) = places(&f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: Some(&notes),
+        skills: Some(&skills),
+    };
+    let report = orchestrator::run_task(
+        &places,
+        &config("true"),
+        &routing,
+        &task("add a file", "archon"),
+        &ActorId::new("ephor"),
+        None,
+    )
+    .expect("run completes");
+    assert!(report.approved(), "expected approval: {:?}", report.refusal);
+
+    // 1. The skill was readable from inside the worktree.
+    let read = std::fs::read_to_string(notes.join("read-skill.txt"))
+        .expect("the agent could not read the workspace's skill");
+    assert_eq!(read, "every file ends with a newline\n");
+
+    // 2. The author was told what it is, and told the rule before the history.
+    let seen = std::fs::read_to_string(notes.join("seen-prompt.txt")).expect("the prompt");
+    assert!(
+        seen.contains("`skills/` is not part of this repository"),
+        "{seen}"
+    );
+    let skills_at = seen.find("`skills/`").expect("skills named");
+    let notes_at = seen.find("`notes/`").expect("notes named");
+    assert!(skills_at < notes_at, "notes came first:\n{seen}");
+
+    // 3. And none of it reached the change a reviewer judged.
+    assert!(
+        !report.diff.contains("house-style"),
+        "the workspace's skills landed in the diff: {}",
+        report.diff
     );
 }

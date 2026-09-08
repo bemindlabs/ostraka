@@ -154,17 +154,35 @@ pub struct SetupProblem {
 /// name. The property the sentence rests on is that it points *out* of the
 /// checkout, so that is what is checked.
 pub fn notes_linked(worktree: &Path) -> bool {
-    let path = worktree.join("notes");
+    linked(worktree, "notes")
+}
+
+/// Whether one of the workspace's directories reached this worktree as a link.
+///
+/// The same question for `skills/` as for `notes/`, and the same reason for
+/// asking the worktree rather than the configuration: naming a directory in
+/// `[worktree]` is an intention, and what the checkout brought stays.
+pub fn linked(worktree: &Path, name: &str) -> bool {
+    let path = worktree.join(name);
     let Ok(meta) = std::fs::symlink_metadata(&path) else {
         return false;
     };
     if !meta.file_type().is_symlink() {
         return false;
     }
-    match (std::fs::read_link(&path), worktree.canonicalize()) {
-        (Ok(target), Ok(root)) => !target.starts_with(&root),
-        _ => false,
-    }
+    // Resolved, not compared as written. `read_link` hands back exactly what
+    // the link holds, so a relative target — `../shared`, or `sub/dir` — never
+    // starts with an absolute root and every one of them would read as
+    // pointing out of the checkout. The links `prepare` makes are absolute,
+    // but a repository can track a relative one under either name, and this is
+    // what decides whether an author is told the directory is not its own.
+    //
+    // Canonicalising also settles a broken link: it fails, and a link to
+    // nothing is not the workspace's directory.
+    let (Ok(root), Ok(resolved)) = (worktree.canonicalize(), path.canonicalize()) else {
+        return false;
+    };
+    !resolved.starts_with(&root)
 }
 
 pub fn prepare(
@@ -172,6 +190,7 @@ pub fn prepare(
     worktree: &Path,
     config: &ostraka_core::config::WorktreeConfig,
     notes: Option<&Path>,
+    skills: Option<&Path>,
     ceiling: Option<std::time::Duration>,
 ) -> std::result::Result<Vec<String>, SetupProblem> {
     let mut done = Vec::new();
@@ -184,6 +203,7 @@ pub fn prepare(
     let linked: Vec<(String, PathBuf)> = notes
         .map(|path| ("notes".to_string(), path.to_path_buf()))
         .into_iter()
+        .chain(skills.map(|path| ("skills".to_string(), path.to_path_buf())))
         .chain(config.link.iter().map(|n| (n.clone(), project.join(n))))
         .collect();
 
@@ -466,6 +486,7 @@ mod tests {
             &prep_config(&["node_modules"], None),
             None,
             None,
+            None,
         )
         .expect("prepares");
 
@@ -492,6 +513,7 @@ mod tests {
             &dir.join("wt"),
             &prep_config(&[], None),
             Some(&dir.join("notes")),
+            None,
             None,
         )
         .expect("prepares");
@@ -523,6 +545,7 @@ mod tests {
             &prep_config(&[], None),
             None,
             None,
+            None,
         )
         .expect("prepares");
         assert!(done.is_empty());
@@ -541,6 +564,7 @@ mod tests {
             &prep_config(&["node_modules"], None),
             None,
             None,
+            None,
         )
         .expect("prepares");
         let link = std::fs::read_link(dir.join("wt/deep/deeper/node_modules")).expect("a link");
@@ -555,6 +579,7 @@ mod tests {
             &dir.join("project"),
             &dir.join("wt"),
             &prep_config(&["node_modules"], None),
+            None,
             None,
             None,
         )
@@ -577,6 +602,7 @@ mod tests {
             &prep_config(&["vendor"], None),
             None,
             None,
+            None,
         )
         .expect("prepares");
         assert!(
@@ -595,6 +621,7 @@ mod tests {
             &prep_config(&[], Some("echo no registry >&2; exit 1")),
             None,
             None,
+            None,
         )
         .expect_err("must refuse");
         assert_eq!(problem.step, "setup");
@@ -609,6 +636,7 @@ mod tests {
             &dir.join("project"),
             &dir.join("wt"),
             &prep_config(&[], Some("pwd > where")),
+            None,
             None,
             None,
         )
@@ -627,6 +655,7 @@ mod tests {
             &prep_config(&[], None),
             None,
             None,
+            None,
         )
         .expect("prepares");
         assert!(done.is_empty());
@@ -642,5 +671,62 @@ mod tests {
     #[test]
     fn an_empty_identity_falls_back_rather_than_producing_an_at_sign_alone() {
         assert_eq!(email_local(&ActorId::new("")), "agent");
+    }
+}
+
+#[cfg(test)]
+mod linked_tests {
+    use super::linked;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("ostraka-linked-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("wt")).expect("worktree");
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_link_that_stays_inside_the_checkout_is_not_the_workspaces() {
+        // The one a comparison of unresolved targets gets wrong: `read_link`
+        // hands back `sub`, which starts with nothing absolute, so it would
+        // read as pointing out of the checkout and the author would be told a
+        // directory the repository owns is not part of the repository.
+        let dir = scratch("relative-inside");
+        std::fs::create_dir_all(dir.join("wt/sub")).expect("sub");
+        std::os::unix::fs::symlink("sub", dir.join("wt/notes")).expect("link");
+        assert!(!linked(&dir.join("wt"), "notes"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_out_of_the_checkout_is_the_workspaces_however_it_is_written() {
+        let dir = scratch("outside");
+        std::fs::create_dir_all(dir.join("shared")).expect("shared");
+        std::os::unix::fs::symlink(dir.join("shared"), dir.join("wt/notes")).expect("absolute");
+        std::os::unix::fs::symlink("../shared", dir.join("wt/skills")).expect("relative");
+        assert!(linked(&dir.join("wt"), "notes"), "absolute target");
+        assert!(linked(&dir.join("wt"), "skills"), "relative target");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_nothing_is_not_a_directory_anybody_can_be_told_about() {
+        let dir = scratch("broken");
+        std::os::unix::fs::symlink("../never-existed", dir.join("wt/notes")).expect("link");
+        assert!(!linked(&dir.join("wt"), "notes"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_real_directory_is_the_repositorys_own() {
+        let dir = scratch("real");
+        std::fs::create_dir_all(dir.join("wt/notes")).expect("notes");
+        assert!(!linked(&dir.join("wt"), "notes"));
+        assert!(!linked(&dir.join("wt"), "absent"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

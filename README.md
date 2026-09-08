@@ -105,7 +105,21 @@ working on:
     worktrees/        where agents work                (not committed)
   repositories/<name> what you cloned in to be worked on
   notes/              what was worked out along the way
+  skills/             what you expect of a run                (optional)
 ```
+
+`notes/` and `skills/` are linked into every worktree and are the two
+directions of the same idea. Notes are what runs worked out and wrote down;
+skills are what you wrote down for runs to follow — procedures, conventions,
+the way things are done here. Neither is part of the change a reviewer judges,
+and an author is told about whichever of them is actually there.
+
+Skills belong to the workspace rather than to a vendor deliberately. Every CLI
+has some private notion of skills or plugins, kept in a home directory that
+isolation relocates, so a run leaning on those would answer differently on a
+different machine. One the workspace owns is one every vendor gets and every
+machine reproduces. `init` does not create the directory: make it when you have
+something to put in it.
 
 Everything the runtime owns is in one directory, so **a repository cloned in is
 left as its owner left it**: no config appears at its root, no worktrees are

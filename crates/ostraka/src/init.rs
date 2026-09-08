@@ -218,6 +218,12 @@ pub fn plan(project: &Path) -> Plan {
     // The two directories the layout is about. A repository is cloned into the
     // first; the second is linked into every worktree, so what an agent works
     // out along the way survives the run that worked it out.
+    //
+    // `skills/` is not among them, and that is deliberate. Notes are written by
+    // runs, so a run needs somewhere to write before it has anything to say;
+    // skills are written by people, and an empty directory waiting for one is
+    // clutter that also costs the setup screen a line it was using to explain
+    // the gate. A workspace grows one when somebody has a skill to put in it.
     for place in ["repositories", "notes"] {
         files.push(planned(project, place, String::new(), Role::Place));
     }
