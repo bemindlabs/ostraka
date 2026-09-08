@@ -1,6 +1,6 @@
 //! `ostraka adapters` — what can actually run on this machine.
 
-use crate::discover;
+use crate::discover::{self, describe};
 use crate::workspace::Workspace;
 use ostraka_adapter::process::ProcessAdapter;
 use ostraka_adapter::{Availability, VendorAdapter};
@@ -75,12 +75,4 @@ pub fn run(workspace: &Workspace, json: bool) -> Outcome {
 
     // Reporting an unavailable adapter is a successful report, not a failure.
     Ok(true)
-}
-
-fn describe(a: &Availability) -> String {
-    match a {
-        Availability::Ready { version } => version.clone().unwrap_or_default(),
-        Availability::NotFound { command } => format!("{command} not found on PATH"),
-        Availability::Unusable { reason } => reason.clone(),
-    }
 }

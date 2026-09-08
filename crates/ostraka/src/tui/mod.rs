@@ -88,7 +88,7 @@ fn agents(workspace: &Workspace) -> Vec<Agent> {
             Agent {
                 id: adapter.id().to_string(),
                 ready: availability.is_ready(),
-                note: describe(availability),
+                note: crate::discover::describe(&availability),
                 configured: true,
             }
         })
@@ -106,21 +106,11 @@ fn agents(workspace: &Workspace) -> Vec<Agent> {
             .map(|f| Agent {
                 id: f.id,
                 ready: true,
-                note: describe(f.availability),
+                note: crate::discover::describe(&f.availability),
                 configured: false,
             }),
     );
     agents
-}
-
-fn describe(availability: ostraka_adapter::Availability) -> String {
-    match availability {
-        ostraka_adapter::Availability::Ready { version } => version.unwrap_or_default(),
-        ostraka_adapter::Availability::NotFound { command } => {
-            format!("{command} not found on PATH")
-        }
-        ostraka_adapter::Availability::Unusable { reason } => reason,
-    }
 }
 
 /// The browser as it is when it opens.

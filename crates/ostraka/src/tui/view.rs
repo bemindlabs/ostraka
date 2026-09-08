@@ -1818,9 +1818,18 @@ fn render_agents(frame: &mut Frame, app: &App, screen: Rect) {
         // Installed and unwritten reads differently from configured and ready:
         // choosing it is also agreeing to it, and the row says so before the
         // key is pressed rather than after.
-        if !agent.configured {
-            role = "not configured — choosing writes it".to_string();
-        }
+        //
+        // In the note rather than the role column. The role column is nine
+        // wide and `{:<9}` is a floor, not a ceiling — a longer string there
+        // widens the column and pushes the version off the end of the line.
+        let note = if agent.configured {
+            truncate(&agent.note, 40)
+        } else {
+            truncate(
+                &format!("{} — not configured, choosing writes it", agent.note),
+                60,
+            )
+        };
         lines.push(Line::from(vec![
             Span::styled(if here { theme::CURSOR } else { " " }, theme::accent()),
             Span::styled(format!(" {mark}  "), theme::on(colour)),
@@ -1833,7 +1842,7 @@ fn render_agents(frame: &mut Frame, app: &App, screen: Rect) {
                 },
             ),
             Span::styled(format!("{role:<9}"), theme::accent()),
-            Span::styled(truncate(&agent.note, 40), theme::muted()),
+            Span::styled(note, theme::muted()),
         ]));
     }
 

@@ -656,30 +656,82 @@ fn continuing_a_run_nobody_recorded_says_so() {
 }
 
 #[test]
-fn the_browser_offers_what_is_installed_and_writes_it_when_chosen() {
-    // A workspace with no `adapters/` answered "which agents can I use" with an
-    // empty list, which reads as "none" and is never what is true — the CLIs
-    // this build knows how to drive are usually on the PATH already. The
-    // command line stopped saying that; the browser was still saying it.
+fn choosing_an_agent_the_workspace_has_not_written_writes_it_first() {
+    // Without the profile the name would be set and the run could not resolve
+    // it: routing reads `adapters/` and nothing else, so being offered
+    // something that fails when it is taken is worse than not being offered it.
+    //
+    // The list is seeded rather than discovered. Discovery asks the machine
+    // what is installed, and a test that asks the machine is a test that does
+    // nothing on a machine with nothing installed — which is every CI runner
+    // this has. The earlier version of this test returned early there, passing
+    // without exercising a line of what it was written for.
     let _guard = exclusive();
-    // A workspace with profiles of its own, which is the reachable shape: with
-    // none at all the browser is on the setup screen, which writes them, and
-    // this dialog is not offered. What it could not show was a CLI sitting on
-    // the PATH that this workspace has never written a profile for.
-    let scratch = project("agents-offer", 0);
+    let scratch = project("agents-adopt", 0);
     let dir = scratch.path();
     let mut d = Driver::open(dir);
 
     d.ctrl('x').key(KeyCode::Char('a'));
     assert_eq!(d.app.dialog, Some(Dialog::Agents));
 
-    // The workspace's own come first and are marked as its own.
+    // A profile this build ships, which this workspace does not have. `codex`
+    // is one of `init::TEMPLATES`, so writing it needs nothing installed.
+    d.app.agents.push(super::view::Agent {
+        id: "codex".into(),
+        ready: true,
+        note: "codex-cli 0.0.0".into(),
+        configured: false,
+    });
+    d.app.pick = d.app.agents.len() - 1;
+    assert!(
+        !dir.join(".ostraka/adapters/codex.toml").exists(),
+        "the fixture already had the profile this is about writing"
+    );
+    d.shows("not configured");
+
+    d.key(KeyCode::Char('a'));
+    assert_eq!(d.app.thread().adapter.as_deref(), Some("codex"));
+    assert!(
+        dir.join(".ostraka/adapters/codex.toml").is_file(),
+        "the profile was named but never written"
+    );
+
+    // The bytes are the ones `init` ships, not an invention.
+    let written = std::fs::read_to_string(dir.join(".ostraka/adapters/codex.toml")).expect("read");
+    let shipped = crate::init::TEMPLATES
+        .iter()
+        .find(|(name, _)| *name == "codex.toml")
+        .map(|(_, text)| *text)
+        .expect("shipped");
+    assert_eq!(written, shipped);
+
+    // And it is one of the workspace's own now, not an offer.
+    let now = d
+        .app
+        .agents
+        .iter()
+        .find(|a| a.id == "codex")
+        .expect("still listed");
+    assert!(
+        now.configured,
+        "the written profile is still offered as missing"
+    );
+}
+
+#[test]
+fn only_what_is_installed_is_ever_offered() {
+    // The list is an offer. Anything in it that is not installed is a choice
+    // that fails when it is taken, so the filter is the property worth pinning
+    // — and it holds whatever this machine happens to have.
+    let _guard = exclusive();
+    let scratch = project("agents-offer", 0);
+    let mut d = Driver::open(scratch.path());
+    d.ctrl('x').key(KeyCode::Char('a'));
+
     assert!(
         d.app.agents.iter().any(|a| a.configured),
         "the workspace's own profiles are missing from its own list"
     );
-    // Anything offered is installed and unwritten. An absent CLI offered as a
-    // choice is a choice that fails when it is taken.
     assert!(
         d.app
             .agents
@@ -687,51 +739,6 @@ fn the_browser_offers_what_is_installed_and_writes_it_when_chosen() {
             .filter(|a| !a.configured)
             .all(|a| a.ready),
         "something not installed was offered"
-    );
-
-    let Some(offered) = d
-        .app
-        .agents
-        .iter()
-        .find(|a| !a.configured)
-        .map(|a| a.id.clone())
-    else {
-        // Nothing this build ships is installed here, so there is nothing to
-        // offer and nothing to assert about offering it.
-        return;
-    };
-    d.shows("not configured");
-
-    // Choosing one is also agreeing to it. Without the profile the name would
-    // be set and the run could not resolve it, because routing reads
-    // `adapters/` and nothing else.
-    let at = d
-        .app
-        .agents
-        .iter()
-        .position(|a| a.id == offered)
-        .expect("listed");
-    while d.app.pick < at {
-        d.key(KeyCode::Down);
-    }
-    d.key(KeyCode::Char('a'));
-    assert_eq!(d.app.thread().adapter.as_deref(), Some(offered.as_str()));
-    assert!(
-        dir.join(format!(".ostraka/adapters/{offered}.toml"))
-            .is_file(),
-        "the profile was named but never written"
-    );
-
-    // And it is now one of the workspace's own, not an offer any more.
-    let now = d
-        .app
-        .agents
-        .iter()
-        .find(|a| a.id == offered)
-        .expect("still listed");
-    assert!(
-        now.configured,
-        "the written profile is still offered as missing"
     );
 }
 
