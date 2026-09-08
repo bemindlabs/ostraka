@@ -56,7 +56,7 @@ impl Remedy {
             ),
             steps: vec![Step {
                 said: format!(
-                    "Clone what you want worked on into {}, or start one: w, then n.",
+                    "Clone what you want worked on into {}, or start one: ctrl-x w, then n.",
                     repositories.display()
                 ),
                 warns: Some(
