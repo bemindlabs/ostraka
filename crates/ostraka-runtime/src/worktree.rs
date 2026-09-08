@@ -78,6 +78,51 @@ pub fn create(repo: &Path, base: &Path, run_id: &str, base_ref: &str) -> Result<
     Ok(Worktree { path, branch })
 }
 
+/// Keeps a linked name out of git's sight, in this worktree only.
+///
+/// A link is not part of the change. Left visible, `git status` reports it as
+/// something the agent added, so it counts as a touched path, it is committed
+/// with the work, and a reviewer is shown a symlink nobody asked for — which
+/// is what happened the first time a real vendor ran against a workspace with
+/// notes in it.
+///
+/// Written to the worktree's own exclude file rather than to a `.gitignore`:
+/// that file belongs to the repository and is not this to edit. A failure here
+/// is not worth failing the run over — the worst case is the link showing up
+/// in a diff, which is where this started.
+fn exclude(worktree: &Path, name: &str) {
+    let Ok(out) = Command::new("git")
+        .args(["rev-parse", "--git-path", "info/exclude"])
+        .current_dir(worktree)
+        .output()
+    else {
+        return;
+    };
+    if !out.status.success() {
+        return;
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if path.is_empty() {
+        return;
+    }
+    let path = worktree.join(path);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    if existing.lines().any(|line| line.trim() == name) {
+        return;
+    }
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(file, "{name}");
+    }
+}
+
 /// What went wrong getting a worktree ready to work in.
 ///
 /// Separate from a gate failure on purpose. "The environment was not ready" and
@@ -147,6 +192,7 @@ pub fn prepare(
                 reason: format!("could not link {} into the worktree: {e}", source.display()),
             });
         }
+        exclude(worktree, name);
         done.push(format!("link {name}"));
     }
 

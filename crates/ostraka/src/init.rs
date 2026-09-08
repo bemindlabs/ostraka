@@ -137,12 +137,13 @@ impl Plan {
     }
 }
 
-/// The three profiles this repository ships, as `init` will write them.
+/// The profiles this repository ships, as `init` will write them.
 ///
 /// Kept here rather than read from disk because the binary is installed on its
 /// own; a profile someone has to fetch separately is a profile they will not
 /// have.
-pub const TEMPLATES: [(&str, &str); 3] = [
+pub const TEMPLATES: [(&str, &str); 4] = [
+    ("agy.toml", include_str!("../templates/agy.toml")),
     (
         "claude-code.toml",
         include_str!("../templates/claude-code.toml"),
@@ -204,11 +205,11 @@ pub fn plan(project: &Path) -> Plan {
 /// Whether `adapters/` holds a profile of any name.
 ///
 /// Asked of the directory rather than of the plan, and the difference is the
-/// whole point: a plan lists the three profiles `init` would write, so a
+/// whole point: a plan lists the profiles `init` would write, so a
 /// project that brought its own under other names has every planned profile
 /// missing while being perfectly able to run. Reading that as "not set up yet"
 /// put the opening screen over a working project — and then a stray keystroke
-/// on that screen wrote three profiles into it that nobody had asked for.
+/// on that screen wrote profiles into it that nobody had asked for.
 fn has_a_profile(project: &Path) -> bool {
     std::fs::read_dir(project.join(".ostraka/adapters"))
         .map(|entries| {
@@ -493,7 +494,7 @@ mod tests {
 
     #[test]
     fn a_project_that_brought_its_own_adapter_profiles_is_runnable() {
-        // The plan wants three profiles by name. A project with one profile
+        // The plan wants its own profiles by name. A project with one profile
         // under a name of its own has none of them, and runs perfectly well —
         // reading that as "not set up yet" is how the opening screen ended up
         // over a working project, with a stray key on it writing three
@@ -506,7 +507,7 @@ mod tests {
 
         let plan = plan(&dir);
         assert!(plan.runnable(), "{:?}", plan.files);
-        assert!(!plan.complete(), "init should still offer its own three");
+        assert!(!plan.complete(), "init should still offer its own");
     }
 
     #[test]
@@ -575,7 +576,7 @@ mod tests {
         let written = apply(&plan(&dir), false).expect("applies");
         // Six, not seven: the fixture made repositories/ to put a Cargo.toml
         // in, and a place that is already there is left alone.
-        assert_eq!(written.len(), 6, "{written:?}");
+        assert_eq!(written.len(), 7, "{written:?}");
         assert!(dir.join(".ostraka/ostraka.toml").is_file());
         assert!(dir.join(".ostraka/adapters/codex.toml").is_file());
         assert!(dir.join(".gitignore").is_file());

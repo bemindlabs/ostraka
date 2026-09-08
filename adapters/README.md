@@ -13,6 +13,7 @@ them can actually run on this machine; `ostraka check` validates all of them.
 | `claude-code` | `claude` | yes |
 | `codex` | `codex` | yes |
 | `copilot-cli` | `copilot` | yes |
+| `agy` | `agy` | yes |
 
 Nothing is shipped that has not been run end to end. A profile for a CLI you have
 is a five-line file — write it rather than waiting for one.
@@ -179,6 +180,7 @@ reading a file.
 | `claude` | yes | yes | `--setting-sources project` |
 | `codex` | yes — `$CODEX_HOME/AGENTS.md` is spliced into the same block as the project doc | yes | `CODEX_HOME` only |
 | `copilot` | no user-level instructions path exists | yes | `--no-custom-instructions`, which also drops the repository's |
+| `agy` | none found to inherit | n/a | none needed — and none arrives either, see below |
 
 Instruction files turned out to be the smaller half. A baseline `claude -p` in an
 empty scratch repository had 108 tools, 81 of them MCP servers belonging to the
@@ -217,6 +219,16 @@ across every vendor.
   lives as well as its default model, so relocating it logs the CLI out — the
   way back in is `GH_TOKEN` in the environment, which is the operator's call and
   not something a profile should make for them.
+- **AGY has the opposite problem.** Nothing of the operator's reaches a run —
+  it imports no plugins by default and has no configuration directory of its own
+  to relocate — so no `[isolation]` block is needed. What is missing is the
+  other half: the repository's own `AGENTS.md` did not reach it either. Asked
+  for a codeword declared in a file sitting beside it in the working directory,
+  it answered that it had none, with the file named `AGENTS.md` and again as
+  `AGY.md`. A task run through this profile is written without the
+  repository's own rules in front of the agent, and a repository that relies on
+  them should route the authoring elsewhere. Tools work: it read a file in the
+  working directory when it was asked to.
 - **Claude Code's wider hammers cost more than they save.** `--safe-mode` also
   drops the repository's `CLAUDE.md`; `--bare` additionally forces
   `ANTHROPIC_API_KEY` and never reads OAuth, so a subscription login stops

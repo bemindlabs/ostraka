@@ -310,7 +310,7 @@ nobody has set up. `Planned` carries a `Role` so that distinction is a field
 rather than a filename compared against a literal.
 
 The second half of that lesson cost more. `runnable` first asked whether the
-plan's *own* profile entries were present — and a plan lists the three profiles
+plan's *own* profile entries were present — and a plan lists the profiles
 `init` would write, so a project that brought its own under other names had
 every one of them missing while running perfectly well. The opening screen went
 up over a working project, a stray keystroke on it took the offer, and three

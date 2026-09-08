@@ -118,6 +118,73 @@ fn task(prompt: &str, author: &str) -> TaskSpec {
 }
 
 #[test]
+fn what_is_linked_into_a_worktree_is_not_part_of_the_change() {
+    // Found by a real vendor run: the notes directory is linked into every
+    // worktree, `git status` reported the symlink as something the agent had
+    // added, and it was committed with the work and shown to a reviewer as
+    // part of the change. A link is scaffolding, not a change.
+    let f = fixture("linked");
+    std::fs::create_dir_all(f.repo.join("notes")).expect("notes");
+    std::fs::write(f.repo.join("notes/earlier.md"), "what was worked out").expect("write");
+
+    let writer = agent(&f.repo, "writer", "echo new > added.txt");
+    let reviewer = agent(&f.repo, "reviewer", &verdict("APPROVE"));
+    let routing = route::select(
+        &[writer, reviewer],
+        Some("writer"),
+        Some("reviewer"),
+        &f.repo.join(".ostraka/vendor-home"),
+        None,
+    )
+    .unwrap();
+
+    let (worktrees, records) = places(&f);
+    let notes = f.repo.join("notes");
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: Some(&notes),
+    };
+    let report = orchestrator::run_task(
+        &places,
+        &config("true"),
+        &routing,
+        &task("add a file", "archon"),
+        &ActorId::new("ephor"),
+        None,
+    )
+    .expect("runs");
+
+    assert!(report.approved(), "{:?}", report.refusal);
+    // The diff the reviewer was handed, and the commit that was made.
+    assert!(report.diff.contains("added.txt"), "{}", report.diff);
+    assert!(
+        !report.diff.contains("notes"),
+        "the link was shown to a reviewer as part of the change:\n{}",
+        report.diff
+    );
+
+    let out = Command::new("git")
+        .args([
+            "show",
+            "--name-only",
+            "--format=",
+            &format!("ostraka/{}", report.record.run_id),
+        ])
+        .current_dir(&f.repo)
+        .output()
+        .expect("git runs");
+    let committed = String::from_utf8_lossy(&out.stdout);
+    assert!(committed.contains("added.txt"), "{committed}");
+    assert!(
+        !committed.contains("notes"),
+        "the link was committed:\n{committed}"
+    );
+}
+
+#[test]
 fn an_author_that_changed_nothing_is_reported_as_such_and_not_sent_to_a_reviewer() {
     // A legitimate answer to a task — the work was already done — and not one a
     // reviewer can rule on. Handing it an empty diff produces a confused answer

@@ -1,0 +1,41 @@
+# AGY.
+#
+# `--dangerously-skip-permissions` is what this CLI requires to use a tool
+# without asking, so the author invocation carries it and the reviewer's
+# deliberately does not: a reviewer that cannot act on the repository is a
+# reviewer with nothing to do but read the diff it was handed.
+id = "agy"
+command = "agy"
+
+args = ["-p", "{{prompt}}", "--dangerously-skip-permissions"]
+
+review_args = ["-p", "{{prompt}}"]
+
+model_args = ["--model", "{{model}}"]
+
+event_format = "none"
+
+# Measured on a machine where it is installed, and both directions are worth
+# writing down.
+#
+# Nothing of the operator's reaches the run: it imports no plugins by default,
+# and no configuration directory of its own was found to relocate — so there is
+# no user-level instruction file, MCP server or hook for a run to inherit, and
+# no `[isolation]` block is needed.
+#
+# What is missing is the other half. The repository's own `AGENTS.md` did not
+# reach it either: asked for a codeword declared in one sitting beside it, in
+# the working directory, it answered that it had none — with the file named
+# `AGENTS.md` and again as `AGY.md`. So a task run through this profile is
+# judged without the repository's own rules in front of the agent, and a
+# repository that relies on them should route the authoring elsewhere. Tools
+# themselves work: it read a file in the working directory when asked to.
+#
+# It reports nothing about what it spent, so it produces no row in the token
+# line rather than a row of zeroes — "does not say" and "spent nothing" are
+# different claims.
+
+[capabilities]
+headless = true
+streams_json = false
+resumable = true
