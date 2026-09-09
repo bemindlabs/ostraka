@@ -467,6 +467,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // The bar costs a row and only appears once there is something to
     // navigate: one line of work needs no bar saying which one it is.
     let bar = u16::from(app.panes.len() > 1);
+    // The footer earns its extra rows only where there are rows to spare, and
+    // "to spare" was measured rather than guessed. A first draft started the
+    // third row at twenty-six — a common default, and the size the flow tests
+    // drive — and taking two rows there cost the setup screen the sentence
+    // explaining its gate and cost a transcript two lines of what an agent had
+    // just said. The thresholds below are where the tests put them, and are why
+    // twenty-six now gets one row rather than three.
+    //
+    // Not during setup at all. That screen is a full page of explanation with
+    // its own footer, and most commands are gated off until it has been taken,
+    // so the rows would be spent listing what cannot be done.
+    let footer = match screen.height {
+        _ if app.setup.is_some() => 1,
+        h if h >= 34 => 3,
+        h if h >= 28 => 2,
+        _ => 1,
+    };
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -475,7 +492,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(box_height),
-            Constraint::Length(1),
+            Constraint::Length(footer),
         ])
         .split(screen);
 
@@ -505,10 +522,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.slashing() {
         render_slash(frame, app, rows[4]);
     }
-    frame.render_widget(
-        Paragraph::new(status_bar(app, rows[5].width.saturating_sub(theme::GUTTER))),
-        theme::inset(rows[5]),
-    );
+    let width = rows[5].width.saturating_sub(theme::GUTTER);
+    let mut lines = Vec::new();
+    if footer >= 3 {
+        lines.push(routing_row(app));
+    }
+    if footer >= 2 {
+        lines.push(commands_row(app, width));
+    }
+    lines.push(status_bar(app, width));
+    frame.render_widget(Paragraph::new(lines), theme::inset(rows[5]));
 
     match app.dialog {
         Some(Dialog::Keys) => render_keys(frame, screen),
@@ -1221,6 +1244,60 @@ pub fn settings_rows(app: &App) -> Vec<(&'static str, String, bool)> {
         ("reviews", chosen(&app.thread().review_adapter), false),
         ("starts from", app.thread().base_ref.clone(), false),
     ]
+}
+
+/// The commands, offered rather than remembered.
+///
+/// The same list the leader shows, with the chord it needs written in front of
+/// it. Bare letters here would be the defect this browser has already fixed
+/// once: on the work screen the box has the keys, so `n` types an `n`, and a
+/// row of single letters is an invitation to find that out.
+///
+/// Truncated rather than wrapped. A row that grew would take a row from the
+/// work, and the commands are ordered by what somebody reaches for first, so
+/// what falls off the end is what falls off the end.
+fn commands_row(app: &App, width: u16) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled("ctrl-x", theme::on(theme::WARN)),
+        Span::styled("  ", theme::muted()),
+    ];
+    let mut used = 8usize;
+    for (i, command) in Command::offered(app.situation()).iter().enumerate() {
+        let text = format!("{} {}", command.leader(), command.name());
+        let sep = usize::from(i > 0) * 3;
+        if used + sep + text.chars().count() > width as usize {
+            break;
+        }
+        if i > 0 {
+            spans.push(Span::styled(" \u{b7} ", theme::muted()));
+        }
+        spans.push(Span::styled(
+            command.leader().to_string(),
+            theme::on(theme::ACCENT),
+        ));
+        spans.push(Span::styled(format!(" {}", command.name()), theme::muted()));
+        used += sep + text.chars().count();
+    }
+    Line::from(spans)
+}
+
+/// What the next run will be made with.
+///
+/// Only the two facts that decide the shape of a run and are otherwise behind a
+/// dialog: which profile writes and which reviews. Where the path, the
+/// repository and the branch already sit on the top row, repeating them here
+/// would cost a line to say something twice.
+fn routing_row(app: &App) -> Line<'static> {
+    let chosen = |id: &Option<String>| match id {
+        Some(id) => id.clone(),
+        None => "automatic".to_string(),
+    };
+    Line::from(vec![
+        Span::styled("writes ", theme::muted()),
+        Span::styled(chosen(&app.thread().adapter), theme::text()),
+        Span::styled("   reviews ", theme::muted()),
+        Span::styled(chosen(&app.thread().review_adapter), theme::text()),
+    ])
 }
 
 /// The bottom line: what is happening, and what it has cost.
@@ -3356,6 +3433,67 @@ mod tests {
         );
         assert_eq!(app.at, 1);
         assert!(app.anything_running(), "the run was lost by switching pane");
+    }
+
+    #[test]
+    fn the_footer_grows_into_the_room_it_has_and_no_further() {
+        // The commands are the row worth adding first — knowing what can be
+        // done is worth more than knowing what it will be done with — and
+        // neither is worth a row on a terminal that needs all of them for the
+        // work.
+        let mut app = App::new(nowhere(), Vec::new());
+
+        let short = screen(&mut app, 92, 20);
+        assert!(
+            !short.contains("ctrl-x  n"),
+            "a short terminal lost a row to the commands:\n{short}"
+        );
+        assert!(!short.contains("writes "), "{short}");
+
+        let medium = screen(&mut app, 92, 30);
+        assert!(medium.contains("ctrl-x  n"), "{medium}");
+        assert!(
+            !medium.contains("writes "),
+            "the routing row arrived before there was room:\n{medium}"
+        );
+
+        let tall = screen(&mut app, 92, 40);
+        assert!(tall.contains("ctrl-x  n"), "{tall}");
+        assert!(tall.contains("writes automatic"), "{tall}");
+
+        // And the status line survives all three, because it is the one that
+        // says whether anything is running.
+        for out in [&short, &medium, &tall] {
+            assert!(out.contains("ostraka "), "the status line went:\n{out}");
+        }
+    }
+
+    #[test]
+    fn the_commands_row_names_the_chord_it_needs() {
+        // Bare letters would be the defect this browser has already fixed once:
+        // on the work screen the box has the keys, so `n` types an `n`. A row
+        // of single letters is an invitation to find that out.
+        let mut app = App::new(nowhere(), Vec::new());
+        let out = screen(&mut app, 92, 30);
+        let row = out
+            .lines()
+            .find(|l| l.contains(" write a task"))
+            .expect("the commands row");
+        assert!(row.contains("ctrl-x"), "the chord is not named: {row}");
+    }
+
+    #[test]
+    fn a_narrow_footer_drops_commands_rather_than_running_past_the_edge() {
+        let mut app = App::new(nowhere(), Vec::new());
+        for width in [40u16, 60, 92] {
+            let out = screen(&mut app, width, 30);
+            for line in out.lines() {
+                assert!(
+                    line.chars().count() <= width as usize,
+                    "a line ran past {width} columns:\n{out}"
+                );
+            }
+        }
     }
 
     #[test]
