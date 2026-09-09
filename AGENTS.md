@@ -239,6 +239,24 @@ profile, which is rule 1 applied to the environment. Gate checks are *not*
 scrubbed: they are the project's commands run on the operator's behalf and need
 the operator's toolchain.
 
+**A capability describes the invocation, not the binary — and `streams_json`
+does not survive it.** A profile is one command line, and the runtime only ever
+runs that command line, so "what this CLI could do if invoked differently" is a
+fact nothing can act on. Under that rule `streams_json` is exactly
+`event_format != "none"` — the same fact spelled twice in one file, which is a
+thing that can disagree with itself. It did, twice: `codex` and `kimi-cli` both
+declared it while running their CLI in a prose mode, on the strength of a JSON
+mode this repository does not ask either of them for. Nothing reads the field,
+which is the only reason neither ever produced a wrong answer.
+
+It is deprecated rather than deleted. `1.0.0` is a stable API under SemVer, and
+a public field removed the day after the first release makes the version number
+mean nothing — which is the whole argument that settled the number in the first
+place. It goes at the next major; `check-hygiene.sh` holds it equal to
+`event_format` until then, and that check was verified by putting the drift back
+and watching it fail. `Capabilities::emits_events` is where the question moves
+to, so callers have somewhere to go that is not the field.
+
 **Token counts are quoted, never computed.** Every figure in the TUI's bottom
 line is a vendor's own accounting, extracted by a `[usage]` block in that
 vendor's profile — no vendor variable, marker or JSON pointer appears in
