@@ -349,17 +349,27 @@ fn main() -> ExitCode {
         }
     };
 
-    // After the answer, never in front of it, and never on the way to a
-    // failure being reported. Reads a cache and starts a detached refresh, so
-    // it costs this command nothing and reaches the network on no schedule
-    // anybody is waiting on.
-    update::notice::offer(cli.json);
-
     match result {
         // A refused run is a correct outcome reported correctly, but the exit
         // code has to distinguish it: CI treats a non-zero exit as "not ready".
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => ExitCode::FAILURE,
+        //
+        // Both of these get the notice, and it is the last thing printed. A
+        // refused run is an answer; somebody who has just been told their
+        // change was rejected has been told something true and can hear one
+        // more line.
+        Ok(approved) => {
+            update::notice::offer(cli.json);
+            if approved {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        // An error gets none. Somebody staring at a failure does not need to
+        // hear about a version, and appending to it would put the notice
+        // between them and the thing that went wrong. Raised in review: the
+        // call used to be above this block, which printed the notice *before*
+        // the error — the opposite of what its comment claimed.
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE

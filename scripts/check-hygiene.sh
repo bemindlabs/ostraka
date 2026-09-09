@@ -110,6 +110,19 @@ for check in "cargo fmt --all -- --check" "cargo clippy --all-targets" \
 done
 ok "the gate in ci.yml matches the gate in ostraka.toml"
 
+# The release matrix, read once. `\S` is a GNU extension rather than portable
+# ERE, so on a grep that does not take it this produced an empty list and every
+# loop below quietly checked nothing — a silently-passing check being exactly
+# what this script exists to prevent elsewhere. POSIX class, and the emptiness
+# is an error rather than a pass.
+targets=$(grep -oE '^ +- target: [^[:space:]]+' .github/workflows/release.yml | awk '{print $3}' | sort -u)
+if [ -z "$targets" ]; then
+    bad "no targets could be read out of .github/workflows/release.yml"
+    note "every platform-coverage check below depends on this list"
+else
+    ok "the release matrix names $(printf '%s\n' "$targets" | wc -l | tr -d ' ') platforms"
+fi
+
 # 5. The release artifact name is a contract. Four files construct or parse it
 #    — the workflow that publishes, the script that installs, the formula that
 #    taps, and the `update` command that replaces a running binary with one —
@@ -131,7 +144,7 @@ fi
 
 # The update command has to know every platform the release publishes, or it
 # tells the people on the missing one that no release exists for them.
-for target in $(grep -oE '^          - target: \S+' .github/workflows/release.yml | awk '{print $3}'); do
+for target in $targets; do
     if ! grep -qF "$target" crates/ostraka/src/update.rs; then
         bad "release.yml builds $target and \`ostraka update\` cannot fetch it"
     fi
@@ -141,7 +154,7 @@ ok "every released platform is reachable from ostraka update"
 # Every platform the release builds must be installable by both paths. Adding a
 # target to the matrix and forgetting the installer is the quiet half of that
 # contract; Windows is deliberately binary-only, with no formula.
-for target in $(grep -oE '^          - target: \S+' .github/workflows/release.yml | awk '{print $3}'); do
+for target in $targets; do
     case "$target" in *windows*) continue ;; esac
     if ! grep -qF "$target" scripts/install.sh; then
         bad "release.yml builds $target and install.sh cannot install it"
@@ -165,7 +178,7 @@ else
     ok "the npm shim is the same version as the crates"
 fi
 
-for target in $(grep -oE '^          - target: \S+' .github/workflows/release.yml | awk '{print $3}'); do
+for target in $targets; do
     if ! grep -qF "$target" npm/scripts/install.js; then
         bad "release.yml builds $target and the npm shim cannot install it"
     fi

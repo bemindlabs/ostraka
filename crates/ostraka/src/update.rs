@@ -278,18 +278,23 @@ fn unpack(archive: &[u8], tag: &str, target: &str, into: &Path) -> Result<PathBu
 /// Puts `new` where `exe` is, as atomically as the platform allows.
 ///
 /// On Unix a rename over a running executable is fine: the running process
-/// keeps the old inode and the next one gets the new file. Windows will not
-/// have that, so the running file is moved aside first and left for the next
-/// run to sweep up — a `.old` file nobody deleted is untidy, and a failed
-/// update that left no working binary at all is not.
+/// keeps the old inode and the next one gets the new file.
+///
+/// Windows needs one more step, and it is renaming rather than deleting that
+/// makes it possible. The loader holds the running image open in a way that
+/// refuses a delete and permits a rename, so the running file is moved aside
+/// first and the new one takes its place. The `.old` is left behind because it
+/// cannot be removed while it is running; the next update sweeps it up. A file
+/// nobody deleted is untidy, and it is the cheaper of the two outcomes.
+///
+/// Every failure after that move puts the original back. Raised in review, and
+/// it is the one path where getting it wrong leaves somebody with no binary at
+/// all — which is worse than every other failure here, all of which leave the
+/// working one exactly where it was.
 fn place(new: &Path, exe: &Path) -> Result<(), Failure> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(new, std::fs::Permissions::from_mode(0o755))?;
-    }
-    // Onto the same filesystem as the target, or the rename is a copy that can
-    // fail halfway across a device boundary.
+    // Onto the same filesystem as the target: a rename across a device
+    // boundary is a copy that can fail halfway, which is the one thing this
+    // step exists to rule out.
     let staged = exe.with_extension("new");
     std::fs::copy(new, &staged)?;
     #[cfg(unix)]
@@ -297,14 +302,38 @@ fn place(new: &Path, exe: &Path) -> Result<(), Failure> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
     }
-    if cfg!(windows) {
-        let aside = exe.with_extension("old");
+
+    let aside = exe.with_extension("old");
+    let moved_aside = if cfg!(windows) {
         let _ = std::fs::remove_file(&aside);
-        std::fs::rename(exe, &aside)?;
-    }
-    std::fs::rename(&staged, exe).inspect_err(|_| {
+        std::fs::rename(exe, &aside).inspect_err(|_| {
+            let _ = std::fs::remove_file(&staged);
+        })?;
+        true
+    } else {
+        false
+    };
+
+    if let Err(e) = std::fs::rename(&staged, exe) {
         let _ = std::fs::remove_file(&staged);
-    })?;
+        if moved_aside {
+            // The window this closes: the original has been moved and the
+            // replacement has not landed, so `exe` names nothing. Putting it
+            // back is the only outcome in which the operator still has the
+            // program they started with.
+            if let Err(back) = std::fs::rename(&aside, exe) {
+                return Err(format!(
+                    "could not install the new binary ({e}), and could not put the old \
+                     one back either ({back}) — it is at {}, and moving it to {} by hand \
+                     restores what was there",
+                    aside.display(),
+                    exe.display()
+                )
+                .into());
+            }
+        }
+        return Err(format!("could not install the new binary: {e}").into());
+    }
     Ok(())
 }
 
