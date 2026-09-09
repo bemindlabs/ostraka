@@ -113,7 +113,15 @@ pub fn run(workspace: &Workspace, fix: bool, json: bool) -> Outcome {
 
     // error it was asked to remove.
 
-    if fix && !problems.is_empty() {
+    // Whenever `--fix` is set and something has a way out — not when `problems`
+    // is non-empty. The two are not the same set: `check` does not report a
+    // repository with no commits, and that is precisely a case `Remedy` exists
+    // to fix, so gating on `problems` skipped the remedy most worth running.
+    let fixable = workspace
+        .repositories()
+        .iter()
+        .any(|repo| crate::remedy::Remedy::diagnose(&repo.path).is_some());
+    if fix && fixable {
         if json {
             return Err("--fix asks questions, which --json has nowhere to put".into());
         }
@@ -137,19 +145,14 @@ pub fn run(workspace: &Workspace, fix: bool, json: bool) -> Outcome {
             )?;
         }
 
-        return Ok(check_again(workspace));
+        // The whole check again, not the remedy. Asking only whether the
+        // remedy is satisfied would report success with an adapter profile
+        // still unparseable — an exit status that lies about the thing the
+        // command is named for.
+        return run(workspace, false, json);
     }
 
     Ok(problems.is_empty())
-}
-
-/// Whether anything is still in the way, asked after a walk rather than
-/// inferred from it.
-fn check_again(workspace: &Workspace) -> bool {
-    workspace
-        .repositories()
-        .iter()
-        .all(|repo| crate::remedy::Remedy::diagnose(&repo.path).is_none())
 }
 
 #[cfg(test)]
