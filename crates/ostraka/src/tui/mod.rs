@@ -14,7 +14,6 @@ mod command;
 #[cfg(test)]
 mod flows;
 mod pane;
-mod remedy;
 mod session;
 mod theme;
 mod thread;
@@ -705,10 +704,10 @@ fn apply_setting(app: &mut App, row: Option<&'static str>, value: String) {
 /// does. So the question is asked of the repository, and where there is not
 /// one yet the answer is to clone something in — which is a step only a person
 /// can take, because nobody here knows the URL.
-fn blocking(app: &App) -> Option<remedy::Remedy> {
+fn blocking(app: &App) -> Option<crate::remedy::Remedy> {
     match app.repository() {
-        Some(repo) => remedy::Remedy::diagnose(&repo.path),
-        None => Some(remedy::Remedy::nothing_cloned(
+        Some(repo) => crate::remedy::Remedy::diagnose(&repo.path),
+        None => Some(crate::remedy::Remedy::nothing_cloned(
             &app.workspace.repositories_dir(),
         )),
     }
@@ -1186,7 +1185,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("scratch");
 
         let mut a = App::new(Workspace::at(&dir), Vec::new());
-        a.remedy = Some(remedy::Remedy::nothing_cloned(&dir));
+        a.remedy = Some(crate::remedy::Remedy::nothing_cloned(&dir));
         a.open(Dialog::Fix);
         handle(&mut a, press(KeyCode::Char('y')), Path::new("/p/.ostraka"));
 

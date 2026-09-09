@@ -3,11 +3,13 @@
 mod adapters;
 mod check;
 mod discover;
+mod fix;
 mod init;
 mod init_cmd;
 mod offer;
 mod promote;
 mod prune;
+mod remedy;
 mod replay;
 mod run;
 mod runs;
@@ -45,7 +47,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Validate the project config and every adapter profile.
-    Check,
+    Check {
+        /// Walk the steps out of what it found, one at a time, asking first.
+        #[arg(long)]
+        fix: bool,
+    },
 
     /// Write the files a project needs to be run by Ostraka.
     Init {
@@ -157,7 +163,7 @@ fn main() -> ExitCode {
     let workspace = workspace::Workspace::at(&here);
 
     let result = match &cli.command {
-        Commands::Check => check::run(&workspace, cli.json),
+        Commands::Check { fix } => check::run(&workspace, *fix, cli.json),
         Commands::Init { force } => init_cmd::run(&here, *force, cli.json),
         Commands::Adapters => adapters::run(&workspace, cli.json),
         Commands::Replay { run_id } => replay::run(&workspace, run_id, cli.json),
