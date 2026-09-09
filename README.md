@@ -23,7 +23,7 @@
 [Installing](#installing) · [A window](#a-window-if-you-prefer-one) ·
 [How it is put together](#how-it-is-put-together) ·
 [The one invariant](#the-one-invariant-worth-reading-the-code-for) ·
-[Vendors](#vendors)
+[Vendors](#vendors) · [Which agent for which job](#which-agent-for-which-job)
 
 ## What it is
 
