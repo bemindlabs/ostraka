@@ -5,6 +5,7 @@ mod banner;
 mod bench;
 mod check;
 mod discover;
+mod drain;
 mod fix;
 mod init;
 mod init_cmd;
@@ -167,6 +168,28 @@ enum Commands {
     /// Everything on the task list, in every state.
     Tasks,
 
+    /// Take the task list down, several at a time.
+    Drain {
+        /// How many runs at once.
+        #[arg(long, default_value_t = drain::WORKERS)]
+        workers: usize,
+
+        /// Identity accountable for the changes.
+        #[arg(long, default_value = run::AUTHOR)]
+        author: String,
+
+        /// Identity that reviews them. Must differ from the author.
+        #[arg(long, default_value = run::REVIEWER)]
+        reviewer: String,
+
+        /// Adapter profile that writes, where a task has not named one.
+        #[arg(long)]
+        adapter: Option<String>,
+
+        /// Adapter profile that reviews. Must differ from `--adapter`.
+        #[arg(long)]
+        review_adapter: Option<String>,
+    },
 
     /// List every run this project has recorded.
     Runs,
@@ -244,6 +267,21 @@ fn main() -> ExitCode {
             TaskCommand::Release { id } => task_cmd::release(&workspace, id, cli.json),
         },
         Commands::Tasks => task_cmd::list(&workspace, cli.json),
+        Commands::Drain {
+            workers,
+            author,
+            reviewer,
+            adapter,
+            review_adapter,
+        } => {
+            let mut args = run::Args::for_task(String::new());
+            args.repository = cli.repository.clone();
+            args.author = author.clone();
+            args.reviewer = reviewer.clone();
+            args.adapter = adapter.clone();
+            args.review_adapter = review_adapter.clone();
+            drain::run(&workspace, args, *workers, cli.json)
+        }
         Commands::Runs => runs::run(&workspace, cli.json),
         Commands::Completion { .. } => unreachable!("handled before a workspace is resolved"),
         Commands::Prune { apply } => prune::run(&workspace, *apply, cli.json),

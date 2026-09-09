@@ -20,6 +20,7 @@ pub const REVIEWER: &str = "reviewer";
 /// What a run branches from when nobody names anything.
 pub const BASE_REF: &str = "HEAD";
 
+#[derive(Clone)]
 pub struct Args {
     pub prompt: String,
     /// Which repository the change is made in. `None` where the workspace

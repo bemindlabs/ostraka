@@ -162,6 +162,7 @@ ostraka adapters   # list adapter profiles and whether each can run here
 ostraka task add "..."  # write work down for later
 ostraka tasks           # what is waiting, going, and done
 ostraka run --next      # take the oldest task and run it
+ostraka drain --workers 3   # take the list down, three at a time
 ostraka run "..."  # isolate, execute, gate, review, record
 ostraka run "..." --from ID   # continue an approved run instead of HEAD
 ostraka replay ID  # read a finished run back
