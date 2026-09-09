@@ -420,6 +420,17 @@ pub fn measure(
         let args = run::Args {
             prompt: cell.prompt.clone(),
             repository: None,
+            // The identity is the profile id, deliberately. Everywhere else an
+            // actor is a person or a role and the adapter is recorded beside
+            // it; here the profile *is* the thing on trial, so a record saying
+            // "written by grok, reviewed by claude-code" is the sentence a
+            // benchmark wants, and `ostraka runs` lists the matrix rather than
+            // fifty rows all attributed to "author".
+            //
+            // It does not weaken the self-approval guard. That compares the two
+            // ActorIds, and these two are the two profile ids, which `cells()`
+            // has already established differ — so the guard is being handed a
+            // stricter pair than usual, not a looser one.
             author: cell.adapter.clone(),
             reviewer: cell.reviewer.clone(),
             adapter: Some(cell.adapter.clone()),
@@ -596,9 +607,17 @@ pub fn unknown(suite: &Suite, configured: &[String]) -> Vec<String> {
 pub fn run(workspace: &Workspace, dry_run: bool, json: bool) -> Result<bool, Failure> {
     let suite = load(workspace)?;
 
+    // Not `unwrap_or_default()`. A workspace with no `adapters/` directory, or
+    // one holding a profile that does not parse, would otherwise be reported as
+    // "configured here: none" — which reads as "you have written no profiles"
+    // and is a different thing from "one of them is broken". Seen while
+    // testing this: a workspace whose profiles were somewhere else entirely
+    // produced a confident empty list and no hint that anything had failed.
     let configured: Vec<String> = workspace
         .profiles()
-        .unwrap_or_default()
+        .map_err(|e| -> Failure {
+            format!("the benchmark could not read this workspace's adapter profiles: {e}").into()
+        })?
         .into_iter()
         .map(|p| p.id)
         .collect();
@@ -640,12 +659,18 @@ pub fn run(workspace: &Workspace, dry_run: bool, json: bool) -> Result<bool, Fai
             // What it will spend, before it spends it. Every cell is a paid
             // authoring call and a paid review, and a matrix multiplies faster
             // than it reads.
+            // Counted from the expanded cells rather than from `candidates`,
+            // because a candidate listing three models is three of these — and
+            // calling that "1 candidate" would understate the bill by three
+            // times at exactly the moment somebody is deciding whether to pay
+            // it. The word is what changes: these are the things being
+            // measured, and a profile with two models is two of them.
             let per_task = cells.len() / suite.tasks.len().max(1);
             println!(
                 "{} cells: {} x {}. Each one is an authoring run and a review.",
                 cells.len(),
                 plural(suite.tasks.len(), "task"),
-                plural(per_task, "candidate"),
+                plural(per_task, "candidate/model pair"),
             );
             for cell in &cells {
                 let note = if cell.stood_in { "  (stand-in)" } else { "" };
@@ -900,6 +925,20 @@ adapter = "ref"
         let b = table.iter().find(|s| s.candidate == "b").expect("b");
         assert_eq!((a.approved, a.gate_passed), (0, 1));
         assert_eq!((b.approved, b.gate_passed), (0, 0));
+    }
+
+    #[test]
+    fn a_candidate_listing_models_is_counted_once_per_model() {
+        // The dry run prints this count so somebody can decide whether to pay
+        // for it, and it is derived from the expanded cells: a profile with two
+        // models is two authoring runs and two reviews, not one of each.
+        let suite = Suite::parse(SUITE).expect("parses");
+        let per_task = suite.cells().len() / suite.tasks.len();
+        assert_eq!(
+            per_task, 3,
+            "two candidates, one of which lists two models, is three cells a task"
+        );
+        assert_eq!(suite.candidates.len(), 2, "and only two candidates");
     }
 
     #[test]
