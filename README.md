@@ -89,6 +89,7 @@ ostraka runs       # every run this workspace has recorded
 ostraka tui        # write tasks, watch them run, read them back
 ostraka prune      # remove worktrees finished runs left. Branches untouched
 ostraka promote ID # give an approved run a branch. Merges nothing
+ostraka completion bash  # a completion script, generated from this parser
 ```
 
 ## A workspace
