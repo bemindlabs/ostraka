@@ -99,6 +99,19 @@ enum Commands {
         model: Option<String>,
     },
 
+    /// Write a shell completion script to stdout.
+    ///
+    /// Generated from this parser, so it names the commands this binary
+    /// actually has. Install it the way your shell wants:
+    ///
+    ///   ostraka completion bash > ~/.local/share/bash-completion/completions/ostraka
+    ///   ostraka completion zsh  > "${fpath[1]}/_ostraka"
+    ///   ostraka completion fish > ~/.config/fish/completions/ostraka.fish
+    Completion {
+        /// Which shell to write for.
+        shell: clap_complete::Shell,
+    },
+
     /// List every run this project has recorded.
     Runs,
 
@@ -131,6 +144,21 @@ enum Commands {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+
+    // Before a workspace is looked for. Completions are about the command line,
+    // not about a project, and a shell asking for them in someone's home
+    // directory should not be told that their home directory is not a
+    // workspace.
+    // Matched on a reference. It compiles either way today — `Shell` is `Copy`,
+    // so binding it takes a copy and `cli` is not moved — but that is a fact
+    // about a dependency's derives, and the day one field of this variant stops
+    // being `Copy` the error lands here rather than in the change that caused
+    // it. Locked once, because a completion script is one write.
+    if let Commands::Completion { shell } = &cli.command {
+        write_completion(*shell, &mut std::io::stdout().lock());
+        return ExitCode::SUCCESS;
+    }
+
     let here = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
     let workspace = workspace::Workspace::at(&here);
 
@@ -140,6 +168,7 @@ fn main() -> ExitCode {
         Commands::Adapters => adapters::run(&workspace, cli.json),
         Commands::Replay { run_id } => replay::run(&workspace, run_id, cli.json),
         Commands::Runs => runs::run(&workspace, cli.json),
+        Commands::Completion { .. } => unreachable!("handled before a workspace is resolved"),
         Commands::Prune { apply } => prune::run(&workspace, *apply, cli.json),
         Commands::Tui => tui::run(&workspace),
         Commands::Promote { run_id, branch } => {
@@ -183,12 +212,57 @@ fn main() -> ExitCode {
     }
 }
 
+/// Writes the completion script for one shell.
+///
+/// Taken from `Cli::command()` rather than written out, so it describes the
+/// commands and flags this binary has — including the ones added after the
+/// script was installed, once it is regenerated.
+fn write_completion(shell: clap_complete::Shell, out: &mut impl std::io::Write) {
+    let mut command = <Cli as clap::CommandFactory>::command();
+    clap_complete::generate(shell, &mut command, "ostraka", out);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("ostraka").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn a_completion_script_is_written_for_every_shell_clap_knows() {
+        // Generated from the parser, so the assertion worth making is that the
+        // parser is what reached the script: a command added later appears
+        // without anybody editing anything, and one renamed stops appearing.
+        // Asked of clap rather than listed here. `Shell` is `#[non_exhaustive]`
+        // — upstream adds one without it being a breaking change — and a list
+        // written out is the second description of something this whole change
+        // exists to argue against keeping.
+        let shells = <clap_complete::Shell as clap::ValueEnum>::value_variants();
+        assert!(!shells.is_empty(), "clap knows no shells");
+        for shell in shells.iter().copied() {
+            let mut out: Vec<u8> = Vec::new();
+            write_completion(shell, &mut out);
+            let text = String::from_utf8(out).expect("utf-8");
+            assert!(!text.is_empty(), "{shell} wrote nothing");
+            assert!(text.contains("ostraka"), "{shell} did not name the binary");
+            for command in ["run", "promote", "prune", "adapters", "replay"] {
+                assert!(
+                    text.contains(command),
+                    "{shell} did not carry {command}:\n{text}"
+                );
+            }
+            // And the flags, which are the half a hand-written script forgets.
+            // Asked by name rather than by spelling: fish writes a long option
+            // as `-l from` and the rest write `--from`, so looking for the
+            // dashes tests which shell this is and not whether the option
+            // arrived.
+            assert!(
+                text.contains("--from") || text.contains("-l from"),
+                "{shell} did not carry the --from option:\n{text}"
+            );
+        }
     }
 
     #[test]

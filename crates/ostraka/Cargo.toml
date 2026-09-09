@@ -14,6 +14,11 @@ ostraka-core = { workspace = true }
 ostraka-adapter = { workspace = true }
 ostraka-runtime = { workspace = true }
 clap = { workspace = true }
+# Completions generated from the parser rather than written by hand. A hand-
+# written script is a second description of the command line, and the second one
+# is the one that goes stale — which is the drift `check-hygiene.sh` exists to
+# catch everywhere else. By clap's own authors, pure Rust, no runtime.
+clap_complete = { workspace = true }
 serde_json = { workspace = true }
 # The TUI, and nothing else it drags in. ratatui's defaults pull a second
 # backend and a colour-conversion stack; `crossterm` alone is the terminal this
