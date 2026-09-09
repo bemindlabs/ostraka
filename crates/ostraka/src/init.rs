@@ -142,7 +142,7 @@ impl Plan {
 /// Kept here rather than read from disk because the binary is installed on its
 /// own; a profile someone has to fetch separately is a profile they will not
 /// have.
-pub const TEMPLATES: [(&str, &str); 4] = [
+pub const TEMPLATES: [(&str, &str); 6] = [
     ("agy.toml", include_str!("../templates/agy.toml")),
     (
         "claude-code.toml",
@@ -153,6 +153,8 @@ pub const TEMPLATES: [(&str, &str); 4] = [
         "copilot-cli.toml",
         include_str!("../templates/copilot-cli.toml"),
     ),
+    ("grok.toml", include_str!("../templates/grok.toml")),
+    ("kimi-cli.toml", include_str!("../templates/kimi-cli.toml")),
 ];
 
 /// Writes one shipped profile into a workspace's `adapters/`.
@@ -608,9 +610,10 @@ mod tests {
         std::fs::create_dir_all(dir.join("repositories/work")).expect("repository");
         std::fs::write(dir.join("repositories/work/Cargo.toml"), "[package]\n").expect("write");
         let written = apply(&plan(&dir), false).expect("applies");
-        // Six, not seven: the fixture made repositories/ to put a Cargo.toml
-        // in, and a place that is already there is left alone.
-        assert_eq!(written.len(), 7, "{written:?}");
+        // The config, one profile per shipped template, notes/ and .gitignore.
+        // The fixture made repositories/ to put a Cargo.toml in, and a place
+        // that is already there is left alone, so it is not among them.
+        assert_eq!(written.len(), TEMPLATES.len() + 3, "{written:?}");
         assert!(dir.join(".ostraka/ostraka.toml").is_file());
         assert!(dir.join(".ostraka/adapters/codex.toml").is_file());
         assert!(dir.join(".gitignore").is_file());

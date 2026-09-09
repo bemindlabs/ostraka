@@ -1,0 +1,82 @@
+# Moonshot's Kimi CLI.
+#
+# Verified headless: `kimi-cli --print --output-format text --final-message-only
+# --prompt '<prompt>'` writes the final assistant message to stdout and nothing
+# else. The positional argument is a subcommand, not a prompt — `kimi-cli
+# --print 'do the thing'` fails with `No such command`, so the prompt goes
+# through `--prompt`.
+id = "kimi-cli"
+command = "kimi-cli"
+
+# Print mode is this CLI's non-interactive mode and it auto-approves tool calls
+# by definition, which is what an author needs and is also the whole of the
+# problem below.
+args = [
+    "--print",
+    "--output-format",
+    "text",
+    "--final-message-only",
+    "--prompt",
+    "{{prompt}}",
+]
+
+# There is no reviewer invocation, and that is a limitation rather than an
+# omission. This CLI has no read-only posture in print mode: `--plan` sets a
+# flag that gates tools through the interactive client's plan-mode handshake,
+# and print mode has no such client, so the flag reports `plan_mode=False` and
+# changes nothing. Asked to create a file under `--print --plan`, it created
+# the file. There is no permission-mode flag, no tool allowlist and no deny
+# rule to fall back on; the only lever is a custom agent specification, which
+# is a file this profile cannot ship.
+#
+# So `review_args` is deliberately absent, which reuses the author invocation,
+# and what that means is written down rather than papered over: a review run
+# through this profile can edit the worktree it is judging. Route it as an
+# author. See adapters/README.md.
+
+model_args = ["--model", "{{model}}"]
+# Authentication and endpoint for a key-based login. A subscription login comes
+# from the carried credentials directory instead.
+inherit_env = ["KIMI_API_KEY", "KIMI_BASE_URL"]
+
+# Print mode with `--final-message-only` puts the reply on stdout by itself, so
+# there is nothing to parse.
+event_format = "none"
+
+# This CLI keeps everything per user under one directory, and the variable that
+# names it is the only lever there is — there is no flag that ignores it.
+# Relocating it stops the operator's skills, installed plugins, MCP registry,
+# session history and command history from reaching a run. Measured: a run in a
+# relocated home saw no MCP servers and only this CLI's own two bundled skills,
+# while the repository's own AGENTS.md still reached the model.
+#
+# `config.toml` is carried, and it is not a credential. It is where this CLI
+# defines the providers and models its login authenticates against, so a
+# relocated home without it has no model at all — the run fails with `LLM not
+# set` before it starts. Nothing in this CLI separates that from the operator's
+# own settings, so what travels with it travels: the hook list, the extra skill
+# directories and the telemetry switch declared in that file are read from the
+# operator's copy. That is the limit of this profile's isolation and it is
+# named here rather than discovered later.
+[isolation]
+home_env = "KIMI_SHARE_DIR"
+home_source = ".kimi"
+credentials = ["credentials", "config.toml"]
+
+# No `[usage]` block. This CLI reports what a turn spent only in its `text`
+# output format, as a Python object repr on stdout — and `--final-message-only`,
+# which is what keeps the reply clean, suppresses it. A count that could only be
+# had by giving up a parseable reply is not a count worth having, so this
+# profile produces no row in the token line rather than a row of zeroes.
+
+# `streams_json` is false and the CLI is not the reason. This profile invokes it
+# with `--output-format text --final-message-only`, which emits prose, so the
+# field describes what this invocation produces rather than what the binary is
+# able to produce — the same reading `copilot-cli` uses. Its `stream-json` mode
+# exists and is not used here: it puts the reply in a `content` array whose
+# index depends on whether the model thought first, and an event pointer that
+# moves is worse than no pointer at all.
+[capabilities]
+headless = true
+streams_json = false
+resumable = true
