@@ -110,19 +110,33 @@ for check in "cargo fmt --all -- --check" "cargo clippy --all-targets" \
 done
 ok "the gate in ci.yml matches the gate in ostraka.toml"
 
-# 5. The release artifact name is a contract. Three files construct or parse it
+# 5. The release artifact name is a contract. Four files construct or parse it
 #    — the workflow that publishes, the script that installs, the formula that
-#    taps — and none of them can see the other two. Getting it wrong breaks
-#    installs silently, for other people, after a tag has already been cut.
+#    taps, and the `update` command that replaces a running binary with one —
+#    and none of them can see the other three. Getting it wrong breaks installs
+#    silently, for other people, after a tag has already been cut.
 if ! grep -qF 'name="ostraka-${tag}-${{ matrix.target }}"' .github/workflows/release.yml; then
     bad "release.yml no longer packages ostraka-<tag>-<target>.tar.gz"
 elif ! grep -qF 'name="ostraka-${VERSION}-${target}"' scripts/install.sh; then
     bad "install.sh no longer expects ostraka-<version>-<target>.tar.gz"
 elif ! grep -qF 'ostraka-v#{version}-' Formula/ostraka.rb; then
     bad "Formula/ostraka.rb no longer expects ostraka-v<version>-<target>.tar.gz"
+elif ! grep -qF 'format!("ostraka-{tag}-{target}")' crates/ostraka/src/update.rs; then
+    bad "update.rs no longer expects ostraka-<tag>-<target>.tar.gz"
+    note "\`ostraka update\` downloads by this name; a rename here strands"
+    note "every already-installed copy, which is the half nobody can fix later"
 else
-    ok "install.sh and the formula parse the name release.yml builds"
+    ok "install.sh, the formula and update parse the name release.yml builds"
 fi
+
+# The update command has to know every platform the release publishes, or it
+# tells the people on the missing one that no release exists for them.
+for target in $(grep -oE '^          - target: \S+' .github/workflows/release.yml | awk '{print $3}'); do
+    if ! grep -qF "$target" crates/ostraka/src/update.rs; then
+        bad "release.yml builds $target and \`ostraka update\` cannot fetch it"
+    fi
+done
+ok "every released platform is reachable from ostraka update"
 
 # Every platform the release builds must be installable by both paths. Adding a
 # target to the matrix and forgetting the installer is the quiet half of that
