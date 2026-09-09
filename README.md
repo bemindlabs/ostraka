@@ -411,6 +411,71 @@ Each profile declares two invocations. The author's may write; the reviewer's ma
 not — a reviewer that can edit the worktree can make a change it just rejected
 pass on the next attempt.
 
+## Which agent for which job
+
+`ostraka bench` asks the same tasks of every candidate and tabulates what the
+gate said. It can answer that question because a run already ends in an
+objective verdict — the project's own checks, executed in a worktree, on the
+change that was actually written. Nothing new judges anything; the measurement
+is the pipeline, repeated.
+
+Declared in `.ostraka/bench.toml`, beside the workspace rather than inside the
+repository: a gate is what a repository agrees on, a benchmark is what an
+operator is curious about this week.
+
+```toml
+# Held constant, so the numbers are about the candidate rather than the pair.
+# The rest stand in where a candidate is the first one.
+reviewers = ["claude-code", "codex"]
+
+[[task]]
+id = "greet"
+prompt = "Add an executable greet.sh that prints exactly `hello, world`."
+
+[[candidate]]
+adapter = "codex"
+
+[[candidate]]
+adapter = "grok"
+models = ["an-id-this-machine-can-run"]
+```
+
+```
+$ ostraka bench --dry-run
+2 cells: 1 task x 2 candidates. Each one is an authoring run and a review.
+
+$ ostraka bench
+greet
+      codex:default    43s  wrote nothing
+      grok:default     10s  checks failed: check
+
+standings
+    0%  grok:default    0 approved / 1 judged  gate 0  0 incomplete   10s   45.9k
+    0%  codex:default   0 approved / 1 judged  gate 0  0 incomplete   43s   11.0k
+```
+
+That is a real run, and it is worth reading for what the columns keep apart.
+`grok` wrote the script and left it mode 600, so `test -x` failed — a change
+that was judged and found wanting. `codex` wrote nothing at all. Both are
+zero, and only one of them is about the work.
+
+Three things the table refuses to do:
+
+- **A cell that never reached a verdict does not count against the candidate.**
+  A rate limit, an expired credential, a ceiling or a stop is an outcome about
+  the run. Averaging those into a pass rate would rank a vendor by how reliably
+  its billing worked. A candidate with no judged cells shows `—`, not `0%`.
+- **The gate is the score; the review is reported beside it.** A failing check
+  is a fact about the change. A reviewer's verdict is an opinion about it, from
+  a model with its own preferences. Both are printed and only the first is
+  ranked on.
+- **Every cell names the run it came from,** so `ostraka replay <id>` reaches
+  the diff, the check output and the reviewer's words. A number nobody can get
+  back to the evidence for is a number nobody should act on.
+
+Every cell is a full run, so a matrix costs what its size says it does.
+`--dry-run` prints that size without spending it.
+
 ## Working in this repository
 
 [`AGENTS.md`](AGENTS.md) — the same file every backend reads, and the one place

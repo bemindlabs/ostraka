@@ -20,6 +20,10 @@ clap = { workspace = true }
 # catch everywhere else. By clap's own authors, pure Rust, no runtime.
 clap_complete = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
+# The benchmark suite is a file somebody writes. Already in the workspace for
+# adapter profiles; no new dependency reaches the binary.
+toml = { workspace = true }
 # The TUI, and nothing else it drags in. ratatui's defaults pull a second
 # backend and a colour-conversion stack; `crossterm` alone is the terminal this
 # ships against. Both are pure Rust with no runtime of their own, which is the

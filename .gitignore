@@ -9,6 +9,10 @@
 /.ostraka/runs/
 /.ostraka/cache/
 
+# Benchmark reports. Working evidence like a run record: the suite that
+# produced them is committed, the numbers a particular machine got are not.
+/.ostraka/bench/
+
 # Never commit resolved credentials.
 /.ostraka/secrets/
 

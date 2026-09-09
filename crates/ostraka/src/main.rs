@@ -2,6 +2,7 @@
 
 mod adapters;
 mod banner;
+mod bench;
 mod check;
 mod discover;
 mod fix;
@@ -68,6 +69,19 @@ enum Commands {
 
     /// List adapter profiles and whether each one can run here.
     Adapters,
+
+    /// Run the same tasks through every candidate and tabulate what the gate
+    /// said.
+    ///
+    /// Declared in `.ostraka/bench.toml`: the tasks, the candidates —  a
+    /// profile and the models to try it on — and the reviewer profiles held
+    /// constant across them. Every cell is a full run, so a matrix costs what
+    /// its size says it does; `--dry-run` prints that size without spending it.
+    Bench {
+        /// Print the matrix and stop. Nothing is run and no vendor is called.
+        #[arg(long)]
+        dry_run: bool,
+    },
 
     /// Run one task: isolate, execute, gate, review, record.
     Run {
@@ -176,6 +190,7 @@ fn main() -> ExitCode {
         Commands::Check { fix } => check::run(&workspace, *fix, cli.json),
         Commands::Init { force } => init_cmd::run(&here, *force, cli.json),
         Commands::Adapters => adapters::run(&workspace, cli.json),
+        Commands::Bench { dry_run } => bench::run(&workspace, *dry_run, cli.json),
         Commands::Replay { run_id } => replay::run(&workspace, run_id, cli.json),
         Commands::Runs => runs::run(&workspace, cli.json),
         Commands::Completion { .. } => unreachable!("handled before a workspace is resolved"),

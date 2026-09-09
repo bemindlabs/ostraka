@@ -1984,7 +1984,9 @@ dependencies = [
  "ostraka-core",
  "ostraka-runtime",
  "ratatui",
+ "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]
