@@ -189,8 +189,24 @@ pub fn finish(workspace_ostraka: &Path, mut task: Task, run_id: &str, outcome: &
         State::Running,
         &format!("{}.json", task.id),
     );
-    let _ = std::fs::remove_file(running);
-    Ok(())
+    // Not `let _ =`. The done record is written by now, so a remove that fails
+    // leaves the same task listed as running *and* as done — a list that says
+    // two things about one task is worse than one that says nothing, and the
+    // operator would have no way to find out which was true.
+    //
+    // Already gone is not a failure: `finish` is reachable twice for the same
+    // task if a drain worker is retried, and the second call has nothing to do.
+    match std::fs::remove_file(&running) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!(
+            "task {} finished but could not be taken off the running list ({}): \
+             it will be listed twice until that file is removed — {e}",
+            task.id,
+            running.display()
+        )
+        .into()),
+    }
 }
 
 /// Puts a claimed task back, for a run that never reported.
@@ -213,6 +229,33 @@ pub fn release(workspace_ostraka: &Path, id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finishing_twice_is_not_an_error_but_a_failed_removal_is() {
+        // `finish` is reachable twice for one task if a drain worker is
+        // retried, so "already gone" is the expected second call and must not
+        // fail. What must fail is a removal that could not happen: the done
+        // record is written by then, so a swallowed error leaves the same task
+        // listed as running *and* as done, and nothing tells the operator which
+        // of the two is true.
+        let dir = std::env::temp_dir().join(format!("ostraka-finish-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+
+        let task = add(&dir, "do a thing", None, None).expect("added");
+        let claimed = claim(&dir).expect("claims").expect("a task was waiting");
+        assert_eq!(claimed.id, task.id);
+        assert!(place(&dir, State::Running, &format!("{}.json", task.id)).is_file());
+
+        finish(&dir, claimed.clone(), "r-1", "approved").expect("finishes");
+        assert!(!place(&dir, State::Running, &format!("{}.json", task.id)).is_file());
+        assert!(place(&dir, State::Done, &format!("{}.json", task.id)).is_file());
+
+        // The second call has nothing to remove and says so by succeeding.
+        finish(&dir, claimed, "r-1", "approved").expect("finishing twice is not an error");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("ostraka-tasks-{}-{name}", std::process::id()));

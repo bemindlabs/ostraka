@@ -300,7 +300,7 @@ fn main() -> ExitCode {
             from,
             model,
         } => {
-            let mut args = run::Args {
+            let args = run::Args {
                 prompt: prompt.clone().unwrap_or_default(),
                 repository: cli.repository.clone(),
                 author: author.clone(),
@@ -316,7 +316,6 @@ fn main() -> ExitCode {
             } else if args.prompt.is_empty() {
                 Err("say what the agent should do, or `--next` to take it from the list".into())
             } else {
-                args.repository = args.repository.take();
                 run::run(&workspace, &args, cli.json)
             }
         }
@@ -385,6 +384,45 @@ mod tests {
                 "{shell} did not carry the --from option:\n{text}"
             );
         }
+    }
+
+    #[test]
+    fn next_and_a_prompt_are_alternatives_and_a_bare_run_is_still_refused() {
+        // `--next` made `prompt` optional, which is the change worth pinning:
+        // an optional positional cannot be required by clap any more, so
+        // "say what the agent should do" moved out of the parser and into the
+        // command. Three shapes, and the parser only decides the first two.
+        let cli = parse(&["run", "--next"]).expect("--next alone parses");
+        let Some(Commands::Run { prompt, next, .. }) = &cli.command else {
+            panic!("not the run command")
+        };
+        assert!(*next);
+        assert_eq!(prompt.as_deref(), None);
+
+        let cli = parse(&["run", "a task"]).expect("a prompt alone parses");
+        let Some(Commands::Run { prompt, next, .. }) = &cli.command else {
+            panic!("not the run command")
+        };
+        assert!(!*next);
+        assert_eq!(prompt.as_deref(), Some("a task"));
+
+        // Both is refused: one says take the next thing on the list and the
+        // other says do this instead, and a run given both would ignore one.
+        let err = match parse(&["run", "a task", "--next"]) {
+            Ok(_) => panic!("--next and a prompt were accepted together"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        // And neither still parses, because the positional is optional now.
+        // What used to be a parse error is a sentence the command prints, and
+        // this is the assertion that says so out loud.
+        let cli = parse(&["run"]).expect("a bare run parses, and is refused later");
+        let Some(Commands::Run { prompt, next, .. }) = &cli.command else {
+            panic!("not the run command")
+        };
+        assert!(!*next);
+        assert_eq!(prompt.as_deref(), None);
     }
 
     #[test]

@@ -334,12 +334,14 @@ pub fn run_reporting(
     args: &Args,
     json: bool,
 ) -> Result<(bool, String), Box<dyn std::error::Error>> {
-    let id = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    let approved = run_with(workspace, args, json, {
-        let id = std::sync::Arc::clone(&id);
-        move |report| *id.lock().expect("not poisoned") = report.record.run_id.clone()
+    // A plain local. `seen` is `FnOnce`, called synchronously on this thread
+    // before `run_with` returns, so there is nothing for a lock to make safe —
+    // and the `Arc<Mutex<_>>` this replaces could panic on a poisoned mutex in
+    // the one path whose whole job is to report what happened.
+    let mut id = String::new();
+    let approved = run_with(workspace, args, json, |report| {
+        id = report.record.run_id.clone();
     })?;
-    let id = id.lock().expect("not poisoned").clone();
     Ok((approved, id))
 }
 

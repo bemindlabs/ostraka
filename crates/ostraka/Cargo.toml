@@ -19,9 +19,10 @@ clap = { workspace = true }
 # is the one that goes stale — which is the drift `check-hygiene.sh` exists to
 # catch everywhere else. By clap's own authors, pure Rust, no runtime.
 clap_complete = { workspace = true }
+# Task entries and benchmark results are files that outlive the process that
+# wrote them, so they are derived rather than formatted by hand.
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde = { workspace = true }
 # The benchmark suite is a file somebody writes. Already in the workspace for
 # adapter profiles; no new dependency reaches the binary.
 toml = { workspace = true }
