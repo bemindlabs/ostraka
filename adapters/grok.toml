@@ -1,0 +1,120 @@
+# xAI's Grok CLI.
+#
+# Verified headless: `grok -p '<prompt>' --output-format json` writes one JSON
+# document to stdout with the reply at `/text` and the vendor's own token
+# accounting beside it.
+id = "grok"
+command = "grok"
+
+# Author: edits are applied without prompting. The leash is the gate.
+args = [
+    "-p",
+    "{{prompt}}",
+    "--permission-mode",
+    "acceptEdits",
+    "--output-format",
+    "json",
+]
+
+# Reviewer: read-only, and the three deny rules are not belt-and-braces — they
+# are what makes it read-only at all. `--permission-mode plan` alone is enough
+# on a clean machine and is *not* enough on an operator's: this CLI reads
+# `~/.claude/settings.json` and `~/.claude/settings.local.json` as a permission
+# fallback, and the thirty-seven allow rules found on the machine this was
+# written on let a reviewer in plan mode create a file. There is no flag and no
+# environment variable that suppresses that fallback. Deny beats allow, which
+# is the lever that does work: with these three rules the same prompt reported
+# the write tool blocked, tried a shell command, found that blocked too, and
+# created nothing.
+review_args = [
+    "-p",
+    "{{prompt}}",
+    "--permission-mode",
+    "plan",
+    "--deny",
+    "Edit(**)",
+    "--deny",
+    "Write(**)",
+    "--deny",
+    "Bash(*)",
+    "--output-format",
+    "json",
+]
+
+model_args = ["--model", "{{model}}"]
+# Authentication that does not live in the relocated home: a key-based login
+# comes from the first, and the other two are the endpoints an operator running
+# this against a proxy has to be able to name.
+inherit_env = [
+    "XAI_API_KEY",
+    "GROK_MODELS_BASE_URL",
+    "GROK_CLI_CHAT_PROXY_BASE_URL",
+]
+
+event_format = "json"
+event_text = "/text"
+
+# This CLI discovers another vendor's configuration on purpose — its own
+# documentation calls it Claude Code compatibility and says no extra setup is
+# needed. On the machine this was written on that meant a headless run started
+# with the operator's global CLAUDE.md, their plugin list, and five MCP servers
+# out of `~/.claude.json`, two of them stdio servers reaching that operator's
+# own accounts. Relocating GROK_HOME does not touch any of it: those paths hang
+# off the home directory, not off this CLI's own.
+#
+# Each scan is a documented configuration key with an environment variable
+# beside it, so the suppression is data in this file rather than code in the
+# runtime. Measured, both directions: with these set, `grok inspect` marks the
+# operator's CLAUDE.md, hooks and every one of those MCP servers `[disabled]`,
+# and a run asked to name its MCP tools answered NONE — while the repository's
+# own AGENTS.md still reached the model, and a project-level CLAUDE.md is still
+# read. `compat.claude.agents` is the one that covers the global instruction
+# file, which is not what its name suggests and is what its documentation says.
+#
+# The Cursor half is the documented counterpart of the Claude half. It is set
+# for the same reason and was not measurable here: no Cursor installation
+# existed on the machine, so what is verified about these four is that they are
+# real keys and that a run carrying them still works.
+#
+# `compat.claude.rules` is deliberately left alone. It governs `.claude/rules/`,
+# which is a repository's own directory, and the repository travels with the
+# task.
+[env]
+GROK_CLAUDE_AGENTS_ENABLED = "0"
+GROK_CLAUDE_HOOKS_ENABLED = "0"
+GROK_CLAUDE_MCPS_ENABLED = "0"
+GROK_CLAUDE_SKILLS_ENABLED = "0"
+GROK_CURSOR_AGENTS_ENABLED = "0"
+GROK_CURSOR_HOOKS_ENABLED = "0"
+GROK_CURSOR_MCPS_ENABLED = "0"
+GROK_CURSOR_SKILLS_ENABLED = "0"
+GROK_MANAGED_MCPS_ENABLED = "0"
+
+# Everything this CLI keeps per user lives in one directory it names itself, so
+# relocating that directory is the lever for its own half: its config, its
+# skills, its installed plugins, its MCP registry and its session history all
+# stop reaching a run. `auth.json` is carried because it is a credential rather
+# than configuration — verified by running against a relocated home containing
+# nothing else and getting an answer back.
+[isolation]
+home_env = "GROK_HOME"
+home_source = ".grok"
+credentials = ["auth.json"]
+
+# One JSON document, and the three input counters are three parts of one
+# number for the same reason they are next door: the uncached remainder alone
+# reported 6,720 for a run that actually sent 16,704.
+[usage]
+stream = "stdout"
+shape = "json"
+input = [
+    "/usage/input_tokens",
+    "/usage/cache_read_input_tokens",
+    "/usage/cache_creation_input_tokens",
+]
+output = "/usage/output_tokens"
+
+[capabilities]
+headless = true
+streams_json = true
+resumable = true

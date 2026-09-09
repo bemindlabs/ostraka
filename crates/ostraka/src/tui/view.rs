@@ -1479,22 +1479,22 @@ fn render_setup(frame: &mut Frame, app: &App, area: Rect) {
             Span::raw(name),
         ]));
     }
-    lines.push(Line::from(""));
-    lines.push(dim(
-        "Nothing already on disk is overwritten. `ostraka init` does the same.".to_string(),
-    ));
+    let mut tail = vec![
+        Line::from(""),
+        dim("Nothing already on disk is overwritten. `ostraka init` does the same.".to_string()),
+    ];
 
     // What setting up will not fix, said before the offer is taken rather than
     // by a run failing later in somebody else's words.
     for (mark, said) in warnings(app, plan) {
-        lines.push(Line::from(""));
+        tail.push(Line::from(""));
         // Wrapped, because these are sentences rather than labels and the one
         // that overflows is the one explaining what will not work.
         for (i, part) in wrap(&said, area.width.saturating_sub(4) as usize)
             .into_iter()
             .enumerate()
         {
-            lines.push(Line::from(vec![
+            tail.push(Line::from(vec![
                 Span::styled(
                     if i == 0 {
                         format!("{mark}  ")
@@ -1507,8 +1507,29 @@ fn render_setup(frame: &mut Frame, app: &App, area: Rect) {
             ]));
         }
     }
+
+    // The listing yields, the warnings do not. Every profile this binary ships
+    // is one more line under "Pressing i writes:", and on a short terminal the
+    // sixth of them pushed "the gate it writes fails on purpose" off the
+    // bottom — which is the one sentence on this screen somebody has to read
+    // before pressing the key. Adding a vendor is a file, so the list only
+    // grows; what it may not do is grow over the warnings.
+    let room = area.height as usize;
+    if lines.len() + tail.len() > room {
+        let keep = room
+            .saturating_sub(tail.len())
+            .saturating_sub(HEADING_LINES + 1);
+        let hidden = lines.len() - HEADING_LINES - keep;
+        lines.truncate(HEADING_LINES + keep);
+        lines.push(dim(format!("  … and {hidden} more")));
+    }
+    lines.extend(tail);
     frame.render_widget(Paragraph::new(lines), area);
 }
+
+/// Lines above the file listing in [`render_setup`]: the title, the blank after
+/// it, what was detected, another blank, and "Pressing i writes:".
+const HEADING_LINES: usize = 5;
 
 /// What will still be wrong after `i`.
 ///

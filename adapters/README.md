@@ -13,6 +13,8 @@ them can actually run on this machine; `ostraka check` validates all of them.
 | `claude-code` | `claude` | yes |
 | `codex` | `codex` | yes |
 | `copilot-cli` | `copilot` | yes |
+| `grok` | `grok` | yes |
+| `kimi-cli` | `kimi-cli` | yes |
 | `agy` | `agy` | yes |
 
 Nothing is shipped that has not been run end to end. A profile for a CLI you have
@@ -180,6 +182,8 @@ reading a file.
 | `claude` | yes | yes | `--setting-sources project` |
 | `codex` | yes — `$CODEX_HOME/AGENTS.md` is spliced into the same block as the project doc | yes | `CODEX_HOME` only |
 | `copilot` | no user-level instructions path exists | yes | `--no-custom-instructions`, which also drops the repository's |
+| `grok` | yes, and twice over — its own `~/.grok`, *and* another vendor's `~/.claude` by design | yes | `GROK_HOME` for the first, nine `compat.*` variables for the second |
+| `kimi-cli` | yes — skills, plugins, MCP registry and history, all under `~/.kimi` | yes | `KIMI_SHARE_DIR`, with `config.toml` carried |
 | `agy` | none found to inherit | n/a | none needed — and none arrives either, see below |
 
 Instruction files turned out to be the smaller half. A baseline `claude -p` in an
@@ -263,6 +267,44 @@ across every vendor.
   Reproduced with the operator's untouched configuration, so it is not something
   isolation does. Reviewing is unaffected — `--sandbox read-only` runs, and
   codex is verified in that role under a relocated home.
+- **Grok discovers another vendor's configuration on purpose.** Its own
+  documentation calls this Claude Code compatibility and says no extra setup is
+  needed, which is exactly the problem: a headless run on the machine this was
+  written on began with the operator's global `CLAUDE.md`, their plugin list and
+  five MCP servers out of `~/.claude.json`, two of them stdio servers reaching
+  that operator's own accounts. Relocating `GROK_HOME` does not touch any of it
+   — those paths hang off the home directory, not off this CLI's own. Each scan
+  is a documented configuration key with an environment variable beside it, so
+  the profile sets them and `grok inspect` then marks every one of those sources
+  `[disabled]`; a run asked to name its MCP tools answered NONE. What no
+  variable reaches is the **permission fallback**: this CLI reads
+  `~/.claude/settings.json` and `settings.local.json` when its own config has no
+  rules, and the thirty-seven allow rules found on that machine were enough to
+  let a reviewer in `--permission-mode plan` create a file. Deny beats allow, so
+  the reviewer invocation carries three deny rules and they are load-bearing
+  rather than decorative. The author's posture is still widened by whatever the
+  operator has allowed, which is a leak with no lever behind it.
+- **Kimi CLI has no read-only posture in print mode.** Print mode is its only
+  non-interactive mode and it auto-approves tool calls by definition. `--plan`
+  does not help: plan mode gates tools through the interactive client's
+  handshake, print mode has no such client, and the flag reports
+  `plan_mode=False`. Asked to create a file under `--print --plan`, it created
+  the file. There is no permission-mode flag, no tool allowlist and no deny rule;
+  the only lever is a custom agent specification, which is a file a TOML profile
+  cannot ship. So the profile declares no `review_args`, and a review run
+  through it can edit the worktree it is judging. Route it as an author.
+- **Kimi CLI's `config.toml` is carried, and it is not a credential.** It is
+  where the CLI defines the providers and models its login authenticates
+  against, so a relocated share directory without it fails with `LLM not set`
+  before the run starts. Nothing in this CLI separates that from the operator's
+  own settings, so the hook list, the extra skill directories and the telemetry
+  switch declared in that file travel with it. Everything else under `~/.kimi`
+  — skills, installed plugins, the MCP registry, session and command history —
+  stops at the relocation, which was measured: no MCP servers, and only the
+  CLI's own two bundled skills. Its user-scoped skill search also reaches
+  `~/.claude/skills` and `~/.codex/skills`, which are home-derived and outside
+  what `KIMI_SHARE_DIR` moves; `--skills-dir` overrides discovery but refuses a
+  directory that does not exist, so it cannot be shipped unconditionally.
 - **A relocated home accumulates.** Sessions, caches and a vendor's own memory
   store live there across runs. It is isolation from the operator, not a fresh
   sandbox each time.

@@ -1,6 +1,7 @@
 //! The `ostraka` command.
 
 mod adapters;
+mod banner;
 mod check;
 mod discover;
 mod fix;
@@ -40,8 +41,12 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
+    /// Absent when the binary is run by name and nothing else, which is how
+    /// somebody asks a program what it is. clap's answer to a missing required
+    /// subcommand is a usage error on stderr and a non-zero exit; that is a
+    /// true sentence about the parser and the wrong one to be met by.
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -145,6 +150,11 @@ enum Commands {
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
+    let Some(command) = &cli.command else {
+        banner::print();
+        return ExitCode::SUCCESS;
+    };
+
     // Before a workspace is looked for. Completions are about the command line,
     // not about a project, and a shell asking for them in someone's home
     // directory should not be told that their home directory is not a
@@ -154,7 +164,7 @@ fn main() -> ExitCode {
     // about a dependency's derives, and the day one field of this variant stops
     // being `Copy` the error lands here rather than in the change that caused
     // it. Locked once, because a completion script is one write.
-    if let Commands::Completion { shell } = &cli.command {
+    if let Commands::Completion { shell } = command {
         write_completion(*shell, &mut std::io::stdout().lock());
         return ExitCode::SUCCESS;
     }
@@ -162,7 +172,7 @@ fn main() -> ExitCode {
     let here = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
     let workspace = workspace::Workspace::at(&here);
 
-    let result = match &cli.command {
+    let result = match command {
         Commands::Check { fix } => check::run(&workspace, *fix, cli.json),
         Commands::Init { force } => init_cmd::run(&here, *force, cli.json),
         Commands::Adapters => adapters::run(&workspace, cli.json),
@@ -274,7 +284,7 @@ mod tests {
         // failure if it changed is that `--from` stops working entirely rather
         // than misbehaving somewhere visible. So it is pinned here.
         let cli = parse(&["run", "a task", "--from", "t1"]).expect("--from alone parses");
-        let Commands::Run { from, base_ref, .. } = &cli.command else {
+        let Some(Commands::Run { from, base_ref, .. }) = &cli.command else {
             panic!("not the run command")
         };
         assert_eq!(from.as_deref(), Some("t1"));
@@ -291,7 +301,7 @@ mod tests {
 
         // Neither is required, and the default is what a run gets.
         let cli = parse(&["run", "a task"]).expect("a bare run parses");
-        let Commands::Run { from, base_ref, .. } = &cli.command else {
+        let Some(Commands::Run { from, base_ref, .. }) = &cli.command else {
             panic!("not the run command")
         };
         assert_eq!(from.as_deref(), None);
