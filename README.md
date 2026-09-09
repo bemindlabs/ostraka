@@ -81,6 +81,7 @@ reviews, and the result is a replayable record.
 ```console
 ostraka init       # write the workspace layout. Overwrites nothing
 ostraka check      # validate the workspace, its profiles and its repositories
+ostraka check --fix  # and walk the steps out of what it found, asking first
 ostraka adapters   # list adapter profiles and whether each can run here
 ostraka run "..."  # isolate, execute, gate, review, record
 ostraka run "..." --from ID   # continue an approved run instead of HEAD

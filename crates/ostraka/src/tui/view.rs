@@ -21,9 +21,9 @@
 //! can be scanned for "what did the reviewer say" without reading it.
 
 use crate::init::{Action, Plan};
+use crate::remedy::Remedy;
 use crate::tui::command::{Command, Situation};
 use crate::tui::pane::Pane;
-use crate::tui::remedy::Remedy;
 use crate::tui::theme;
 use crate::tui::thread::{Thread, Turn};
 use crate::workspace::{Repository, Workspace};
@@ -2419,7 +2419,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("scratch");
 
         let mut app = App::new(Workspace::at(&dir), Vec::new());
-        app.remedy = crate::tui::remedy::Remedy::diagnose(&dir);
+        app.remedy = crate::remedy::Remedy::diagnose(&dir);
         app.open(Dialog::Fix);
 
         let out = screen(&mut app, 100, 30);
@@ -2458,7 +2458,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("scratch");
 
         let mut app = App::new(Workspace::at(&dir), Vec::new());
-        app.remedy = Some(crate::tui::remedy::Remedy::nothing_cloned(&dir));
+        app.remedy = Some(crate::remedy::Remedy::nothing_cloned(&dir));
         app.open(Dialog::Fix);
 
         let out = screen(&mut app, 100, 26);
