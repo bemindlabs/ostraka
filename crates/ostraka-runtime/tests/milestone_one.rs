@@ -1050,3 +1050,80 @@ fn a_workspace_skill_reaches_the_agent_and_stays_out_of_the_change() {
         report.diff
     );
 }
+
+#[test]
+fn several_runs_at_once_do_not_collide() {
+    // What draining the list in parallel rests on, asked of the runtime rather
+    // than of the command that uses it: run ids, branches, worktrees and record
+    // directories are all derived per run, and the question is whether they are
+    // derived distinctly when the runs overlap in time.
+    let f = fixture("parallel");
+    let writer = agent(&f.repo, "writer", "echo working && echo new > added.txt");
+    let reviewer = agent(&f.repo, "reviewer", &verdict("APPROVE"));
+    let (worktrees, records) = places(&f);
+
+    let ids: Vec<String> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..4)
+            .map(|n| {
+                let writer = writer.clone();
+                let reviewer = reviewer.clone();
+                let worktrees = worktrees.clone();
+                let records = records.clone();
+                let repo = f.repo.clone();
+                scope.spawn(move || {
+                    let routing = route::select(
+                        &[writer, reviewer],
+                        Some("writer"),
+                        Some("reviewer"),
+                        &repo.join(".ostraka/vendor-home"),
+                        None,
+                    )
+                    .unwrap();
+                    let places = orchestrator::Places {
+                        repo: &repo,
+                        worktrees: &worktrees,
+                        records: &records,
+                        name: "work",
+                        notes: None,
+                        skills: None,
+                    };
+                    let mut task = task(&format!("task {n}"), "archon");
+                    task.id = format!("t{n}");
+                    let report = orchestrator::run_task(
+                        &places,
+                        &config("true"),
+                        &routing,
+                        &task,
+                        &ActorId::new("ephor"),
+                        None,
+                    )
+                    .expect("run completes");
+                    assert!(report.approved(), "{:?}", report.refusal);
+                    report.record.run_id
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("thread"))
+            .collect()
+    });
+
+    // Four distinct runs, four records, four branches.
+    let mut unique = ids.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), 4, "two runs shared an id: {ids:?}");
+    for id in &ids {
+        assert!(
+            records.join("runs").join(id).is_dir(),
+            "{id} left no record"
+        );
+        let out = Command::new("git")
+            .args(["rev-parse", "--verify", &format!("ostraka/{id}")])
+            .current_dir(&f.repo)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "{id} left no branch");
+    }
+}

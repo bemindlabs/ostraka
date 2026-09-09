@@ -5,6 +5,7 @@ mod banner;
 mod bench;
 mod check;
 mod discover;
+mod drain;
 mod fix;
 mod init;
 mod init_cmd;
@@ -15,6 +16,8 @@ mod remedy;
 mod replay;
 mod run;
 mod runs;
+mod task_cmd;
+mod tasks;
 mod tui;
 mod workspace;
 
@@ -48,6 +51,26 @@ struct Cli {
     /// true sentence about the parser and the wrong one to be met by.
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum TaskCommand {
+    /// Write a task down. It waits until a run takes it.
+    Add {
+        /// What the agent should do.
+        prompt: String,
+        /// Which repository it belongs in.
+        #[arg(long)]
+        repository: Option<String>,
+        /// The profile that should write it.
+        #[arg(long)]
+        adapter: Option<String>,
+    },
+    /// Put a claimed task back, for a run that never reported.
+    Release {
+        /// The task id, as `ostraka tasks` shows it.
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -85,8 +108,9 @@ enum Commands {
 
     /// Run one task: isolate, execute, gate, review, record.
     Run {
-        /// What the agent should do.
-        prompt: String,
+        /// What the agent should do. Omitted with `--next`, which takes it
+        /// from the list.
+        prompt: Option<String>,
 
         /// Identity accountable for the change.
         #[arg(long, default_value = run::AUTHOR)]
@@ -113,6 +137,10 @@ enum Commands {
         #[arg(long, conflicts_with = "base_ref", value_name = "RUN_ID")]
         from: Option<String>,
 
+        /// Take the oldest task from the list instead of being given one.
+        #[arg(long, conflicts_with = "prompt")]
+        next: bool,
+
         /// Model hint passed through to the adapter.
         #[arg(long)]
         model: Option<String>,
@@ -129,6 +157,38 @@ enum Commands {
     Completion {
         /// Which shell to write for.
         shell: clap_complete::Shell,
+    },
+
+    /// Work written down before somebody is free to do it.
+    Task {
+        #[command(subcommand)]
+        what: TaskCommand,
+    },
+
+    /// Everything on the task list, in every state.
+    Tasks,
+
+    /// Take the task list down, several at a time.
+    Drain {
+        /// How many runs at once.
+        #[arg(long, default_value_t = drain::WORKERS)]
+        workers: usize,
+
+        /// Identity accountable for the changes.
+        #[arg(long, default_value = run::AUTHOR)]
+        author: String,
+
+        /// Identity that reviews them. Must differ from the author.
+        #[arg(long, default_value = run::REVIEWER)]
+        reviewer: String,
+
+        /// Adapter profile that writes, where a task has not named one.
+        #[arg(long)]
+        adapter: Option<String>,
+
+        /// Adapter profile that reviews. Must differ from `--adapter`.
+        #[arg(long)]
+        review_adapter: Option<String>,
     },
 
     /// List every run this project has recorded.
@@ -192,6 +252,36 @@ fn main() -> ExitCode {
         Commands::Adapters => adapters::run(&workspace, cli.json),
         Commands::Bench { dry_run } => bench::run(&workspace, *dry_run, cli.json),
         Commands::Replay { run_id } => replay::run(&workspace, run_id, cli.json),
+        Commands::Task { what } => match what {
+            TaskCommand::Add {
+                prompt,
+                repository,
+                adapter,
+            } => task_cmd::add(
+                &workspace,
+                prompt,
+                repository.as_deref().or(cli.repository.as_deref()),
+                adapter.as_deref(),
+                cli.json,
+            ),
+            TaskCommand::Release { id } => task_cmd::release(&workspace, id, cli.json),
+        },
+        Commands::Tasks => task_cmd::list(&workspace, cli.json),
+        Commands::Drain {
+            workers,
+            author,
+            reviewer,
+            adapter,
+            review_adapter,
+        } => {
+            let mut args = run::Args::for_task(String::new());
+            args.repository = cli.repository.clone();
+            args.author = author.clone();
+            args.reviewer = reviewer.clone();
+            args.adapter = adapter.clone();
+            args.review_adapter = review_adapter.clone();
+            drain::run(&workspace, args, *workers, cli.json)
+        }
         Commands::Runs => runs::run(&workspace, cli.json),
         Commands::Completion { .. } => unreachable!("handled before a workspace is resolved"),
         Commands::Prune { apply } => prune::run(&workspace, *apply, cli.json),
@@ -201,6 +291,7 @@ fn main() -> ExitCode {
         }
         Commands::Run {
             prompt,
+            next,
             author,
             reviewer,
             adapter,
@@ -208,10 +299,9 @@ fn main() -> ExitCode {
             base_ref,
             from,
             model,
-        } => run::run(
-            &workspace,
-            &run::Args {
-                prompt: prompt.clone(),
+        } => {
+            let args = run::Args {
+                prompt: prompt.clone().unwrap_or_default(),
                 repository: cli.repository.clone(),
                 author: author.clone(),
                 reviewer: reviewer.clone(),
@@ -220,9 +310,15 @@ fn main() -> ExitCode {
                 base_ref: base_ref.clone(),
                 from: from.clone(),
                 model: model.clone(),
-            },
-            cli.json,
-        ),
+            };
+            if *next {
+                task_cmd::run_next(&workspace, args, cli.json)
+            } else if args.prompt.is_empty() {
+                Err("say what the agent should do, or `--next` to take it from the list".into())
+            } else {
+                run::run(&workspace, &args, cli.json)
+            }
+        }
     };
 
     match result {
@@ -288,6 +384,45 @@ mod tests {
                 "{shell} did not carry the --from option:\n{text}"
             );
         }
+    }
+
+    #[test]
+    fn next_and_a_prompt_are_alternatives_and_a_bare_run_is_still_refused() {
+        // `--next` made `prompt` optional, which is the change worth pinning:
+        // an optional positional cannot be required by clap any more, so
+        // "say what the agent should do" moved out of the parser and into the
+        // command. Three shapes, and the parser only decides the first two.
+        let cli = parse(&["run", "--next"]).expect("--next alone parses");
+        let Some(Commands::Run { prompt, next, .. }) = &cli.command else {
+            panic!("not the run command")
+        };
+        assert!(*next);
+        assert_eq!(prompt.as_deref(), None);
+
+        let cli = parse(&["run", "a task"]).expect("a prompt alone parses");
+        let Some(Commands::Run { prompt, next, .. }) = &cli.command else {
+            panic!("not the run command")
+        };
+        assert!(!*next);
+        assert_eq!(prompt.as_deref(), Some("a task"));
+
+        // Both is refused: one says take the next thing on the list and the
+        // other says do this instead, and a run given both would ignore one.
+        let err = match parse(&["run", "a task", "--next"]) {
+            Ok(_) => panic!("--next and a prompt were accepted together"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        // And neither still parses, because the positional is optional now.
+        // What used to be a parse error is a sentence the command prints, and
+        // this is the assertion that says so out loud.
+        let cli = parse(&["run"]).expect("a bare run parses, and is refused later");
+        let Some(Commands::Run { prompt, next, .. }) = &cli.command else {
+            panic!("not the run command")
+        };
+        assert!(!*next);
+        assert_eq!(prompt.as_deref(), None);
     }
 
     #[test]

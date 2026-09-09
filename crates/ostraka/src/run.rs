@@ -20,6 +20,7 @@ pub const REVIEWER: &str = "reviewer";
 /// What a run branches from when nobody names anything.
 pub const BASE_REF: &str = "HEAD";
 
+#[derive(Clone)]
 pub struct Args {
     pub prompt: String,
     /// Which repository the change is made in. `None` where the workspace
@@ -237,6 +238,16 @@ pub fn execute(
 }
 
 pub fn run(workspace: &Workspace, args: &Args, json: bool) -> Outcome {
+    run_with(workspace, args, json, |_| {})
+}
+
+/// Everything `run` does, with a look at the report on the way past.
+fn run_with(
+    workspace: &Workspace,
+    args: &Args,
+    json: bool,
+    seen: impl FnOnce(&crate::run::RunReport),
+) -> Outcome {
     // One Ctrl-C asks the run to stop; the adapters notice within a poll and
     // kill what they launched. A second is the operator saying they meant it,
     // and the default handler takes over.
@@ -308,7 +319,30 @@ pub fn run(workspace: &Workspace, args: &Args, json: bool) -> Outcome {
         println!("record: {}", workspace.records().join("runs").display());
     }
 
+    seen(&report);
     Ok(report.approved())
+}
+
+/// The run, and which run it was.
+///
+/// `run` answers the command line's question — did it pass — and the task list
+/// needs the other half: which record to write against the task it took. Read
+/// from the report rather than looked up afterwards, because "the newest run"
+/// stops being "the run I just started" the moment two of them are going.
+pub fn run_reporting(
+    workspace: &Workspace,
+    args: &Args,
+    json: bool,
+) -> Result<(bool, String), Box<dyn std::error::Error>> {
+    // A plain local. `seen` is `FnOnce`, called synchronously on this thread
+    // before `run_with` returns, so there is nothing for a lock to make safe —
+    // and the `Arc<Mutex<_>>` this replaces could panic on a poisoned mutex in
+    // the one path whose whole job is to report what happened.
+    let mut id = String::new();
+    let approved = run_with(workspace, args, json, |report| {
+        id = report.record.run_id.clone();
+    })?;
+    Ok((approved, id))
 }
 
 fn routing_author_id(routing: &route::Routing) -> String {

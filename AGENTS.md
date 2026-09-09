@@ -610,10 +610,26 @@ that is the evidence someone needs, and deleting it would take it away exactly
 when it matters. `ostraka prune` clears what is left, reports before it acts,
 and never touches a branch.
 
-**Async stays out until parallel execution earns it.** Everything today is
-sequential and synchronous. When several adapters need to stream at once, tokio
-goes in `ostraka-runtime` only — `ostraka-core` stays inert either way, which is
-rule 4 above and is not negotiable.
+**Parallel execution arrived, and async still has not earned it.** `ostraka
+drain --workers N` takes the task list down N at a time, and each worker is the
+sequential run that already existed on a thread of its own. This is the second
+time the answer to "that waits for async" turned out to be a thread — the live
+transcript was the first. `tokio` buys nothing for work that is subprocesses
+rather than sockets and that numbers what somebody asked for rather than
+thousands. If it ever goes in it goes in `ostraka-runtime` only; `ostraka-core`
+stays inert either way, which is rule 4 above and is not negotiable.
+
+**What the queue made possible was the claim, not the concurrency.** A run has
+always been able to wait on a subprocess while another thread watched it. What
+did not exist was somewhere to take the second task from, and a claim two
+workers cannot both win — `tasks::claim` renames `pending/<id>` to
+`running/<id>`, which is atomic everywhere this ships and tells the loser
+`NotFound`. No lock file, no crate.
+
+**One Ctrl-C stops everything, and stopping one run of several is still open.**
+The interrupt flag is global on purpose, and for a drain that is the right
+answer. The browser's `s` key is the case that needs a per-run handle, and it is
+still the reason the browser refuses a second run while one is going.
 
 ## Release artifacts are a contract
 
