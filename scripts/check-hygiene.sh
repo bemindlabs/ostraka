@@ -177,6 +177,27 @@ for template in crates/ostraka/templates/*.toml; do
 done
 ok "the profiles init writes are the ones this repository ships"
 
+# 7b. `streams_json` describes the invocation a profile declares, which makes it
+#     exactly `event_format != "none"` — two spellings of one fact, in one file,
+#     that a compiler cannot hold together. They have already come apart twice:
+#     `codex` and `kimi-cli` both claimed to emit events while running their CLI
+#     in a prose mode, on the strength of what the binary can do elsewhere.
+#     The field goes at the next major; until then this is what stops it lying.
+for profile in adapters/*.toml crates/ostraka/templates/*.toml; do
+    format=$(sed -n 's/^event_format *= *"\(.*\)".*/\1/p' "$profile" | head -1)
+    [ -n "$format" ] || format="none"
+    declared=$(sed -n 's/^streams_json *= *\(.*\)/\1/p' "$profile" | head -1)
+    [ -n "$declared" ] || declared="false"
+    if [ "$format" = "none" ]; then expected="false"; else expected="true"; fi
+    if [ "$declared" != "$expected" ]; then
+        bad "$profile says streams_json = $declared with event_format = \"$format\""
+        note "a profile describes one command line: if it emits no parseable"
+        note "events it does not stream json, whatever the CLI can do elsewhere"
+        note "expected streams_json = $expected"
+    fi
+done
+ok "every profile's streams_json agrees with its event_format"
+
 # 8. A relative link in a file this repository ships must resolve inside this
 #    repository. The README footer pointed at PHILOSOPHY.md for a release while
 #    the file lived one directory up in the workspace — fine on the machine that

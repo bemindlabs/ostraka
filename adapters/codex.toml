@@ -62,7 +62,12 @@ stream = "stderr"
 shape = "text"
 total = "tokens used"
 
+# `streams_json` describes this invocation, not the binary. `codex exec` has a
+# `--json` mode and this profile does not ask for it: the final message on
+# stdout is what the verdict line needs, and the progress this profile would
+# have to parse instead goes to stderr. Declaring the mode it is not run in was
+# a claim about the CLI in a file that only describes one command line.
 [capabilities]
 headless = true
-streams_json = true
+streams_json = false
 resumable = true
