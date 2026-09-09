@@ -69,7 +69,14 @@ credentials = ["credentials", "config.toml"]
 # had by giving up a parseable reply is not a count worth having, so this
 # profile produces no row in the token line rather than a row of zeroes.
 
+# `streams_json` is false and the CLI is not the reason. This profile invokes it
+# with `--output-format text --final-message-only`, which emits prose, so the
+# field describes what this invocation produces rather than what the binary is
+# able to produce — the same reading `copilot-cli` uses. Its `stream-json` mode
+# exists and is not used here: it puts the reply in a `content` array whose
+# index depends on whether the model thought first, and an event pointer that
+# moves is worse than no pointer at all.
 [capabilities]
 headless = true
-streams_json = true
+streams_json = false
 resumable = true
