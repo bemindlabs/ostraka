@@ -19,6 +19,7 @@ mod runs;
 mod task_cmd;
 mod tasks;
 mod tui;
+mod update;
 mod workspace;
 
 use clap::{Parser, Subcommand};
@@ -214,6 +215,17 @@ enum Commands {
         apply: bool,
     },
 
+    /// Replace this binary with the current release.
+    ///
+    /// Refuses to overwrite a copy Homebrew, cargo or npm installed — those
+    /// track which version is on this machine, and writing over the file
+    /// behind them leaves that record wrong. It names whose it is instead.
+    Update {
+        /// Report what is available and change nothing.
+        #[arg(long)]
+        check: bool,
+    },
+
     /// Read a finished run back from its record.
     Replay {
         /// Run id, as printed by `run`.
@@ -241,6 +253,20 @@ fn main() -> ExitCode {
     if let Commands::Completion { shell } = command {
         write_completion(*shell, &mut std::io::stdout().lock());
         return ExitCode::SUCCESS;
+    }
+
+    // Also before a workspace is looked for, and for the same reason: which
+    // version of this binary is installed is a fact about the machine, not
+    // about a project. Somebody running it in their home directory should not
+    // be told their home directory is not a workspace.
+    if let Commands::Update { check } = command {
+        return match update::run(*check, cli.json) {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("ostraka: {e}");
+                ExitCode::FAILURE
+            }
+        };
     }
 
     let here = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
@@ -283,7 +309,9 @@ fn main() -> ExitCode {
             drain::run(&workspace, args, *workers, cli.json)
         }
         Commands::Runs => runs::run(&workspace, cli.json),
-        Commands::Completion { .. } => unreachable!("handled before a workspace is resolved"),
+        Commands::Completion { .. } | Commands::Update { .. } => {
+            unreachable!("handled before a workspace is resolved")
+        }
         Commands::Prune { apply } => prune::run(&workspace, *apply, cli.json),
         Commands::Tui => tui::run(&workspace),
         Commands::Promote { run_id, branch } => {
@@ -324,8 +352,24 @@ fn main() -> ExitCode {
     match result {
         // A refused run is a correct outcome reported correctly, but the exit
         // code has to distinguish it: CI treats a non-zero exit as "not ready".
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => ExitCode::FAILURE,
+        //
+        // Both of these get the notice, and it is the last thing printed. A
+        // refused run is an answer; somebody who has just been told their
+        // change was rejected has been told something true and can hear one
+        // more line.
+        Ok(approved) => {
+            update::notice::offer(cli.json);
+            if approved {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        // An error gets none. Somebody staring at a failure does not need to
+        // hear about a version, and appending to it would put the notice
+        // between them and the thing that went wrong. Raised in review: the
+        // call used to be above this block, which printed the notice *before*
+        // the error — the opposite of what its comment claimed.
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE

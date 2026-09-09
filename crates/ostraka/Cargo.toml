@@ -26,6 +26,12 @@ serde_json = { workspace = true }
 # The benchmark suite is a file somebody writes. Already in the workspace for
 # adapter profiles; no new dependency reaches the binary.
 toml = { workspace = true }
+# `ostraka update` overwrites the binary that is running, so the digest of what
+# it downloaded is computed here rather than delegated to whichever of three
+# checksum tools a machine happens to have — `install.sh` warns and continues
+# when it finds none, and that trade is not available to a self-updater. Pure
+# Rust, no runtime, which is the condition every dependency here meets.
+sha2 = "0.10"
 # The TUI, and nothing else it drags in. ratatui's defaults pull a second
 # backend and a colour-conversion stack; `crossterm` alone is the terminal this
 # ships against. Both are pure Rust with no runtime of their own, which is the

@@ -20,7 +20,8 @@
 
 **Contents** · [What it is](#what-it-is) · [The name](#the-name) ·
 [Why](#why) · [Status](#status) · [A workspace](#a-workspace) ·
-[Installing](#installing) · [A window](#a-window-if-you-prefer-one) ·
+[Installing](#installing) · [Staying current](#staying-current) ·
+[A window](#a-window-if-you-prefer-one) ·
 [How it is put together](#how-it-is-put-together) ·
 [The one invariant](#the-one-invariant-worth-reading-the-code-for) ·
 [Vendors](#vendors) · [Which agent for which job](#which-agent-for-which-job)
@@ -400,6 +401,49 @@ itself and looks somewhere that does not exist.
 None of these are live yet — the names are chosen and unclaimed. Every path
 above resolves the same artifact, `ostraka-<tag>-<target>.tar.gz`, and a check
 in CI refuses to let the three that parse that name disagree about it.
+
+## Staying current
+
+```console
+$ ostraka update --check
+ostraka 1.0.0 → v1.0.1 available
+  run `ostraka update` to take it
+
+$ ostraka update
+  downloading ostraka-v1.0.1-x86_64-unknown-linux-gnu
+  checksum ok
+  installed v1.0.1 to /home/you/.local/bin/ostraka
+```
+
+It also says so on its own, once a day at most, after whatever you asked for has
+already been printed:
+
+```
+ostraka 1.0.0 → v1.0.1 is available. `ostraka update` to take it,
+or set OSTRAKA_NO_UPDATE_CHECK to stop saying so.
+```
+
+That notice is read from a cache and only from a cache, and the refresh behind
+it is a detached process nothing waits on — so it never puts a network round
+trip in front of work you are paying a vendor for. It stays quiet unless stderr
+is a terminal, which keeps it out of pipelines, scripts and every `--json`
+caller.
+
+Two things it refuses to do:
+
+- **It will not overwrite a copy something else installed.** Homebrew, cargo and
+  npm each keep a record of which version is on the machine; writing over the
+  file behind them leaves that record wrong, and the next `brew upgrade` then
+  has nothing to do while reporting a version that is not the one running. It
+  identifies the owner from the path it is running from and names their command
+  instead of yours.
+- **It will not install bytes it cannot verify.** The sha256 published beside
+  the artifact is checked in this process, so it does not depend on which
+  checksum tool a machine happens to have. A mismatch, a missing sidecar and an
+  unreadable one are the same answer — nothing is written. `scripts/install.sh`
+  warns and continues in that situation, which is a defensible trade for a
+  script you are already piping into a shell and is not one available to
+  something overwriting the binary that is running it.
 
 ## A window, if you prefer one
 

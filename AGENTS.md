@@ -239,6 +239,48 @@ profile, which is rule 1 applied to the environment. Gate checks are *not*
 scrubbed: they are the project's commands run on the operator's behalf and need
 the operator's toolchain.
 
+**`update` refuses to replace a binary somebody else owns, and refuses bytes it
+cannot verify.** Both refusals are the feature; the download is the easy part.
+
+A copy installed by Homebrew, cargo or npm is tracked by that tool — it holds a
+record of which version is on this machine, and overwriting the file behind it
+makes that record wrong in the direction nobody checks: the next upgrade has
+nothing to do and reports a version that is not the one running. The owner is
+identified from the path the executable resolves to, through symlinks, because
+`~/.local/bin/ostraka` pointing into a Cellar is exactly the case that would
+otherwise look like a file nobody was tracking.
+
+The digest is computed in this process rather than delegated. `install.sh`
+prints a warning and carries on when a machine has no `sha256sum`, which is a
+defensible trade for a script already being piped into a shell; it is not one
+available to something overwriting the binary that is running it. A mismatch, a
+missing sidecar and an unparseable one are one answer, and it is no.
+
+There is no HTTP client. `curl` is a subprocess, which is what `install.sh`
+already requires and what this binary does with every vendor anyway — the
+alternative is a TLS stack, or an async runtime, which is the dependency refused
+everywhere else in this workspace. Trust does not rest on curl: it fetches
+bytes, and the bytes are verified here. The whole command, `sha2` included,
+costs 68 KB: 2.84 MB to 2.91 MB, measured before it was accepted, as every
+dependency here is.
+
+It takes `OSTRAKA_BASE_URL` and `OSTRAKA_VERSION`, the same pair `install.sh`
+takes and for the same reason. Without them the only way to learn whether this
+works is to cut a release and watch what happens to other people; with them the
+whole path runs against a directory of locally built artifacts, and it was —
+including a tampered archive and a missing sidecar, both of which left the
+binary untouched.
+
+**The notice is read from a cache, never from the network.** Asking GitHub about
+a version before a command runs would put a network round trip in front of work
+somebody is paying a vendor for, and no amount of freshness is worth that. The
+refresh is a detached process nothing waits on, so the run that finds the cache
+stale prints nothing new and the next one does. It is silent unless stderr is a
+terminal — which keeps it out of pipelines, scripts and every `--json` caller —
+and `OSTRAKA_NO_UPDATE_CHECK` turns it off entirely. A half-written cache file
+fails to parse and is treated as stale rather than believed for a day, so an
+interrupted refresh heals itself.
+
 **A capability describes the invocation, not the binary — and `streams_json`
 does not survive it.** A profile is one command line, and the runtime only ever
 runs that command line, so "what this CLI could do if invoked differently" is a
