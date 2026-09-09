@@ -468,11 +468,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // navigate: one line of work needs no bar saying which one it is.
     let bar = u16::from(app.panes.len() > 1);
     // The footer earns its extra rows only where there are rows to spare, and
-    // "to spare" was measured rather than guessed: at twenty-six rows — a
-    // common default and the size the flow tests drive — three cost the setup
-    // screen the sentence explaining its gate, and cost a transcript two lines
-    // of what an agent had just said. The thresholds are where they are because
-    // the tests said so.
+    // "to spare" was measured rather than guessed. A first draft started the
+    // third row at twenty-six — a common default, and the size the flow tests
+    // drive — and taking two rows there cost the setup screen the sentence
+    // explaining its gate and cost a transcript two lines of what an agent had
+    // just said. The thresholds below are where the tests put them, and are why
+    // twenty-six now gets one row rather than three.
     //
     // Not during setup at all. That screen is a full page of explanation with
     // its own footer, and most commands are gated off until it has been taken,
