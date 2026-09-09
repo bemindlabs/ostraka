@@ -143,8 +143,13 @@ fn main() -> ExitCode {
     // not about a project, and a shell asking for them in someone's home
     // directory should not be told that their home directory is not a
     // workspace.
-    if let Commands::Completion { shell } = cli.command {
-        write_completion(shell, &mut std::io::stdout());
+    // Matched on a reference. It compiles either way today — `Shell` is `Copy`,
+    // so binding it takes a copy and `cli` is not moved — but that is a fact
+    // about a dependency's derives, and the day one field of this variant stops
+    // being `Copy` the error lands here rather than in the change that caused
+    // it. Locked once, because a completion script is one write.
+    if let Commands::Completion { shell } = &cli.command {
+        write_completion(*shell, &mut std::io::stdout().lock());
         return ExitCode::SUCCESS;
     }
 
@@ -224,13 +229,13 @@ mod tests {
         // Generated from the parser, so the assertion worth making is that the
         // parser is what reached the script: a command added later appears
         // without anybody editing anything, and one renamed stops appearing.
-        for shell in [
-            clap_complete::Shell::Bash,
-            clap_complete::Shell::Zsh,
-            clap_complete::Shell::Fish,
-            clap_complete::Shell::PowerShell,
-            clap_complete::Shell::Elvish,
-        ] {
+        // Asked of clap rather than listed here. `Shell` is `#[non_exhaustive]`
+        // — upstream adds one without it being a breaking change — and a list
+        // written out is the second description of something this whole change
+        // exists to argue against keeping.
+        let shells = <clap_complete::Shell as clap::ValueEnum>::value_variants();
+        assert!(!shells.is_empty(), "clap knows no shells");
+        for shell in shells.iter().copied() {
             let mut out: Vec<u8> = Vec::new();
             write_completion(shell, &mut out);
             let text = String::from_utf8(out).expect("utf-8");
