@@ -467,14 +467,20 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // The bar costs a row and only appears once there is something to
     // navigate: one line of work needs no bar saying which one it is.
     let bar = u16::from(app.panes.len() > 1);
-    // The footer earns its extra rows only where there are rows to spare. On a
-    // twelve-row terminal every one of them belongs to the work, and the line
-    // that says whether anything is running is the one worth keeping — so the
-    // commands come first when there is room for one more, and what the run
-    // will be made with when there is room for two.
+    // The footer earns its extra rows only where there are rows to spare, and
+    // "to spare" was measured rather than guessed: at twenty-six rows — a
+    // common default and the size the flow tests drive — three cost the setup
+    // screen the sentence explaining its gate, and cost a transcript two lines
+    // of what an agent had just said. The thresholds are where they are because
+    // the tests said so.
+    //
+    // Not during setup at all. That screen is a full page of explanation with
+    // its own footer, and most commands are gated off until it has been taken,
+    // so the rows would be spent listing what cannot be done.
     let footer = match screen.height {
-        h if h >= 26 => 3,
-        h if h >= 20 => 2,
+        _ if app.setup.is_some() => 1,
+        h if h >= 34 => 3,
+        h if h >= 28 => 2,
         _ => 1,
     };
     let rows = Layout::default()
@@ -3429,7 +3435,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn the_footer_grows_into_the_room_it_has_and_no_further() {
         // The commands are the row worth adding first — knowing what can be
         // done is worth more than knowing what it will be done with — and
@@ -3437,21 +3442,21 @@ mod tests {
         // work.
         let mut app = App::new(nowhere(), Vec::new());
 
-        let short = screen(&mut app, 92, 14);
+        let short = screen(&mut app, 92, 20);
         assert!(
             !short.contains("ctrl-x  n"),
             "a short terminal lost a row to the commands:\n{short}"
         );
         assert!(!short.contains("writes "), "{short}");
 
-        let medium = screen(&mut app, 92, 22);
+        let medium = screen(&mut app, 92, 30);
         assert!(medium.contains("ctrl-x  n"), "{medium}");
         assert!(
             !medium.contains("writes "),
             "the routing row arrived before there was room:\n{medium}"
         );
 
-        let tall = screen(&mut app, 92, 30);
+        let tall = screen(&mut app, 92, 40);
         assert!(tall.contains("ctrl-x  n"), "{tall}");
         assert!(tall.contains("writes automatic"), "{tall}");
 
@@ -3468,7 +3473,7 @@ mod tests {
         // on the work screen the box has the keys, so `n` types an `n`. A row
         // of single letters is an invitation to find that out.
         let mut app = App::new(nowhere(), Vec::new());
-        let out = screen(&mut app, 92, 24);
+        let out = screen(&mut app, 92, 30);
         let row = out
             .lines()
             .find(|l| l.contains(" write a task"))
@@ -3480,7 +3485,7 @@ mod tests {
     fn a_narrow_footer_drops_commands_rather_than_running_past_the_edge() {
         let mut app = App::new(nowhere(), Vec::new());
         for width in [40u16, 60, 92] {
-            let out = screen(&mut app, width, 24);
+            let out = screen(&mut app, width, 30);
             for line in out.lines() {
                 assert!(
                     line.chars().count() <= width as usize,
