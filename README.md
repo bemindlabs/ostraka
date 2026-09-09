@@ -18,19 +18,84 @@
   <img alt="runtime" src="https://img.shields.io/badge/runtime-none-lightgrey">
 </p>
 
-Ostraka runs coding agents from different vendors against one task, in isolated
-git worktrees, and refuses to hand back a mergeable result until the project's
-own checks have run and an agent that did not write the change has approved it.
-
-> *ostraka* — the potsherds an assembly wrote its judgments on, and the everyday
-> receipts that survived because the medium was cheap and durable. The record is
-> the point.
-
-**Contents** · [Why](#why) · [Status](#status) · [A workspace](#a-workspace) ·
+**Contents** · [What it is](#what-it-is) · [The name](#the-name) ·
+[Why](#why) · [Status](#status) · [A workspace](#a-workspace) ·
 [Installing](#installing) · [A window](#a-window-if-you-prefer-one) ·
 [How it is put together](#how-it-is-put-together) ·
 [The one invariant](#the-one-invariant-worth-reading-the-code-for) ·
 [Vendors](#vendors)
+
+## What it is
+
+A command-line tool that runs coding agents — Claude Code, Codex, Copilot CLI,
+and others — and **will not hand you a mergeable result on their word alone.**
+
+You give it a task. It makes a fresh git worktree, hands the task to one agent,
+then does the two things the agent cannot be trusted to do for itself: it runs
+your project's own checks as real subprocesses, and it asks a *different* agent
+to review the diff. Only if both pass does the run produce a merge token — a
+type with no public constructor, which is the compiled-in version of "the thing
+that wrote the change does not get to approve it".
+
+```console
+$ ostraka run "add a Usage section to README.md" \
+    --adapter claude-code --review-adapter codex
+run t2237200-1-20260909T062815Z
+  pass  check    25ms
+approved — written by author, reviewed by reviewer
+```
+
+The interesting output is the other one. Both of these are real runs against the
+same small project, and the second is the whole argument for the tool:
+
+```console
+$ ostraka run "add greet.sh, which prints exactly 'hello, world'" \
+    --adapter claude-code --review-adapter codex
+run t2225730-1-20260909T062649Z
+  pass  check    25ms
+refused — reviewer rejected: greet.sh lacks executable permission and
+          therefore cannot be run directly as the requested shell script.
+```
+
+The project's own check passed. A second agent, from a different vendor,
+looking only at the diff, caught what the check did not test for — and because
+it did, no merge token was minted and there is nothing to merge.
+
+Nothing merges by itself either way. An approved run stops at a commit in its
+own worktree; `ostraka promote` gives it a branch; merging stays a person's act.
+A week later `ostraka replay` reads the whole thing back — the streams, the
+check output, the reviewer's actual words.
+
+It is one binary with no runtime under it. One agent writing and one reviewing
+is the common case; running several vendors at once is the same machinery with
+more lines of work open.
+
+## The name
+
+**Ostraka** — *ὄστρακα*, Greek, plural of *ostrakon*. Say it **OSS-tra-ka**.
+
+They were potsherds: broken bits of pottery, the cheapest writing surface an
+ancient city had. Athens used them as ballots. When the assembly voted on
+whether to expel a citizen, each voter scratched a name on a sherd and dropped
+it in — which is where the English word *ostracism* comes from. The judgment
+was written down by the people making it, on a medium nobody had to be rich to
+use.
+
+The same sherds are why we know what ordinary life cost. Papyrologists dig up
+*ostraka* by the thousand carrying receipts, tax notes, school exercises and
+shopping lists — the everyday record, surviving two thousand years for exactly
+one reason: the medium was cheap, so people used it, and it was durable, so it
+lasted.
+
+Both halves are the product. **A decision is written down by the parties to it**
+— an agent writes, the checks run, a different agent reviews, and the verdict is
+recorded rather than asserted. **And the record is the cheap, durable part** —
+a run leaves a record anyone can re-read, and the account that has to survive is
+in the commit, not in a summary somebody has to take on trust.
+
+The agents are named for civic offices for the same reason — an archon plans
+and an ephor gates, because power that checks itself is the whole idea.
+[`PHILOSOPHY.md`](PHILOSOPHY.md) has the rest of it.
 
 ## Why
 
