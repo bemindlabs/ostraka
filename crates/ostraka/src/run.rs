@@ -237,6 +237,16 @@ pub fn execute(
 }
 
 pub fn run(workspace: &Workspace, args: &Args, json: bool) -> Outcome {
+    run_with(workspace, args, json, |_| {})
+}
+
+/// Everything `run` does, with a look at the report on the way past.
+fn run_with(
+    workspace: &Workspace,
+    args: &Args,
+    json: bool,
+    seen: impl FnOnce(&crate::run::RunReport),
+) -> Outcome {
     // One Ctrl-C asks the run to stop; the adapters notice within a poll and
     // kill what they launched. A second is the operator saying they meant it,
     // and the default handler takes over.
@@ -308,7 +318,28 @@ pub fn run(workspace: &Workspace, args: &Args, json: bool) -> Outcome {
         println!("record: {}", workspace.records().join("runs").display());
     }
 
+    seen(&report);
     Ok(report.approved())
+}
+
+/// The run, and which run it was.
+///
+/// `run` answers the command line's question — did it pass — and the task list
+/// needs the other half: which record to write against the task it took. Read
+/// from the report rather than looked up afterwards, because "the newest run"
+/// stops being "the run I just started" the moment two of them are going.
+pub fn run_reporting(
+    workspace: &Workspace,
+    args: &Args,
+    json: bool,
+) -> Result<(bool, String), Box<dyn std::error::Error>> {
+    let id = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let approved = run_with(workspace, args, json, {
+        let id = std::sync::Arc::clone(&id);
+        move |report| *id.lock().expect("not poisoned") = report.record.run_id.clone()
+    })?;
+    let id = id.lock().expect("not poisoned").clone();
+    Ok((approved, id))
 }
 
 fn routing_author_id(routing: &route::Routing) -> String {

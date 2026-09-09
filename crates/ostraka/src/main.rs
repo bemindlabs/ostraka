@@ -15,6 +15,8 @@ mod remedy;
 mod replay;
 mod run;
 mod runs;
+mod task_cmd;
+mod tasks;
 mod tui;
 mod workspace;
 
@@ -48,6 +50,26 @@ struct Cli {
     /// true sentence about the parser and the wrong one to be met by.
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum TaskCommand {
+    /// Write a task down. It waits until a run takes it.
+    Add {
+        /// What the agent should do.
+        prompt: String,
+        /// Which repository it belongs in.
+        #[arg(long)]
+        repository: Option<String>,
+        /// The profile that should write it.
+        #[arg(long)]
+        adapter: Option<String>,
+    },
+    /// Put a claimed task back, for a run that never reported.
+    Release {
+        /// The task id, as `ostraka tasks` shows it.
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -85,8 +107,9 @@ enum Commands {
 
     /// Run one task: isolate, execute, gate, review, record.
     Run {
-        /// What the agent should do.
-        prompt: String,
+        /// What the agent should do. Omitted with `--next`, which takes it
+        /// from the list.
+        prompt: Option<String>,
 
         /// Identity accountable for the change.
         #[arg(long, default_value = run::AUTHOR)]
@@ -113,6 +136,10 @@ enum Commands {
         #[arg(long, conflicts_with = "base_ref", value_name = "RUN_ID")]
         from: Option<String>,
 
+        /// Take the oldest task from the list instead of being given one.
+        #[arg(long, conflicts_with = "prompt")]
+        next: bool,
+
         /// Model hint passed through to the adapter.
         #[arg(long)]
         model: Option<String>,
@@ -130,6 +157,16 @@ enum Commands {
         /// Which shell to write for.
         shell: clap_complete::Shell,
     },
+
+    /// Work written down before somebody is free to do it.
+    Task {
+        #[command(subcommand)]
+        what: TaskCommand,
+    },
+
+    /// Everything on the task list, in every state.
+    Tasks,
+
 
     /// List every run this project has recorded.
     Runs,
@@ -192,6 +229,21 @@ fn main() -> ExitCode {
         Commands::Adapters => adapters::run(&workspace, cli.json),
         Commands::Bench { dry_run } => bench::run(&workspace, *dry_run, cli.json),
         Commands::Replay { run_id } => replay::run(&workspace, run_id, cli.json),
+        Commands::Task { what } => match what {
+            TaskCommand::Add {
+                prompt,
+                repository,
+                adapter,
+            } => task_cmd::add(
+                &workspace,
+                prompt,
+                repository.as_deref().or(cli.repository.as_deref()),
+                adapter.as_deref(),
+                cli.json,
+            ),
+            TaskCommand::Release { id } => task_cmd::release(&workspace, id, cli.json),
+        },
+        Commands::Tasks => task_cmd::list(&workspace, cli.json),
         Commands::Runs => runs::run(&workspace, cli.json),
         Commands::Completion { .. } => unreachable!("handled before a workspace is resolved"),
         Commands::Prune { apply } => prune::run(&workspace, *apply, cli.json),
@@ -201,6 +253,7 @@ fn main() -> ExitCode {
         }
         Commands::Run {
             prompt,
+            next,
             author,
             reviewer,
             adapter,
@@ -208,10 +261,9 @@ fn main() -> ExitCode {
             base_ref,
             from,
             model,
-        } => run::run(
-            &workspace,
-            &run::Args {
-                prompt: prompt.clone(),
+        } => {
+            let mut args = run::Args {
+                prompt: prompt.clone().unwrap_or_default(),
                 repository: cli.repository.clone(),
                 author: author.clone(),
                 reviewer: reviewer.clone(),
@@ -220,9 +272,16 @@ fn main() -> ExitCode {
                 base_ref: base_ref.clone(),
                 from: from.clone(),
                 model: model.clone(),
-            },
-            cli.json,
-        ),
+            };
+            if *next {
+                task_cmd::run_next(&workspace, args, cli.json)
+            } else if args.prompt.is_empty() {
+                Err("say what the agent should do, or `--next` to take it from the list".into())
+            } else {
+                args.repository = args.repository.take();
+                run::run(&workspace, &args, cli.json)
+            }
+        }
     };
 
     match result {

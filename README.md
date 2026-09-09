@@ -159,6 +159,9 @@ ostraka init       # write the workspace layout. Overwrites nothing
 ostraka check      # validate the workspace, its profiles and its repositories
 ostraka check --fix  # and walk the steps out of what it found, asking first
 ostraka adapters   # list adapter profiles and whether each can run here
+ostraka task add "..."  # write work down for later
+ostraka tasks           # what is waiting, going, and done
+ostraka run --next      # take the oldest task and run it
 ostraka run "..."  # isolate, execute, gate, review, record
 ostraka run "..." --from ID   # continue an approved run instead of HEAD
 ostraka replay ID  # read a finished run back
