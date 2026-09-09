@@ -142,9 +142,11 @@ output, the reviewer's actual words, the verdict. `ostraka replay` reads one bac
 a week later, which is when the question usually gets asked.
 
 None of this needs a fleet. One agent writing and one reviewing is the common
-case and the one Ostraka is quickest at. Running several vendors at once is the
-same machinery with more than one line of work open — a capability, not a
-prerequisite.
+case and the one Ostraka is quickest at. Configuring several vendors is the same
+machinery with more than one line of work open — a capability, not a
+prerequisite — and, today, still one run at a time: the browser refuses to start
+a second while one is going, and parallel execution is an open question rather
+than a shipped feature.
 
 ## Status
 
