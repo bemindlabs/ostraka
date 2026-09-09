@@ -17,6 +17,15 @@ favors no vendor — including in how this repository is laid out.
 English only. No exceptions, no bilingual pairs. This covers code, comments,
 docs, commit messages, CLI output, log lines and error strings.
 
+The rule is about the working language, and the failure it prevents is a reader
+who needs a translation before they can use the tool. So one thing it does not
+forbid: a source word written once, in the sentence that defines it, glossed in
+English on the spot — `Ostraka` is a Greek word and the README says so in Greek,
+with the pronunciation beside it. Nothing downstream of that sentence may
+require having read it. Everything else stays English, including any second
+occurrence of the same word: a term that has to be introduced twice is a
+glossary, which is the thing being refused.
+
 ## Layout
 
 ```
