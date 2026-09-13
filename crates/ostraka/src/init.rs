@@ -216,16 +216,14 @@ pub fn plan_with(project: &Path, repositories: Option<&Path>) -> Plan {
     let root = project
         .canonicalize()
         .unwrap_or_else(|_| project.to_path_buf());
-    let chosen = repositories.map(|given| {
-        let absolute = if given.is_absolute() {
-            given.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map(|here| here.join(given))
-                .unwrap_or_else(|_| given.to_path_buf())
-        };
-        absolute.canonicalize().unwrap_or(absolute)
-    });
+    // The same resolver `Workspace::open` uses, so `~/code` means the home
+    // directory here too. And never the workspace itself: that would be
+    // written down as `repositories = ""`, which the next command refuses with
+    // a message about emptiness rather than about the actual mistake —
+    // `init_cmd` refuses it by name before a plan is made.
+    let chosen = repositories
+        .map(|given| crate::workspace::resolve_flag(given).unwrap_or_else(|_| given.to_path_buf()))
+        .filter(|dir| *dir != root);
     let dir = chosen
         .clone()
         .unwrap_or_else(|| crate::workspace::Workspace::at(project).repositories_dir());
@@ -692,6 +690,72 @@ mod tests {
         assert!(
             !places.iter().any(|p| p.ends_with("repositories")),
             "a repositories/ nobody asked for was planned: {places:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_tilde_in_the_flag_is_the_home_directory_and_not_a_directory_called_tilde() {
+        // The shell does not expand `--repositories=~/code` or a quoted one,
+        // so `init` sees the tilde itself.
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return;
+        };
+        let dir = scratch();
+        let plan = plan_with(&dir, Some(Path::new("~/ostraka-plan-probe")));
+        let config = plan
+            .files
+            .iter()
+            .find(|f| f.role == Role::Config)
+            .expect("a config");
+        assert!(
+            !config.contents.contains("repositories = \"~"),
+            "a literal tilde was written down: {}",
+            config.contents
+        );
+        assert!(
+            config
+                .contents
+                .contains(&home.join("ostraka-plan-probe").display().to_string()),
+            "{}",
+            config.contents
+        );
+        assert!(
+            !plan.files.iter().any(|f| f.path.starts_with(dir.join("~"))),
+            "a directory called ~ was planned inside the workspace"
+        );
+        assert!(
+            !home.join("ostraka-plan-probe").exists(),
+            "planning created something"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_workspace_itself_is_refused_as_its_own_repositories_directory() {
+        let dir = scratch();
+        // Planned, it is simply not taken: no `repositories = ""` is written.
+        let plan = plan_with(&dir, Some(&dir));
+        let config = plan
+            .files
+            .iter()
+            .find(|f| f.role == Role::Config)
+            .expect("a config");
+        assert!(
+            !config.contents.contains("[workspace]"),
+            "{}",
+            config.contents
+        );
+
+        // And asked for on the command line, it is refused by name before
+        // anything is written.
+        let err = crate::init_cmd::run(&dir, Some(&dir), false, true)
+            .expect_err("must refuse")
+            .to_string();
+        assert!(err.contains("workspace itself"), "{err}");
+        assert!(
+            !dir.join(".ostraka").exists(),
+            "something was written anyway"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

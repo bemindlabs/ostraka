@@ -6,6 +6,25 @@ use std::path::Path;
 type Outcome = Result<bool, Box<dyn std::error::Error>>;
 
 pub fn run(project: &Path, repositories: Option<&Path>, force: bool, json: bool) -> Outcome {
+    // Refused by name before anything is planned. Taken, the workspace would
+    // list its own `.ostraka` and `notes` as repositories; written down, it
+    // would be `repositories = ""`, which the next command refuses with a
+    // sentence about emptiness instead of this one. Raised in review.
+    if let Some(given) = repositories {
+        let dir = crate::workspace::resolve_flag(given)?;
+        let root = project
+            .canonicalize()
+            .unwrap_or_else(|_| project.to_path_buf());
+        if dir == root {
+            return Err(format!(
+                "--repositories {} is the workspace itself; its repositories need a \
+                 directory of their own",
+                given.display()
+            )
+            .into());
+        }
+    }
+
     let plan = init::plan_with(project, repositories);
 
     // `init` never overwrites a file, so a workspace that already has its

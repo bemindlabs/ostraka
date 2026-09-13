@@ -144,6 +144,17 @@ fn clean(path: &Path) -> PathBuf {
     out
 }
 
+/// A directory given on the command line, as this process should use it.
+///
+/// Shared by `Workspace::open` and `init` so there is one answer. The shell
+/// expands a bare `~/code`, but not `--repositories=~/code` or a quoted
+/// `"~/code"` — and `init` used to take those literally, planning a directory
+/// called `~` and writing it into the config. Raised in review.
+pub(crate) fn resolve_flag(given: &Path) -> std::io::Result<PathBuf> {
+    let here = std::env::current_dir()?;
+    Ok(resolve(&given.to_string_lossy(), &here, home().as_deref()))
+}
+
 fn home() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
@@ -213,15 +224,16 @@ impl Workspace {
                     .workspace
                     .repositories
             }
-            Err(_) => None,
+            // Absent is a workspace nobody configured, which is allowed.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            // Anything else is a file that is there and could not be read — and
+            // quietly taking the default then would run in `repositories/` a
+            // workspace whose config says somewhere else. Raised in review.
+            Err(e) => return Err(format!("{}: {e}", file.display()).into()),
         };
 
         let (repositories, repositories_from) = if let Some(flag) = flag {
-            let here = std::env::current_dir()?;
-            (
-                resolve(&flag.to_string_lossy(), &here, home().as_deref()),
-                RepositoriesFrom::Flag,
-            )
+            (resolve_flag(flag)?, RepositoriesFrom::Flag)
         } else if let Some(given) = declared {
             if given.trim().is_empty() {
                 return Err(format!(
@@ -642,6 +654,30 @@ mod tests {
         );
         // Nothing climbs above the root.
         assert_eq!(resolve("/../../x", base, None), PathBuf::from("/x"));
+    }
+
+    #[test]
+    fn a_config_that_is_there_but_cannot_be_read_is_an_error_not_a_default() {
+        // A directory where the file belongs is the portable way to make a read
+        // fail with something other than "not found".
+        let (dir, _) = workspace("unreadable-config", &[]);
+        let file = dir.join(".ostraka/ostraka.toml");
+        std::fs::remove_file(&file).expect("remove");
+        std::fs::create_dir_all(&file).expect("a directory where the file goes");
+        let err = Workspace::open(&dir, None)
+            .expect_err("must refuse")
+            .to_string();
+        assert!(err.contains("ostraka.toml"), "{err}");
+
+        // Whereas no config at all is simply a workspace nobody configured.
+        std::fs::remove_dir_all(&file).expect("remove");
+        assert_eq!(
+            Workspace::open(&dir, None)
+                .expect("opens")
+                .repositories_from,
+            RepositoriesFrom::Default
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
