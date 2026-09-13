@@ -38,11 +38,18 @@ impl Policy {
 /// people who happen to end every entry with a slash. A trailing slash is
 /// accepted and means the same thing as its absence.
 fn within(path: &str, allowed: &str) -> bool {
-    let allowed = allowed.trim_end_matches('/');
-    allowed.is_empty()
-        || path == allowed
+    let trimmed = allowed.trim_end_matches('/');
+    if trimmed.is_empty() {
+        // Only the literally empty entry means "anywhere", which is what it
+        // already meant under a string prefix. An entry that is empty only
+        // after trimming — `/`, `//` — matched nothing before, because git
+        // paths are relative, and turning it into a wildcard would loosen a
+        // limit somebody wrote down. Raised in review.
+        return allowed.is_empty();
+    }
+    path == trimmed
         || path
-            .strip_prefix(allowed)
+            .strip_prefix(trimmed)
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
@@ -89,5 +96,29 @@ mod tests {
         };
         assert!(slashed.permits(&["docs/guide.md".to_string()]));
         assert!(!slashed.permits(&["docsite/index.html".to_string()]));
+    }
+
+    #[test]
+    fn a_root_entry_is_not_a_wildcard_but_an_empty_one_still_is() {
+        // Tightening a match must not loosen anything on the way. `/` matched
+        // no relative path under the old prefix test, and it still matches none.
+        let rooted = Policy {
+            allowed_paths: vec!["/".to_string()],
+            enforce_paths: true,
+            ..Policy::default()
+        };
+        assert!(!rooted.permits(&["src/lib.rs".to_string()]));
+        let doubled = Policy {
+            allowed_paths: vec!["//".to_string()],
+            ..rooted.clone()
+        };
+        assert!(!doubled.permits(&["README.md".to_string()]));
+
+        // The literally empty entry keeps the meaning it always had.
+        let empty = Policy {
+            allowed_paths: vec![String::new()],
+            ..rooted
+        };
+        assert!(empty.permits(&["anywhere/at/all.rs".to_string()]));
     }
 }
