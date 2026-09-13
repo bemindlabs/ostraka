@@ -16,6 +16,12 @@
 # Never commit resolved credentials.
 /.ostraka/secrets/
 
+# npm reads a token from any .npmrc up the tree, including one sitting beside
+# npm/package.json. Publishing is a hand-run command with a credential in the
+# environment, so the file it would land in is named here before it exists —
+# a token is not something to notice in a diff after the fact.
+.npmrc
+
 # Relocated vendor home directories: how a CLI with no isolation flag is kept
 # from reading the operator's own configuration. Contains links to credentials.
 /.ostraka/vendor-home/
