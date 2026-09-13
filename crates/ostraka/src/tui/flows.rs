@@ -570,13 +570,20 @@ fn the_command_line_continues_a_run_the_way_the_browser_does() {
         &workspace,
         &crate::run::Args::for_task("write a file".into()),
         None,
+        &ostraka_adapter::interrupt::Stop::new(),
     )
     .expect("the first run completes");
     assert!(first.approved(), "the first run was not approved");
 
     let mut args = crate::run::Args::for_task("write it again".into());
     args.from = Some(first.record.run_id.clone());
-    let second = crate::run::execute(&workspace, &args, None).expect("the second run completes");
+    let second = crate::run::execute(
+        &workspace,
+        &args,
+        None,
+        &ostraka_adapter::interrupt::Stop::new(),
+    )
+    .expect("the second run completes");
     assert!(second.approved(), "the second run was not approved");
 
     // The proof is in git, the same proof the browser's thread test takes: the
@@ -618,6 +625,7 @@ fn the_command_line_will_not_continue_a_refused_run() {
         &workspace,
         &crate::run::Args::for_task("write a file".into()),
         None,
+        &ostraka_adapter::interrupt::Stop::new(),
     )
     .expect("the run completes");
     assert!(!refused.approved(), "the gate let it through");
@@ -626,7 +634,12 @@ fn the_command_line_will_not_continue_a_refused_run() {
     args.from = Some(refused.record.run_id.clone());
     // `RunReport` is not `Debug`, so the refusal is taken by hand rather than
     // through `expect_err`.
-    let refusal = match crate::run::execute(&workspace, &args, None) {
+    let refusal = match crate::run::execute(
+        &workspace,
+        &args,
+        None,
+        &ostraka_adapter::interrupt::Stop::new(),
+    ) {
         Ok(_) => panic!("a refused run was continued"),
         Err(e) => e,
     };
@@ -644,7 +657,12 @@ fn continuing_a_run_nobody_recorded_says_so() {
     let workspace = Workspace::at(scratch.path());
     let mut args = crate::run::Args::for_task("carry on".into());
     args.from = Some("t-never-happened".into());
-    let refusal = match crate::run::execute(&workspace, &args, None) {
+    let refusal = match crate::run::execute(
+        &workspace,
+        &args,
+        None,
+        &ostraka_adapter::interrupt::Stop::new(),
+    ) {
         Ok(_) => panic!("a run nobody recorded was continued"),
         Err(e) => e,
     };
@@ -878,6 +896,58 @@ fn a_run_can_be_stopped_from_the_browser_and_is_not_called_a_verdict() {
     d.until("the run to stop", |app| app.thread().turns.len() == 1);
     d.shows("stopped by the operator");
     ostraka_adapter::interrupt::clear();
+}
+
+#[test]
+fn two_panes_run_at_once_and_stopping_one_leaves_the_other_going() {
+    // The journey the per-run stop exists for: real runs, in two panes, at the
+    // same time, and `s` asking only the pane in front.
+    let _guard = exclusive();
+    let scratch = project("two-panes", 30);
+    let mut d = Driver::open(scratch.path());
+
+    d.typed("the first task").key(KeyCode::Enter);
+    assert!(d.app.thread().running(), "the first run did not start");
+
+    d.ctrl('t');
+    d.typed("the second task").key(KeyCode::Enter);
+    assert!(
+        d.app.thread().running(),
+        "a second pane could not start a run beside the first: {:?}",
+        d.app.status
+    );
+    assert_eq!(
+        d.app.panes.iter().filter(|p| p.thread.running()).count(),
+        2,
+        "two runs were not going at once"
+    );
+
+    // Stop the pane in front, and only it.
+    d.ctrl('x').key(KeyCode::Char('s'));
+    d.until("the second run to stop", |app| {
+        app.thread().turns.len() == 1
+    });
+    d.shows("stopped by the operator");
+    assert!(
+        d.app.panes[0].thread.running(),
+        "stopping one pane stopped the other"
+    );
+    assert!(
+        !d.app.panes[0]
+            .thread
+            .live
+            .as_ref()
+            .expect("a session")
+            .stopping,
+        "the other pane was asked to stop too"
+    );
+
+    // And the first stops on its own when it is asked.
+    d.ctrl(']');
+    d.ctrl('x').key(KeyCode::Char('s'));
+    d.until("the first run to stop", |app| {
+        app.panes[0].thread.turns.len() == 1
+    });
 }
 
 #[test]

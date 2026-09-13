@@ -439,7 +439,12 @@ pub fn measure(
             from: None,
             model: cell.model.clone(),
         };
-        let (verdict, run_id, tokens) = match run::execute(workspace, &args, None) {
+        let (verdict, run_id, tokens) = match run::execute(
+            workspace,
+            &args,
+            None,
+            &ostraka_adapter::interrupt::Stop::new(),
+        ) {
             Ok(report) => {
                 let tokens = report
                     .record

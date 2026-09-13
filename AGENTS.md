@@ -447,19 +447,26 @@ transcripts on an eighty-column terminal are two transcripts nobody can read,
 and the width is what this screen spends on the thing being read; which pane you
 are in is a row at the top, and it only appears once there is more than one.
 
-**One run at a time across every pane, and that is not a property of panes.**
-The request to stop is a single flag because a signal is single, so two runs
-going at once would both stop when either was asked to. Running several is the
-parallel-execution question and panes do not answer it: what they buy is keeping
-several lines of work *open*, not running them together. Every pane is drained
-each tick, though — a run keeps going in a pane somebody has switched away from,
-and a transcript that stopped updating because nobody was looking at it would be
-a transcript that lied. A run that ends in a pane you are not in names that pane
-when it says so, and the bar marks it while it goes.
+**Every pane can run, and stopping one pane stops only that pane.** This read
+"one run at a time across every pane" for as long as the reason it gave was
+true: the request to stop was one process-wide flag, because a signal is one
+signal, so two runs going at once would both have stopped when either was asked
+to. That flag is still what Ctrl-C sets, and it still stops everything. What
+changed is that a run no longer has to share it — `interrupt::Stop` is a stop
+of its own, bound to that run's author, reviewer and checks — so the browser's
+`s` asks the pane in front, a run in one pane is no reason to refuse a run in
+another, and leaving stops every pane's run and waits for all of them. Pinned by
+a `tui::flows` journey with two real runs going at once and one of them stopped.
 
-A pane is not closed out from under a run, and the last one is not closed at
-all: the first would abandon the thread writing into a worktree, and the second
-would leave a browser with nothing to type into.
+Every pane is drained each tick, as before — a run keeps going in a pane
+somebody has switched away from, and a transcript that stopped updating because
+nobody was looking at it would be a transcript that lied. A run that ends in a
+pane you are not in names that pane when it says so, and the bar marks it while
+it goes.
+
+A pane is still not closed out from under a run, and the last one is not closed
+at all: the first would abandon the thread writing into a worktree, and the
+second would leave a browser with nothing to type into.
 
 **A slash in the box offers the commands at the box.** Typing `/settings` used
 to start a run whose task was the word "settings". The menu is anchored to the
@@ -541,10 +548,8 @@ decision recorded here — "it shows finished runs only; a live view needs the
 orchestrator to stream while something else renders, which is the
 parallel-execution problem and waits for the same answer" — and the reason it
 gave turned out to be wrong. Rendering *one* run while it happens needs a
-thread and two channels, both `std`. Several runs at once still needs the
-answer that paragraph was waiting for, and is still not offered: the command
-list refuses a second run while one is going, by every route including the bare
-key.
+thread and two channels, both `std`. Several runs at once needed a stop for each run rather than one for the
+process, and has one now — see "Every pane can run" below.
 
 The mechanism is `runtime::progress`. A `Watcher` is handed a `Step` and
 returns nothing, which is the whole guarantee: watching cannot become steering,
@@ -763,10 +768,23 @@ workers cannot both win — `tasks::claim` renames `pending/<id>` to
 `running/<id>`, which is atomic everywhere this ships and tells the loser
 `NotFound`. No lock file, no crate.
 
-**One Ctrl-C stops everything, and stopping one run of several is still open.**
-The interrupt flag is global on purpose, and for a drain that is the right
-answer. The browser's `s` key is the case that needs a per-run handle, and it is
-still the reason the browser refuses a second run while one is going.
+**One Ctrl-C stops everything, and one run can be stopped on its own.** The
+process-wide flag stays, because a signal is global: Ctrl-C during
+`drain --workers` stops every worker. Beside it, each run carries a `Stop` of
+its own, which answers yes to its own request or the process-wide one, and
+`route::select_until` and `orchestrator::run_task_until` bind it to that run's
+author, reviewer and checks. The published `select`, `run_task`, `run_checks`
+and `run_command` delegate with a fresh one, so nothing that called them changed.
+The browser's `s` key was the case that needed it.
+
+Two things came with it. A gate check with no `timeout_secs` could not be
+stopped by anything, Ctrl-C included, because with no deadline the gate waited
+on the child outright; it polls now. And the one test in `milestone_one` that set
+the process-wide flag interrupted whichever other run in that binary happened to
+be going — which is how a test stopping one of two runs passed alone and failed
+in the full file, and how an unrelated change once failed CI — so it stops its
+run through a `Stop` of its own, and that binary no longer touches the flag.
+Worktree setup commands still answer only to Ctrl-C.
 
 ## Release artifacts are a contract
 

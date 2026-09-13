@@ -253,8 +253,8 @@ impl App {
         self.pane().repository.as_ref()
     }
 
-    /// Any pane at all. One run happens at a time across the whole browser,
-    /// because a stop is one flag and two runs would both answer it.
+    /// Any pane at all. Asked on the way out: the browser waits on every run it
+    /// started, not only the one in front of it.
     pub fn anything_running(&self) -> bool {
         self.panes.iter().any(Pane::running)
     }
@@ -355,7 +355,7 @@ impl App {
     pub fn situation(&self) -> Situation {
         Situation {
             unconfigured: self.setup.is_some(),
-            running: self.anything_running(),
+            running: self.pane().running(),
             blocked: self.blocked.is_some(),
             panes: self.panes.len(),
         }
