@@ -210,6 +210,44 @@ is not equivalent: automatic routing prefers a profile invoking a *different
 binary*, and only falls back to a same-binary pair when that is all there is.
 Naming one explicitly is still honoured, because naming is a decision.
 
+**The commit is the tree that was reviewed, or there is no commit.** This was a
+hole, and it was found by reading the order of operations rather than by a
+failing run. The reviewer runs inside the worktree it is judging, and the commit
+used to take whatever the index held once it had finished — so a reviewer that
+wrote a file and staged it got that file committed under its own approval,
+ungated and unreviewed. Two shipped profiles have no read-only posture at all,
+and grok's is only read-only because of three deny rules, so this was not a
+theoretical reviewer.
+
+The tree is named with `git write-tree` straight after the change is staged for
+review, and after the reviewer exits the worktree is staged again and named
+again. A different name is a refusal before anything is minted — refused, not
+repaired, because resetting to the reviewed tree would hide that a reviewer
+wrote to a change it was only meant to read, and the worktree a refused run
+keeps is the evidence of exactly that. Staging again rather than reading the
+index is what catches an edit nobody staged.
+
+Policy is applied a second time, to the staged change after the gate, because
+the first check sees only what the author touched before any check ran: a check
+that writes outside the declared paths used to reach the diff and the commit
+without policy looking. Paths match by component — `src` no longer permits
+`src-other/` — and promotion reads trailers from the final paragraph of the
+message only, since the message opens with the operator's prompt verbatim and a
+prompt containing `Reviewed-by:` lines used to satisfy the check.
+
+Both new refusals are `Refusal::PolicyViolation` with a reason that says which,
+rather than new variants. `Refusal` and `RunRecord` are public and not
+`#[non_exhaustive]`, so a variant or a field is a breaking change under SemVer;
+recording the reviewed tree in the record, and a variant of its own for it, wait
+for the next major. `ostraka bench` scores a policy violation as incomplete
+rather than against the author, which is the right place for a reviewer's
+tampering to land.
+
+Four journeys in `milestone_one` pin it, and three of them were run against the
+old code first and failed there: a reviewer that stages its own edit, one that
+edits without staging, and a check that writes outside the policy. The fourth is
+the clean path, which the guard must not cost anything.
+
 **Promotion re-asks the gate; it never stores its answer.** A run mints its
 token in memory and the token dies with the process, so `ostraka promote` calls
 `gate::reaffirm`, which builds a token from the run record against the

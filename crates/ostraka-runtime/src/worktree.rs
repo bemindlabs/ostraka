@@ -318,6 +318,69 @@ pub fn touched_paths(worktree: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
+/// The tree the index holds right now, as git names it.
+///
+/// Called straight after [`diff`] has staged the change, this is the identity
+/// of exactly what a reviewer is about to be shown — and so of exactly what an
+/// approval can be allowed to commit.
+pub fn tree(worktree: &Path) -> Result<String> {
+    let out = Command::new("git")
+        .args(["write-tree"])
+        .current_dir(worktree)
+        .output()?;
+    if !out.status.success() {
+        return Err(Error::Other(format!(
+            "git write-tree failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Stages whatever is in the worktree now and names the resulting tree.
+///
+/// The second half of the comparison [`tree`] starts. Staging again, rather
+/// than only reading the index, is what catches an edit nobody staged: a
+/// reviewer that changed a file without `git add` has still changed the thing
+/// it was asked to judge.
+pub fn restage(worktree: &Path) -> Result<String> {
+    let add = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(worktree)
+        .output()?;
+    if !add.status.success() {
+        return Err(Error::Other(format!(
+            "git add failed: {}",
+            String::from_utf8_lossy(&add.stderr).trim()
+        )));
+    }
+    tree(worktree)
+}
+
+/// Every path the staged change adds, removes or modifies.
+///
+/// `--no-renames` so a rename is reported as the two paths it involves rather
+/// than as an `old -> new` string no path policy can match, and `-z` so a path
+/// with a space or a quote in it is the path and not git's quoted rendering of
+/// it.
+pub fn staged_paths(worktree: &Path) -> Result<Vec<String>> {
+    let out = Command::new("git")
+        .args(["diff", "--cached", "--name-only", "--no-renames", "-z"])
+        .current_dir(worktree)
+        .output()?;
+    if !out.status.success() {
+        return Err(Error::Other(format!(
+            "git diff failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
 /// The change a run produced, as a diff against the base ref.
 ///
 /// This is what a reviewer sees. It is read from git rather than from the

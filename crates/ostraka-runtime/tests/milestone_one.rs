@@ -1127,3 +1127,155 @@ fn several_runs_at_once_do_not_collide() {
         assert!(out.status.success(), "{id} left no branch");
     }
 }
+
+/// The run's branch head, as the paths it changed relative to where it began.
+fn committed_paths(f: &Fixture, run_id: &str) -> Option<String> {
+    let out = Command::new("git")
+        .args([
+            "show",
+            "--name-only",
+            "--format=",
+            &format!("ostraka/{run_id}"),
+        ])
+        .current_dir(&f.repo)
+        .output()
+        .expect("git runs");
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn run_with(f: &Fixture, writer: &str, reviewer: &str, cfg: &Config) -> orchestrator::RunReport {
+    let writer = agent(&f.repo, "writer", writer);
+    let reviewer = agent(&f.repo, "reviewer", reviewer);
+    let routing = route::select(
+        &[writer, reviewer],
+        Some("writer"),
+        Some("reviewer"),
+        &f.repo.join(".ostraka/vendor-home"),
+        None,
+    )
+    .unwrap();
+    let (worktrees, records) = places(f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+        skills: None,
+    };
+    orchestrator::run_task(
+        &places,
+        cfg,
+        &routing,
+        &task("add a file", "archon"),
+        &ActorId::new("ephor"),
+        None,
+    )
+    .expect("run completes")
+}
+
+#[test]
+fn a_reviewer_that_stages_its_own_edit_does_not_get_it_committed() {
+    // The hole: the reviewer runs in the same worktree it is judging, and the
+    // commit used to take whatever was staged afterwards. A writable reviewer
+    // — and two shipped profiles have no read-only posture — could approve a
+    // change and slip its own unreviewed, ungated edit into the commit.
+    let f = fixture("reviewer-stages");
+    let report = run_with(
+        &f,
+        "echo reviewed > added.txt",
+        &format!(
+            "echo smuggled > smuggled.txt && git add -A\n{}",
+            verdict("APPROVE")
+        ),
+        &config("true"),
+    );
+    let committed = committed_paths(&f, &report.record.run_id).unwrap_or_default();
+    assert!(
+        !committed.contains("smuggled.txt"),
+        "a reviewer's own edit was committed under an approval:\n{committed}"
+    );
+    assert!(
+        !report.approved(),
+        "a run whose worktree changed during review was approved"
+    );
+    assert!(
+        matches!(report.refusal, Some(Refusal::PolicyViolation { .. })),
+        "{:?}",
+        report.refusal
+    );
+}
+
+#[test]
+fn a_reviewer_that_edits_without_staging_is_caught_too() {
+    // Unstaged, so `git commit` alone would not have taken it — but the tree a
+    // reviewer approved is the tree that has to be committed, and a worktree
+    // that no longer matches it has not been reviewed.
+    let f = fixture("reviewer-edits");
+    let report = run_with(
+        &f,
+        "echo reviewed > added.txt",
+        &format!("echo tampered > added.txt\n{}", verdict("APPROVE")),
+        &config("true"),
+    );
+    assert!(
+        !report.approved(),
+        "an edited-under-review change was approved"
+    );
+    assert!(
+        matches!(report.refusal, Some(Refusal::PolicyViolation { .. })),
+        "{:?}",
+        report.refusal
+    );
+}
+
+#[test]
+fn a_file_a_check_writes_is_held_to_the_path_policy() {
+    // Policy used to be checked on what the author touched, before the gate
+    // ran. A check that writes a file outside the declared paths put that file
+    // in the diff and the commit without policy ever seeing it.
+    let f = fixture("check-writes");
+    let cfg = Config::parse(
+        r#"
+        [gate]
+        checks = [{ name = "test", cmd = "mkdir -p outside && echo x > outside/report.txt", required = true }]
+
+        [gate.review]
+        must_differ_from_author = true
+
+        [policy]
+        allowed_paths = ["inside/"]
+        enforce_paths = true
+        "#,
+    )
+    .expect("valid config");
+    let report = run_with(
+        &f,
+        "mkdir -p inside && echo ok > inside/work.txt",
+        &verdict("APPROVE"),
+        &cfg,
+    );
+    let committed = committed_paths(&f, &report.record.run_id).unwrap_or_default();
+    assert!(
+        !committed.contains("outside/report.txt"),
+        "a file outside the policy reached the commit:\n{committed}"
+    );
+    assert!(!report.approved(), "a policy violation was approved");
+}
+
+#[test]
+fn a_clean_review_still_commits_exactly_what_was_reviewed() {
+    // The guard must not cost the normal path anything.
+    let f = fixture("clean-review");
+    let report = run_with(
+        &f,
+        "echo reviewed > added.txt",
+        &verdict("APPROVE"),
+        &config("true"),
+    );
+    assert!(report.approved(), "{:?}", report.refusal);
+    let committed = committed_paths(&f, &report.record.run_id).expect("a commit");
+    assert_eq!(committed.trim(), "added.txt", "{committed}");
+}
