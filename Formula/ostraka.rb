@@ -13,28 +13,28 @@
 class Ostraka < Formula
   desc "Run agent fleets you can actually review"
   homepage "https://github.com/bemindlabs/ostraka"
-  version "1.2.0"
+  version "1.3.0"
   license "MIT"
 
   on_macos do
     on_arm do
       url "https://github.com/bemindlabs/ostraka/releases/download/v#{version}/ostraka-v#{version}-aarch64-apple-darwin.tar.gz"
-      sha256 "289725a3afb00905dce236c549abce2d6cf385e384800f49dfebc44d0a598ea7"
+      sha256 "0c76a9e056e2389fafc326b0b1766ef9c11ed6fa663993147c50983034872578"
     end
     on_intel do
       url "https://github.com/bemindlabs/ostraka/releases/download/v#{version}/ostraka-v#{version}-x86_64-apple-darwin.tar.gz"
-      sha256 "de935708a144d93f490c1f3e0e4c26ce8fe06d849a70240ccb81ad84f2465380"
+      sha256 "dd9dec4926246463f7437bc72d20788fdc1804ef85574a6f91a5c0b78ea04c5d"
     end
   end
 
   on_linux do
     on_arm do
       url "https://github.com/bemindlabs/ostraka/releases/download/v#{version}/ostraka-v#{version}-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "978be1ebe312feef0289fa91180bd69933d2078395896dda18d91503dcf0510d"
+      sha256 "6659179bb1a9754d4b49b11540b86eb213f5d315f9a4ce02bc1991bc0f9d4e94"
     end
     on_intel do
       url "https://github.com/bemindlabs/ostraka/releases/download/v#{version}/ostraka-v#{version}-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "94aadcc6cf307e07edc7c448e41a7dd213ebe704cb6610b252a1b7792b6b48ca"
+      sha256 "3cedf2241a080df9a8447ec768aa82922dfd159aabd9aedac609e5968bd2ec20"
     end
   end
 
