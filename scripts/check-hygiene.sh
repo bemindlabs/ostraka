@@ -204,6 +204,23 @@ for template in crates/ostraka/templates/*.toml; do
 done
 ok "the profiles init writes are the ones this repository ships"
 
+# 7a. A profile `init` writes arrives alone: no adapters/README.md, no docs/,
+#     nothing but itself in .ostraka/adapters/. A comment that says "see
+#     adapters/README.md" is a pointer to nothing on every machine that installed
+#     this rather than cloned it — and was reported from one, on the kimi-cli
+#     profile, where the missing reasoning was the safety property (its reviewer
+#     can edit the worktree it judges). Instruction files an agent reads, such
+#     as AGENTS.md, are content the profile is describing, not pointers, and are
+#     not what this looks for.
+pointers=$(grep -nE 'README|adapters/[A-Za-z]|docs/' crates/ostraka/templates/*.toml || true)
+if [ -n "$pointers" ]; then
+    bad "a profile init writes points at a file init does not write:"
+    printf '%s\n' "$pointers" | sed 's/^/      /'
+    note "fold the reasoning into the profile's own comments"
+else
+    ok "every profile init writes stands on its own"
+fi
+
 # 7b. `streams_json` describes the invocation a profile declares, which makes it
 #     exactly `event_format != "none"` — two spellings of one fact, in one file,
 #     that a compiler cannot hold together. They have already come apart twice:

@@ -29,7 +29,12 @@ pub fn run(workspace: &crate::workspace::Workspace, run_id: &str, json: bool) ->
         if let Some(a) = &record.approval {
             println!("  reviewed by {}: {:?}", a.reviewer, a.verdict);
         }
-        println!("  outcome: {:?}", record.outcome);
+        // Not `{:?}`. That printed `Some(Rejected)` — a Rust value, in a
+        // command whose reader is a person, spelled differently from the JSON.
+        println!(
+            "  outcome: {}",
+            record.outcome.map_or("unfinished", |o| o.as_str())
+        );
         println!("{} event(s)", events.len());
     }
 

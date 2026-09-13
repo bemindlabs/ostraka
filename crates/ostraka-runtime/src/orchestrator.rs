@@ -278,8 +278,14 @@ pub fn run_task(
     // 5. Review, by an adapter that is not the one that wrote the change.
     log.enter(Phase::Reviewing);
     let diff = worktree::diff(wt.path())?;
-    let (verdict, reviewer_usage) =
-        collect_verdict(routing.reviewer.as_ref(), task, &diff, wt.path(), &mut log)?;
+    let (verdict, reviewer_usage) = collect_verdict(
+        routing.reviewer.as_ref(),
+        task,
+        &diff,
+        &record.checks,
+        wt.path(),
+        &mut log,
+    )?;
     record.usage.extend(reviewer_usage);
     let approval = Approval {
         reviewer: reviewer_identity.clone(),
@@ -368,6 +374,7 @@ fn collect_verdict(
     reviewer: &dyn VendorAdapter,
     task: &TaskSpec,
     diff: &str,
+    checks: &[ostraka_core::gate::CheckRecord],
     worktree: &Path,
     log: &mut RunLog,
 ) -> Result<Reviewed> {
@@ -377,7 +384,7 @@ fn collect_verdict(
     let marker = review::verdict_marker(&task.id);
     let review_task = TaskSpec {
         id: format!("{}-review", task.id),
-        prompt: review::review_prompt(&task.prompt, diff, &marker),
+        prompt: review::review_prompt(&task.prompt, diff, checks, &marker),
         adapter: reviewer.id().to_string(),
         author: task.author.clone(),
         base_ref: task.base_ref.clone(),

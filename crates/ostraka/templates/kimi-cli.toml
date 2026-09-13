@@ -32,7 +32,8 @@ args = [
 # So `review_args` is deliberately absent, which reuses the author invocation,
 # and what that means is written down rather than papered over: a review run
 # through this profile can edit the worktree it is judging. Route it as an
-# author. See adapters/README.md.
+# author: name another profile with `--review-adapter`, or leave routing to
+# pick one, and do not name this one as the reviewer.
 
 model_args = ["--model", "{{model}}"]
 # Authentication and endpoint for a key-based login. A subscription login comes

@@ -54,7 +54,7 @@ $ ostraka run "add greet.sh, which prints exactly 'hello, world'" \
     --adapter claude-code --review-adapter codex
 run t2225730-1-20260909T062649Z
   pass  check    25ms
-refused — reviewer rejected: greet.sh lacks executable permission and
+rejected — reviewer rejected: greet.sh lacks executable permission and
           therefore cannot be run directly as the requested shell script.
 ```
 

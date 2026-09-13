@@ -61,7 +61,7 @@ pub fn run(workspace: &Workspace, args: crate::run::Args, workers: usize, json: 
     let say = Mutex::new(());
     let taken = AtomicUsize::new(0);
     let approved = AtomicUsize::new(0);
-    let refused = AtomicUsize::new(0);
+    let rejected = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
 
     std::thread::scope(|scope| {
@@ -99,10 +99,10 @@ pub fn run(workspace: &Workspace, args: crate::run::Args, workers: usize, json: 
                         Ok(report) => {
                             let outcome = if report.approved() {
                                 approved.fetch_add(1, Ordering::SeqCst);
-                                "approved"
+                                ostraka_core::record::Outcome::Approved.as_str()
                             } else {
-                                refused.fetch_add(1, Ordering::SeqCst);
-                                "refused"
+                                rejected.fetch_add(1, Ordering::SeqCst);
+                                ostraka_core::record::Outcome::Rejected.as_str()
                             };
                             let run_id = report.record.run_id.clone();
                             if let Err(e) =
@@ -133,7 +133,7 @@ pub fn run(workspace: &Workspace, args: crate::run::Args, workers: usize, json: 
 
     let taken = taken.load(Ordering::SeqCst);
     let approved = approved.load(Ordering::SeqCst);
-    let refused = refused.load(Ordering::SeqCst);
+    let rejected = rejected.load(Ordering::SeqCst);
     let failed = failed.load(Ordering::SeqCst);
     let stopped = ostraka_adapter::interrupt::requested();
 
@@ -143,7 +143,11 @@ pub fn run(workspace: &Workspace, args: crate::run::Args, workers: usize, json: 
             serde_json::to_string_pretty(&serde_json::json!({
                 "taken": taken,
                 "approved": approved,
-                "refused": refused,
+                "rejected": rejected,
+                // The key 1.1.0 shipped, kept beside the right one: a script
+                // reading it should not break in a minor release because a
+                // label was made consistent. It goes at the next major.
+                "refused": rejected,
                 "failed": failed,
                 "workers": workers,
                 "stopped": stopped,
@@ -154,7 +158,7 @@ pub fn run(workspace: &Workspace, args: crate::run::Args, workers: usize, json: 
     } else {
         let tail = if stopped { ", stopped" } else { "" };
         println!(
-            "{taken} taken — {approved} approved, {refused} refused, {failed} could not run{tail}"
+            "{taken} taken — {approved} approved, {rejected} rejected, {failed} could not run{tail}"
         );
     }
 

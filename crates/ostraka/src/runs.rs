@@ -32,12 +32,7 @@ pub fn run(workspace: &crate::workspace::Workspace, json: bool) -> Outcome {
         println!("no runs recorded yet");
     } else {
         for r in &runs {
-            let word = match r.outcome {
-                Some(ostraka_core::record::Outcome::Approved) => "approved",
-                Some(ostraka_core::record::Outcome::Rejected) => "refused",
-                Some(ostraka_core::record::Outcome::Failed) => "failed",
-                None => "unfinished",
-            };
+            let word = r.outcome.map_or("unfinished", |o| o.as_str());
             println!("{:<10}  {:<28}  {}", word, r.run_id, first_line(&r.prompt));
         }
     }

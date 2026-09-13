@@ -122,7 +122,12 @@ pub fn run_next(workspace: &Workspace, mut args: crate::run::Args, json: bool) -
 
     match crate::run::run_reporting(workspace, &args, json) {
         Ok((approved, run_id)) => {
-            let outcome = if approved { "approved" } else { "refused" };
+            let outcome = if approved {
+                ostraka_core::record::Outcome::Approved
+            } else {
+                ostraka_core::record::Outcome::Rejected
+            }
+            .as_str();
             tasks::finish(&root, task, &run_id, outcome)?;
             Ok(approved)
         }

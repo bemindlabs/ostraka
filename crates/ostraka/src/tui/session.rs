@@ -63,8 +63,10 @@ impl Session {
                     outcome: report.record.outcome,
                     summary: match (&report.token, &report.refusal) {
                         (Some(_), _) => "approved — nothing merged".to_string(),
-                        (None, Some(refusal)) => format!("refused — {}", run::describe(refusal)),
-                        (None, None) => "refused".to_string(),
+                        (None, Some(refusal)) => {
+                            format!("rejected — {}", run::describe(refusal))
+                        }
+                        (None, None) => "rejected".to_string(),
                     },
                 })
                 // Flattened to a string here, on the thread that produced it.
