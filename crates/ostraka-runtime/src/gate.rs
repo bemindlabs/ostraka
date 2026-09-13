@@ -281,18 +281,22 @@ fn wait_for(
     // stopped by anything, Ctrl-C included, and a run was only as stoppable as
     // its slowest unbounded check.
     let deadline = ceiling.map(|ceiling| Instant::now() + ceiling);
-    let killed = loop {
+    // `Some(true)` for the ceiling, `Some(false)` for a stop, `None` for a check
+    // that ended by itself — kept apart because the record says which.
+    let killed_by = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break false,
-            Err(_) => break false,
+            Ok(Some(_)) => break None,
+            Err(_) => break None,
             Ok(None) => {}
         }
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) || until.requested() {
+        let expired = deadline.is_some_and(|deadline| Instant::now() >= deadline);
+        if expired || until.requested() {
             stop(&mut child);
-            break true;
+            break Some(expired);
         }
         std::thread::sleep(Duration::from_millis(25));
     };
+    let killed = killed_by.is_some();
 
     let status = child.wait().ok();
     // After a kill, take what already arrived rather than waiting for the
@@ -312,10 +316,20 @@ fn wait_for(
     if killed {
         // Said in the record rather than left as a bare signal death, which
         // reads like the check crashed on its own.
-        stderr.push_str(&format!(
-            "\nostraka: killed after {}s — the gate's timeout_secs\n",
-            ceiling.map(|c| c.as_secs()).unwrap_or_default()
-        ));
+        stderr.push_str(&match killed_by {
+            // Asked to stop — by this run's own stop or by Ctrl-C — which says
+            // nothing about how long the check takes. Naming the ceiling here
+            // would record a timeout that did not happen, as "0s" when there
+            // was no ceiling at all. Raised in review.
+            Some(false) => {
+                "\nostraka: stopped — the run was asked to stop before this check finished\n"
+                    .to_string()
+            }
+            _ => format!(
+                "\nostraka: killed after {}s — the gate's timeout_secs\n",
+                ceiling.map(|c| c.as_secs()).unwrap_or_default()
+            ),
+        });
     }
     // A killed process reports no code, which is already how "did not pass" is
     // spelled everywhere else here.
@@ -427,6 +441,13 @@ mod tests {
             started.elapsed()
         );
         assert!(!record.passed(), "a stopped check passed");
+        // And the record says it was stopped, not that it ran out of time.
+        assert!(record.stderr.contains("asked to stop"), "{}", record.stderr);
+        assert!(
+            !record.stderr.contains("timeout_secs"),
+            "a stop was recorded as a timeout: {}",
+            record.stderr
+        );
     }
     use ostraka_core::gate::{ReviewPolicy, Verdict};
 
