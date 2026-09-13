@@ -313,8 +313,8 @@ fn run_with(
                 token.author(),
                 token.reviewer()
             ),
-            (None, Some(refusal)) => println!("refused — {}", describe(refusal)),
-            (None, None) => println!("refused"),
+            (None, Some(refusal)) => println!("rejected — {}", describe(refusal)),
+            (None, None) => println!("rejected"),
         }
         println!("record: {}", workspace.records().join("runs").display());
     }

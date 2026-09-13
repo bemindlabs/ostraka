@@ -314,6 +314,9 @@ impl App {
                     || run.prompt.to_lowercase().contains(&needle)
                     || run.run_id.to_lowercase().contains(&needle)
                     || outcome_word(run.outcome).contains(&needle)
+                    // What this screen called a rejection until 1.1.0. Somebody
+                    // who learned to type it should still find those runs.
+                    || (needle == "refused" && run.outcome == Some(Outcome::Rejected))
             })
             .map(|(i, _)| i)
             .collect();
@@ -2187,12 +2190,7 @@ fn marker(outcome: Option<Outcome>) -> (&'static str, Color) {
 }
 
 fn outcome_word(outcome: Option<Outcome>) -> &'static str {
-    match outcome {
-        Some(Outcome::Approved) => "approved",
-        Some(Outcome::Rejected) => "refused",
-        Some(Outcome::Failed) => "failed",
-        None => "unfinished",
-    }
+    outcome.map_or("unfinished", Outcome::as_str)
 }
 
 /// `20260907T000300Z` out of a run id, as something a person reads.
@@ -2624,7 +2622,7 @@ mod tests {
         assert!(out.contains("Last asked here"), "{out}");
         assert!(out.contains("task number 0"), "{out}");
         assert!(out.contains("approved"), "{out}");
-        assert!(out.contains("refused"), "{out}");
+        assert!(out.contains("rejected"), "{out}");
         // Enough to recognise where the work got to, and not a second list.
         assert!(
             !out.contains("task number 7"),
@@ -2703,13 +2701,13 @@ mod tests {
             Some(finished(
                 "t1-20260908T000100Z",
                 Outcome::Rejected,
-                "refused",
+                "rejected",
             )),
         );
         let out = screen(&mut app, 100, 20);
         let closing = out
             .lines()
-            .find(|line| line.contains("refused") && line.contains(theme::RULE))
+            .find(|line| line.contains("rejected") && line.contains(theme::RULE))
             .unwrap_or_default()
             .to_string();
         assert!(
@@ -2742,7 +2740,7 @@ mod tests {
             Some(finished(
                 "t1-20260908T000100Z",
                 Outcome::Rejected,
-                "refused \u{2014} the author could not run (exit 1): Error: prompt is too \
+                "rejected \u{2014} the author could not run (exit 1): Error: prompt is too \
                  long: 210000 tokens > 200000 maximum",
             )),
         );
@@ -2837,7 +2835,7 @@ mod tests {
         let out = screen(&mut app, 100, 20);
         assert!(out.contains("did not finish"), "{out}");
         assert!(out.contains("no adapter profile"), "{out}");
-        assert!(!out.contains("refused"), "{out}");
+        assert!(!out.contains("rejected"), "{out}");
     }
 
     #[test]
@@ -3196,9 +3194,19 @@ mod tests {
                 summary("t2-20260907T000200Z", "two", Some(Outcome::Rejected)),
             ],
         );
-        app.filter = "refused".into();
+        app.filter = "rejected".into();
         app.refilter();
         assert_eq!(app.matching.len(), 1);
+        assert_eq!(app.current().map(|r| r.prompt.as_str()), Some("two"));
+
+        // The word this screen used before 1.1.0 still finds the same run.
+        app.filter = "refused".into();
+        app.refilter();
+        assert_eq!(
+            app.matching.len(),
+            1,
+            "the old word stopped finding anything"
+        );
         assert_eq!(app.current().map(|r| r.prompt.as_str()), Some("two"));
     }
 

@@ -6,8 +6,17 @@
 #
 # `--disable-builtin-mcps` drops the GitHub MCP server, which reaches the
 # operator's GitHub account and has nothing to do with the change under review.
-# It is the only isolation this CLI offers that does not cost something else —
-# see adapters/README.md for the two that do.
+# It is the only isolation this CLI offers that does not cost something else.
+# The two that do are left out on purpose, and named here because `ostraka init`
+# writes this file on its own and a profile should carry its own trade-offs:
+#
+# - `--no-custom-instructions` drops the operator's instruction files and the
+#   repository's own AGENTS.md together. Losing the repository's rules costs
+#   more than it buys on a machine with no user-level instructions file at all.
+# - Relocating its config home (`XDG_CONFIG_HOME`) logs the CLI out, because
+#   `config.json` holds the login as well as the default model. The way back in
+#   is `GH_TOKEN` in the environment, which is the operator's call to make and
+#   not a profile's.
 id = "copilot-cli"
 command = "copilot"
 

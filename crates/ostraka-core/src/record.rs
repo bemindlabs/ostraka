@@ -45,6 +45,30 @@ pub enum Outcome {
     Failed,
 }
 
+impl Outcome {
+    /// The word for this outcome, everywhere a person reads one.
+    ///
+    /// The same spelling the record serializes to, and a test holds the two
+    /// together. `ostraka runs` used to print `refused` for what the JSON,
+    /// `replay` and `bench` all called `rejected` — and "refused" reads as a run
+    /// that was turned away before it started, which is not what happened to a
+    /// run whose checks failed or whose reviewer said no. One function is how a
+    /// label stops having more than one spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Outcome::Approved => "approved",
+            Outcome::Rejected => "rejected",
+            Outcome::Failed => "failed",
+        }
+    }
+}
+
+impl std::fmt::Display for Outcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// What one adapter invocation cost, as the vendor itself reported it.
 ///
 /// Not measured here and not estimated: every field is absent unless the vendor
@@ -111,6 +135,18 @@ pub struct RunRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_outcome_reads_the_way_it_serializes() {
+        // The label a person sees and the value a script parses are one word.
+        // If they ever differ, `ostraka runs` and `ostraka runs --json`
+        // describe the same run in two vocabularies again.
+        for outcome in [Outcome::Approved, Outcome::Rejected, Outcome::Failed] {
+            let json = serde_json::to_string(&outcome).expect("serializes");
+            assert_eq!(json, format!("\"{}\"", outcome.as_str()), "{outcome:?}");
+            assert_eq!(outcome.to_string(), outcome.as_str());
+        }
+    }
 
     #[test]
     fn events_round_trip_through_jsonl() {
