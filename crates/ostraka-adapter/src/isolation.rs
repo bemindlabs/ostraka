@@ -161,13 +161,25 @@ fn carry(source: &Path, link: &Path, profile_id: &str) -> Result<()> {
     // Already provisioned. Re-pointing it would overwrite whatever an operator
     // put here deliberately, and the link is to a path rather than to a
     // snapshot, so it does not go stale.
-    if std::fs::symlink_metadata(link).is_ok() {
-        return Ok(());
+    match std::fs::symlink_metadata(link) {
+        Ok(_) => return Ok(()),
+        // Genuinely not there: go and make it.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // There, and unreadable. Treating that as missing would send the link
+        // step to a path that exists, where "already exists" now counts as
+        // success — and a permissions problem in a vendor's home would pass as
+        // provisioned. Raised in review.
+        Err(e) => {
+            return Err(Error::Isolation {
+                id: profile_id.to_string(),
+                message: format!("could not check {}: {e}", link.display()),
+            });
+        }
     }
     if !source.exists() {
         return Ok(());
     }
-    symlink_file(source, link).map_err(|e| Error::Isolation {
+    link_once(source, link).map_err(|e| Error::Isolation {
         id: profile_id.to_string(),
         message: format!(
             "could not link {} to {}: {e}",
@@ -175,6 +187,22 @@ fn carry(source: &Path, link: &Path, profile_id: &str) -> Result<()> {
             source.display()
         ),
     })
+}
+
+/// Creates the link, and counts losing a race to create it as success.
+///
+/// The home directory is per profile, not per run, so two runs of one profile
+/// starting together — which is what `drain --workers` does with the first two
+/// tasks on a list — both see no link, both try to make it, and one of them
+/// finds it already there. That one used to fail with `Error::Isolation` and
+/// leave its task stuck in `running/`, over a link identical to the one it was
+/// about to make. "Already exists" after "did not exist" means somebody else
+/// just did this job, which is the job done.
+fn link_once(source: &Path, link: &Path) -> std::io::Result<()> {
+    match symlink_file(source, link) {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        other => other,
+    }
 }
 
 #[cfg(unix)]
@@ -208,6 +236,85 @@ mod tests {
             home_env: "VENDOR_HOME".to_string(),
             home_source: ".vendor".to_string(),
             credentials: credentials.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn losing_the_race_to_make_a_credential_link_is_not_a_failure() {
+        // The racer that loses has already decided the link is missing, so it
+        // reaches the link step with the link in place. Deterministic, which a
+        // test that hopes two threads collide is not.
+        let home = tempdir();
+        let source = home.join("auth.json");
+        std::fs::write(&source, "token").expect("credential");
+        let link = home.join("linked.json");
+        link_once(&source, &link).expect("the first one links");
+        link_once(&source, &link).expect("the second one finds it done");
+        assert_eq!(std::fs::read_to_string(&link).expect("reads"), "token");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_that_cannot_be_checked_is_an_error_not_a_success() {
+        use std::os::unix::fs::PermissionsExt;
+        // Root reads through permissions, so there is nothing to observe there.
+        // SAFETY: reads the effective uid; no memory contract.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let home = tempdir();
+        let vendor = home.join(".vendor");
+        std::fs::create_dir_all(&vendor).expect("vendor dir");
+        std::fs::write(vendor.join("auth.json"), "token").expect("credential");
+
+        // A home directory whose contents cannot be inspected.
+        let root = tempdir();
+        std::fs::create_dir_all(root.join("vendor")).expect("home");
+        std::fs::set_permissions(root.join("vendor"), std::fs::Permissions::from_mode(0o000))
+            .expect("lock it");
+        let outcome = isolation(&["auth.json"]).provision_from(&root, "vendor", Some(&home));
+        std::fs::set_permissions(root.join("vendor"), std::fs::Permissions::from_mode(0o755))
+            .expect("unlock it");
+
+        assert!(
+            outcome.is_err(),
+            "an unreadable vendor home was reported as provisioned"
+        );
+    }
+
+    #[test]
+    fn many_runs_of_one_profile_can_provision_its_home_at_once() {
+        // What `drain --workers` does to the first tasks on a list. Repeated,
+        // because a race that happens to go the right way once proves nothing.
+        let home = tempdir();
+        let vendor = home.join(".vendor");
+        std::fs::create_dir_all(&vendor).expect("vendor dir");
+        std::fs::write(vendor.join("auth.json"), "token").expect("credential");
+        for _ in 0..25 {
+            let root = tempdir();
+            let failures: Vec<String> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..16)
+                    .map(|_| {
+                        let root = root.clone();
+                        let home = home.clone();
+                        scope.spawn(move || {
+                            isolation(&["auth.json"])
+                                .provision_from(&root, "vendor", Some(&home))
+                                .err()
+                                .map(|e| e.to_string())
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .filter_map(|h| h.join().expect("thread"))
+                    .collect()
+            });
+            assert!(
+                failures.is_empty(),
+                "concurrent provisioning failed: {failures:?}"
+            );
+            assert!(root.join("vendor/auth.json").exists());
         }
     }
 
