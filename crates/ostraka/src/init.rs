@@ -30,13 +30,13 @@ pub enum Kind {
 impl Kind {
     /// What kind of project a workspace is for.
     ///
-    /// Read from the repository it holds rather than from the workspace, which
-    /// has no source in it. A workspace with nothing cloned into it yet, or
-    /// with several that disagree, gets the gate that fails on purpose — which
-    /// is the right answer to "I cannot tell".
-    pub fn of_workspace(root: &Path) -> Self {
-        let repositories = root.join("repositories");
-        let mut kinds: Vec<Kind> = std::fs::read_dir(&repositories)
+    /// Read from the repositories it holds rather than from the workspace,
+    /// which has no source in it — so it is handed the repositories directory,
+    /// wherever that is, rather than assuming `repositories/`. A workspace with
+    /// nothing in it yet, or with several that disagree, gets the gate that
+    /// fails on purpose, which is the right answer to "I cannot tell".
+    pub fn of_repositories(repositories: &Path) -> Self {
+        let mut kinds: Vec<Kind> = std::fs::read_dir(repositories)
             .into_iter()
             .flatten()
             .filter_map(|e| e.ok())
@@ -201,11 +201,45 @@ const IGNORED: [&str; 5] = [
 ];
 
 pub fn plan(project: &Path) -> Plan {
-    let kind = Kind::of_workspace(project);
+    plan_with(project, None)
+}
+
+/// The plan, with the repositories directory chosen on the command line.
+///
+/// `repositories` is `--repositories` as typed, read against the current
+/// directory. Given, it is where detection looks and which place gets made,
+/// and it is written into the config `init` generates — relative to the
+/// workspace where it is inside it, so the workspace still moves as one
+/// directory, and absolute where it is not. Not given, the workspace's own
+/// `[workspace] repositories` decides if it has one, and `repositories/` if not.
+pub fn plan_with(project: &Path, repositories: Option<&Path>) -> Plan {
+    let root = project
+        .canonicalize()
+        .unwrap_or_else(|_| project.to_path_buf());
+    // The same resolver `Workspace::open` uses, so `~/code` means the home
+    // directory here too. And never the workspace itself: that would be
+    // written down as `repositories = ""`, which the next command refuses with
+    // a message about emptiness rather than about the actual mistake —
+    // `init_cmd` refuses it by name before a plan is made.
+    let chosen = repositories
+        .map(|given| crate::workspace::resolve_flag(given).unwrap_or_else(|_| given.to_path_buf()))
+        .filter(|dir| *dir != root);
+    let dir = chosen
+        .clone()
+        .unwrap_or_else(|| crate::workspace::Workspace::at(project).repositories_dir());
+    // Relative to the workspace wherever it can be, so `repositories/` stays
+    // `repositories/` in what `init` prints, and a directory inside the
+    // workspace is written down in a form that survives moving it.
+    let place = match dir.strip_prefix(&root) {
+        Ok(inside) => inside.display().to_string(),
+        Err(_) => dir.display().to_string(),
+    };
+
+    let kind = Kind::of_repositories(&dir);
     let mut files = vec![planned(
         project,
         ".ostraka/ostraka.toml",
-        config_for(kind),
+        with_layout(config_for(kind), chosen.as_ref().map(|_| place.as_str())),
         Role::Config,
     )];
 
@@ -226,7 +260,7 @@ pub fn plan(project: &Path) -> Plan {
     // skills are written by people, and an empty directory waiting for one is
     // clutter that also costs the setup screen a line it was using to explain
     // the gate. A workspace grows one when somebody has a skill to put in it.
-    for place in ["repositories", "notes"] {
+    for place in [place.as_str(), "notes"] {
         files.push(planned(project, place, String::new(), Role::Place));
     }
     files.push(gitignore(project));
@@ -315,6 +349,20 @@ fn gitignore(project: &Path) -> Planned {
 /// Never empty. An unrecognised project gets a check that fails with an
 /// instruction, because a gate with nothing in it would approve anything a
 /// reviewer waved through, and silence is the wrong way to learn that.
+/// The config, with where its repositories live written down if that was chosen.
+fn with_layout(mut config: String, repositories: Option<&str>) -> String {
+    if let Some(dir) = repositories {
+        config.push_str(&format!(
+            "\n[workspace]\n\
+             # Where the repositories being worked on live, instead of `repositories/`.\n\
+             # Relative paths are read from this workspace; `~/` is the home directory.\n\
+             repositories = \"{}\"\n",
+            dir.replace('\\', "\\\\").replace('"', "\\\"")
+        ));
+    }
+    config
+}
+
 fn config_for(kind: Kind) -> String {
     let checks = match kind {
         Kind::Rust => vec![
@@ -602,6 +650,114 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{name} is not a usable profile: {e}"));
             assert!(!profile.id.is_empty());
         }
+    }
+
+    #[test]
+    fn repositories_chosen_at_init_are_where_it_looks_and_what_it_writes_down() {
+        let dir = scratch();
+        let code = dir.join("code");
+        std::fs::create_dir_all(code.join("work")).expect("repo");
+        std::fs::write(code.join("work/Cargo.toml"), "[package]\n").expect("write");
+
+        let plan = plan_with(&dir, Some(&code));
+        // Detection read the chosen directory, not an empty `repositories/`.
+        assert_eq!(plan.kind, Kind::Rust);
+
+        let config = plan
+            .files
+            .iter()
+            .find(|f| f.role == Role::Config)
+            .expect("a config");
+        assert!(
+            config.contents.contains("[workspace]"),
+            "{}",
+            config.contents
+        );
+        assert!(
+            config.contents.contains("repositories = \"code\""),
+            "written relative to the workspace: {}",
+            config.contents
+        );
+        // And the published parser still takes the file whole.
+        ostraka_core::config::Config::parse(&config.contents).expect("a valid config");
+
+        let places: Vec<_> = plan
+            .files
+            .iter()
+            .filter(|f| f.role == Role::Place)
+            .map(|f| f.path.clone())
+            .collect();
+        assert!(
+            !places.iter().any(|p| p.ends_with("repositories")),
+            "a repositories/ nobody asked for was planned: {places:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_tilde_in_the_flag_is_the_home_directory_and_not_a_directory_called_tilde() {
+        // The shell does not expand `--repositories=~/code` or a quoted one,
+        // so `init` sees the tilde itself.
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return;
+        };
+        let dir = scratch();
+        let plan = plan_with(&dir, Some(Path::new("~/ostraka-plan-probe")));
+        let config = plan
+            .files
+            .iter()
+            .find(|f| f.role == Role::Config)
+            .expect("a config");
+        assert!(
+            !config.contents.contains("repositories = \"~"),
+            "a literal tilde was written down: {}",
+            config.contents
+        );
+        assert!(
+            config
+                .contents
+                .contains(&home.join("ostraka-plan-probe").display().to_string()),
+            "{}",
+            config.contents
+        );
+        assert!(
+            !plan.files.iter().any(|f| f.path.starts_with(dir.join("~"))),
+            "a directory called ~ was planned inside the workspace"
+        );
+        assert!(
+            !home.join("ostraka-plan-probe").exists(),
+            "planning created something"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_workspace_itself_is_refused_as_its_own_repositories_directory() {
+        let dir = scratch();
+        // Planned, it is simply not taken: no `repositories = ""` is written.
+        let plan = plan_with(&dir, Some(&dir));
+        let config = plan
+            .files
+            .iter()
+            .find(|f| f.role == Role::Config)
+            .expect("a config");
+        assert!(
+            !config.contents.contains("[workspace]"),
+            "{}",
+            config.contents
+        );
+
+        // And asked for on the command line, it is refused by name before
+        // anything is written.
+        let err = crate::init_cmd::run(&dir, Some(&dir), false, true)
+            .expect_err("must refuse")
+            .to_string();
+        assert!(err.contains("workspace itself"), "{err}");
+        assert!(
+            !dir.join(".ostraka").exists(),
+            "something was written anyway"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

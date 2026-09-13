@@ -1088,9 +1088,14 @@ fn render_repos(frame: &mut Frame, app: &App, screen: Rect) {
         theme::rule(width.saturating_sub(6)),
     ];
     if repositories.is_empty() {
-        lines.push(dim(
-            "Nothing has been cloned into repositories/ yet.".to_string()
-        ));
+        // The directory this workspace actually uses, which is `repositories/`
+        // only until somebody says otherwise.
+        let dir = app.workspace.repositories_dir();
+        let shown = dir
+            .strip_prefix(&app.workspace.root)
+            .map(|inside| format!("{}/", inside.display()))
+            .unwrap_or_else(|_| dir.display().to_string());
+        lines.push(dim(format!("Nothing has been cloned into {shown} yet.")));
     }
     // Naming a new one. Cloning needs a URL only the operator knows; starting
     // one needs a name, which is a thing this screen can take.
