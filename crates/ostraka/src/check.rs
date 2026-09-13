@@ -40,9 +40,10 @@ pub fn run(workspace: &Workspace, fix: bool, json: bool) -> Outcome {
     let repositories = workspace.repositories();
     if repositories.is_empty() {
         problems.push(format!(
-            "no repositories in {} — clone what you want worked on into it, \
+            "no repositories in {}{} — clone what you want worked on into it, \
              or `ostraka tui` starts one",
-            workspace.repositories_dir().display()
+            workspace.repositories_dir().display(),
+            chosen_by(workspace)
         ));
     }
     let mut rows = Vec::new();
@@ -79,6 +80,8 @@ pub fn run(workspace: &Workspace, fix: bool, json: bool) -> Outcome {
     if json {
         let report = serde_json::json!({
             "workspace": workspace.root.display().to_string(),
+            "repositories_dir": workspace.repositories_dir().display().to_string(),
+            "repositories_from": workspace.repositories_from.describe(),
             "checks": checks,
             "profiles": profiles,
             "repositories": rows,
@@ -92,6 +95,13 @@ pub fn run(workspace: &Workspace, fix: bool, json: bool) -> Outcome {
             repositories.len(),
             if repositories.len() == 1 { "y" } else { "ies" }
         );
+        if workspace.repositories_from != crate::workspace::RepositoriesFrom::Default {
+            println!(
+                "repositories in {}{}",
+                workspace.repositories_dir().display(),
+                chosen_by(workspace)
+            );
+        }
         for repo in &repositories {
             let source = workspace.config_source(repo);
             let source = source.strip_prefix(&workspace.root).unwrap_or(&source);
@@ -153,6 +163,16 @@ pub fn run(workspace: &Workspace, fix: bool, json: bool) -> Outcome {
     }
 
     Ok(problems.is_empty())
+}
+
+/// ` (set by …)` when somebody chose the repositories directory, and nothing
+/// when nobody did — the default needs no footnote, and a choice made in a file
+/// last week does.
+fn chosen_by(workspace: &Workspace) -> String {
+    match workspace.repositories_from {
+        crate::workspace::RepositoriesFrom::Default => String::new(),
+        from => format!(" (set by {})", from.describe()),
+    }
 }
 
 #[cfg(test)]

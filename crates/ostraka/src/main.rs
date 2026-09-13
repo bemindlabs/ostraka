@@ -37,10 +37,18 @@ struct Cli {
     #[arg(long, global = true)]
     workspace: Option<PathBuf>,
 
-    /// Which repository under `repositories/` to work in. Only needed where
-    /// the workspace holds more than one.
+    /// Which repository in the repositories directory to work in. Only needed
+    /// where the workspace holds more than one.
     #[arg(long, global = true)]
     repository: Option<String>,
+
+    /// Where this workspace's repositories live, instead of `repositories/`.
+    ///
+    /// Read against the current directory. `[workspace] repositories` in
+    /// `.ostraka/ostraka.toml` sets it for good; this wins over that for one
+    /// command, and `init --repositories` writes it down.
+    #[arg(long, global = true, value_name = "DIR")]
+    repositories: Option<PathBuf>,
 
     /// Emit machine-readable output.
     #[arg(long, global = true)]
@@ -270,11 +278,27 @@ fn main() -> ExitCode {
     }
 
     let here = cli.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
-    let workspace = workspace::Workspace::at(&here);
+    let workspace = match command {
+        // Not checked: `init` is what makes a workspace, and it may be asked to
+        // make the very directory `--repositories` names.
+        Commands::Init { .. } => workspace::Workspace::at(&here),
+        // Checked before anything runs, so a repositories directory somebody
+        // chose and that is not there is said by name — not discovered as a
+        // workspace that looks empty.
+        _ => match workspace::Workspace::open(&here, cli.repositories.as_deref()) {
+            Ok(workspace) => workspace,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
 
     let result = match command {
         Commands::Check { fix } => check::run(&workspace, *fix, cli.json),
-        Commands::Init { force } => init_cmd::run(&here, *force, cli.json),
+        Commands::Init { force } => {
+            init_cmd::run(&here, cli.repositories.as_deref(), *force, cli.json)
+        }
         Commands::Adapters => adapters::run(&workspace, cli.json),
         Commands::Bench { dry_run } => bench::run(&workspace, *dry_run, cli.json),
         Commands::Replay { run_id } => replay::run(&workspace, run_id, cli.json),
@@ -390,6 +414,7 @@ fn write_completion(shell: clap_complete::Shell, out: &mut impl std::io::Write) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("ostraka").chain(args.iter().copied()))
@@ -428,6 +453,21 @@ mod tests {
                 "{shell} did not carry the --from option:\n{text}"
             );
         }
+    }
+
+    #[test]
+    fn where_the_repositories_are_is_a_flag_every_command_takes() {
+        // Global, because it describes the workspace rather than a command:
+        // `ostraka --repositories ~/code runs` and `ostraka runs --repositories
+        // ~/code` have to mean the same thing.
+        for args in [
+            &["--repositories", "/code", "runs"][..],
+            &["runs", "--repositories", "/code"][..],
+        ] {
+            let cli = parse(args).expect("parses");
+            assert_eq!(cli.repositories.as_deref(), Some(Path::new("/code")));
+        }
+        assert!(parse(&["runs"]).expect("parses").repositories.is_none());
     }
 
     #[test]

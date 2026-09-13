@@ -191,6 +191,22 @@ working on:
   skills/             what you expect of a run                (optional)
 ```
 
+`repositories/` is where they live by default, not where they have to. Point a
+workspace at the directory you already keep your code in, and nothing moves:
+
+```toml
+# .ostraka/ostraka.toml
+[workspace]
+repositories = "~/code"        # or "src", relative to the workspace, or an absolute path
+```
+
+`ostraka --repositories <dir> …` overrides that for one command, and
+`ostraka init --repositories <dir>` writes it down when the workspace is made. A
+directory somebody chose that isn't there is an error that names it and says
+where it was set, rather than a workspace that silently looks empty. Ostraka
+never writes into a repository, so where the repositories are is entirely your
+call — worktrees and records stay in `.ostraka/` either way.
+
 `notes/` and `skills/` are linked into every worktree and are the two
 directions of the same idea. Notes are what runs worked out and wrote down;
 skills are what you wrote down for runs to follow — procedures, conventions,

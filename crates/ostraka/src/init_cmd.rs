@@ -5,8 +5,23 @@ use std::path::Path;
 
 type Outcome = Result<bool, Box<dyn std::error::Error>>;
 
-pub fn run(project: &Path, force: bool, json: bool) -> Outcome {
-    let plan = init::plan(project);
+pub fn run(project: &Path, repositories: Option<&Path>, force: bool, json: bool) -> Outcome {
+    let plan = init::plan_with(project, repositories);
+
+    // `init` never overwrites a file, so a workspace that already has its
+    // config keeps it — and the directory just named on the command line would
+    // be forgotten by the next command without anybody being told why.
+    let config_kept = plan
+        .files
+        .iter()
+        .any(|f| f.role == init::Role::Config && f.action == Action::AlreadyThere);
+    if repositories.is_some() && config_kept && !json {
+        eprintln!(
+            "note: .ostraka/ostraka.toml already exists and was left alone, so --repositories \
+             lasts for this command only — add `repositories = \"…\"` under a [workspace] \
+             table there to keep it"
+        );
+    }
 
     if json {
         let rows: Vec<_> = plan

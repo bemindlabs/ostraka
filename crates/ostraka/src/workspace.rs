@@ -11,6 +11,14 @@
 //!   notes/              what was worked out along the way
 //! ```
 //!
+//! **The repositories can live somewhere else.** `repositories/` is only the
+//! default. `[workspace] repositories` in `.ostraka/ostraka.toml` names another
+//! directory — relative to the workspace, absolute, or under `~/` — and
+//! `--repositories` overrides that for one command. Somebody who already keeps
+//! their code in one place should not have to move it, or symlink it, to let a
+//! workspace work on it: nothing is ever written into a repository, so where it
+//! lives is the operator's business.
+//!
 //! One directory holds everything the runtime owns, so a repository cloned in
 //! here is left as its owner left it: no config appears at its root, no
 //! worktrees are made inside it, and removing the workspace removes every
@@ -31,15 +39,124 @@ type Loaded<T> = Result<T, Box<dyn std::error::Error>>;
 /// One repository the workspace works on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Repository {
-    /// The directory name under `repositories/`, which is what a record says
-    /// and what `--repository` takes.
+    /// The directory name inside the repositories directory, which is what a
+    /// record says and what `--repository` takes.
     pub name: String,
     pub path: PathBuf,
+}
+
+/// Where the repositories directory was decided, so a screen can say so.
+///
+/// A path somebody set in a file a week ago is a path they have forgotten
+/// setting, and "no repositories in /home/them/code" is only a useful sentence
+/// alongside "because `.ostraka/ostraka.toml` says so".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepositoriesFrom {
+    /// Nobody chose: `repositories/` inside the workspace.
+    Default,
+    /// `[workspace] repositories` in `.ostraka/ostraka.toml`.
+    Config,
+    /// `--repositories` on the command line.
+    Flag,
+}
+
+impl RepositoriesFrom {
+    pub fn describe(self) -> &'static str {
+        match self {
+            RepositoriesFrom::Default => "the default",
+            RepositoriesFrom::Config => "[workspace] repositories in .ostraka/ostraka.toml",
+            RepositoriesFrom::Flag => "--repositories",
+        }
+    }
+}
+
+/// The part of `.ostraka/ostraka.toml` only this binary reads.
+///
+/// Parsed here rather than added to `ostraka_core::config::Config`. Where a
+/// workspace keeps its repositories is a question about this workspace, not
+/// about how any repository is verified — and a repository's own
+/// `ostraka.toml`, which wins for the gate, has no business deciding it. It
+/// also keeps the published `Config` untouched: that parser ignores a table it
+/// does not know, so the same file serves both.
+#[derive(Debug, Default, serde::Deserialize)]
+struct Layout {
+    #[serde(default)]
+    workspace: LayoutTable,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct LayoutTable {
+    #[serde(default)]
+    repositories: Option<String>,
+}
+
+/// A path somebody wrote down, made into one this process can use.
+///
+/// `~` and `~/…` are the home directory, because that is what everyone who
+/// types them means and a TOML string does not expand anything by itself.
+/// `~user` is not expanded — it is a directory literally called that. Relative
+/// paths are read against `base`, which is the workspace for a file and the
+/// current directory for a flag, since those are where each one was written.
+fn resolve(given: &str, base: &Path, home: Option<&Path>) -> PathBuf {
+    let path = match (given.strip_prefix('~'), home) {
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
+            home.join(rest.trim_start_matches('/'))
+        }
+        _ => PathBuf::from(given),
+    };
+    let path = if path.is_absolute() {
+        path
+    } else {
+        base.join(path)
+    };
+    // Canonical where the directory exists. Where it does not — which is the
+    // case an error message is about to name — `..` and `.` are folded by hand,
+    // so the operator reads `/home/them/nowhere` rather than
+    // `/home/them/ws/../nowhere` and does not have to work out which one was
+    // meant.
+    path.canonicalize().unwrap_or_else(|_| clean(&path))
+}
+
+/// `a/./b/../c` as `a/c`, without touching the filesystem.
+///
+/// Lexical, so it can be wrong about a symlinked parent — which is acceptable
+/// only because it is used for a path that does not exist, where there is no
+/// link to be wrong about.
+fn clean(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => match out.components().next_back() {
+                // Up out of a directory: drop it.
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                // Nothing is above the root, so there is nowhere to go.
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                // Relative and already climbing, or nothing yet: keep it.
+                _ => out.push(".."),
+            },
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
 }
 
 #[derive(Debug, Clone)]
 pub struct Workspace {
     pub root: PathBuf,
+    /// Where the repositories being worked on are, resolved.
+    pub repositories: PathBuf,
+    /// And who decided that.
+    pub repositories_from: RepositoriesFrom,
 }
 
 impl Workspace {
@@ -51,10 +168,113 @@ impl Workspace {
     /// against the workspace. The agent then works in a checkout git has never
     /// heard of, and the first thing to notice is `git status` failing two
     /// minutes later. Found by running it.
+    ///
+    /// Reads `[workspace] repositories` if the file says it, and quietly takes
+    /// the default if the file is missing or does not parse. That leniency is
+    /// for the callers that are planning rather than running — `init`, and the
+    /// setup screen deciding what to offer. Everything that runs goes through
+    /// [`Workspace::open`], which says so instead.
     pub fn at(root: &Path) -> Self {
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let declared = std::fs::read_to_string(root.join(".ostraka").join("ostraka.toml"))
+            .ok()
+            .and_then(|text| toml::from_str::<Layout>(&text).ok())
+            .and_then(|layout| layout.workspace.repositories)
+            .filter(|given| !given.trim().is_empty());
+        let (repositories, repositories_from) = match declared {
+            Some(given) => (
+                resolve(&given, &root, home().as_deref()),
+                RepositoriesFrom::Config,
+            ),
+            None => (root.join("repositories"), RepositoriesFrom::Default),
+        };
         Self {
-            root: root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
+            root,
+            repositories,
+            repositories_from,
         }
+    }
+
+    /// The workspace as a command will run in it, with every choice checked.
+    ///
+    /// `flag` is `--repositories`, and wins over the file. A directory somebody
+    /// *chose* that is not there is an error naming it and naming who chose it,
+    /// rather than a workspace that looks empty — "no repositories" sends
+    /// someone to clone into a directory that was never the one they meant. The
+    /// default is allowed to be missing, because `init` and the browser both
+    /// know how to make it.
+    pub fn open(root: &Path, flag: Option<&Path>) -> Loaded<Self> {
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let file = root.join(".ostraka").join("ostraka.toml");
+        let declared = match std::fs::read_to_string(&file) {
+            Ok(text) => {
+                toml::from_str::<Layout>(&text)
+                    .map_err(|e| format!("{}: {e}", file.display()))?
+                    .workspace
+                    .repositories
+            }
+            Err(_) => None,
+        };
+
+        let (repositories, repositories_from) = if let Some(flag) = flag {
+            let here = std::env::current_dir()?;
+            (
+                resolve(&flag.to_string_lossy(), &here, home().as_deref()),
+                RepositoriesFrom::Flag,
+            )
+        } else if let Some(given) = declared {
+            if given.trim().is_empty() {
+                return Err(format!(
+                    "{}: [workspace] repositories is empty — remove it for the default, \
+                     or name a directory",
+                    file.display()
+                )
+                .into());
+            }
+            (
+                resolve(&given, &root, home().as_deref()),
+                RepositoriesFrom::Config,
+            )
+        } else {
+            return Ok(Self {
+                repositories: root.join("repositories"),
+                root,
+                repositories_from: RepositoriesFrom::Default,
+            });
+        };
+
+        // The workspace itself would list `.ostraka` and `notes` as
+        // repositories and offer to run agents in them.
+        if repositories == root {
+            return Err(format!(
+                "the repositories directory cannot be the workspace itself ({}) — set by {}",
+                root.display(),
+                repositories_from.describe()
+            )
+            .into());
+        }
+        if repositories.exists() && !repositories.is_dir() {
+            return Err(format!(
+                "the repositories directory {} is a file, not a directory — set by {}",
+                repositories.display(),
+                repositories_from.describe()
+            )
+            .into());
+        }
+        if !repositories.is_dir() {
+            return Err(format!(
+                "the repositories directory {} does not exist — set by {}; create it, or \
+                 point it at one that does",
+                repositories.display(),
+                repositories_from.describe()
+            )
+            .into());
+        }
+        Ok(Self {
+            root,
+            repositories,
+            repositories_from,
+        })
     }
 
     /// Everything the runtime owns.
@@ -76,7 +296,7 @@ impl Workspace {
     }
 
     pub fn repositories_dir(&self) -> PathBuf {
-        self.root.join("repositories")
+        self.repositories.clone()
     }
 
     pub fn notes(&self) -> PathBuf {
@@ -316,6 +536,168 @@ mod tests {
         }
         let ws = Workspace::at(&dir);
         (dir, ws)
+    }
+
+    fn declare(dir: &Path, table: &str) {
+        std::fs::write(
+            dir.join(".ostraka/ostraka.toml"),
+            format!(
+                "[gate]\nchecks = [{{ name = \"t\", cmd = \"true\", required = true }}]\n\n{table}"
+            ),
+        )
+        .expect("config");
+    }
+
+    #[test]
+    fn the_repositories_directory_is_repositories_unless_somebody_says_otherwise() {
+        let (dir, ws) = workspace("default-layout", &["only"]);
+        assert_eq!(ws.repositories_dir(), ws.root.join("repositories"));
+        assert_eq!(ws.repositories_from, RepositoriesFrom::Default);
+        let opened = Workspace::open(&dir, None).expect("opens");
+        assert_eq!(opened.repositories_dir(), ws.root.join("repositories"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_workspace_can_keep_its_repositories_somewhere_else() {
+        let (dir, _) = workspace("custom-layout", &[]);
+        std::fs::create_dir_all(dir.join("code/alpha")).expect("repo");
+        declare(&dir, "[workspace]\nrepositories = \"code\"\n");
+
+        let ws = Workspace::open(&dir, None).expect("opens");
+        assert_eq!(ws.repositories_from, RepositoriesFrom::Config);
+        assert_eq!(ws.repositories_dir(), ws.root.join("code"));
+        assert_eq!(ws.repository(None).expect("found").name, "alpha");
+
+        // Starting one puts it where the workspace keeps them, not in a
+        // `repositories/` nobody asked for.
+        let made = ws.start_repository("fresh").expect("starts");
+        assert!(
+            made.path.starts_with(ws.root.join("code")),
+            "{:?}",
+            made.path
+        );
+        assert!(!dir.join("repositories/fresh").exists());
+
+        // The lenient constructor agrees, and it is the one init plans with.
+        assert_eq!(Workspace::at(&dir).repositories_dir(), ws.root.join("code"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_absolute_directory_outside_the_workspace_is_allowed() {
+        // Nothing is written into a repository, so it can live anywhere —
+        // including where somebody already keeps all their code.
+        let (dir, _) = workspace("absolute-layout", &[]);
+        let elsewhere = scratch("elsewhere");
+        std::fs::create_dir_all(elsewhere.join("theirs")).expect("repo");
+        declare(
+            &dir,
+            &format!(
+                "[workspace]\nrepositories = \"{}\"\n",
+                elsewhere.display().to_string().replace('\\', "\\\\")
+            ),
+        );
+        let ws = Workspace::open(&dir, None).expect("opens");
+        assert_eq!(ws.repository(None).expect("found").name, "theirs");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&elsewhere).ok();
+    }
+
+    #[test]
+    fn a_tilde_means_the_home_directory_and_nothing_else() {
+        let base = Path::new("/workspace");
+        let home = Path::new("/home/someone");
+        assert_eq!(
+            resolve("~/code", base, Some(home)),
+            PathBuf::from("/home/someone/code")
+        );
+        assert_eq!(
+            resolve("~", base, Some(home)),
+            PathBuf::from("/home/someone")
+        );
+        assert_eq!(
+            resolve("code", base, Some(home)),
+            PathBuf::from("/workspace/code")
+        );
+        // `~other` is a directory literally called that.
+        assert_eq!(
+            resolve("~other/x", base, Some(home)),
+            PathBuf::from("/workspace/~other/x")
+        );
+    }
+
+    #[test]
+    fn a_path_that_does_not_exist_is_named_without_its_detours() {
+        // The error about a missing directory is the one place this path is
+        // read by a person, and `ws/../nowhere` makes them work out where that is.
+        let base = Path::new("/nonexistent-ostraka/ws");
+        assert_eq!(
+            resolve("../nowhere", base, None),
+            PathBuf::from("/nonexistent-ostraka/nowhere")
+        );
+        assert_eq!(
+            resolve("a/./b/../c", base, None),
+            PathBuf::from("/nonexistent-ostraka/ws/a/c")
+        );
+        // Nothing climbs above the root.
+        assert_eq!(resolve("/../../x", base, None), PathBuf::from("/x"));
+    }
+
+    #[test]
+    fn the_flag_wins_over_the_file() {
+        let (dir, _) = workspace("flag-layout", &[]);
+        std::fs::create_dir_all(dir.join("code/a")).expect("repo");
+        std::fs::create_dir_all(dir.join("other/b")).expect("repo");
+        declare(&dir, "[workspace]\nrepositories = \"code\"\n");
+        let ws = Workspace::open(&dir, Some(&dir.join("other"))).expect("opens");
+        assert_eq!(ws.repositories_from, RepositoriesFrom::Flag);
+        assert_eq!(ws.repository(None).expect("found").name, "b");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_chosen_directory_that_is_not_there_is_named_rather_than_found_empty() {
+        let (dir, _) = workspace("missing-layout", &[]);
+        declare(&dir, "[workspace]\nrepositories = \"nowhere\"\n");
+        let err = Workspace::open(&dir, None)
+            .expect_err("must refuse")
+            .to_string();
+        assert!(err.contains("nowhere"), "{err}");
+        assert!(err.contains("[workspace] repositories"), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_directory_that_would_list_the_workspace_itself_is_refused() {
+        let (dir, _) = workspace("self-layout", &[]);
+        for given in ["", "."] {
+            declare(&dir, &format!("[workspace]\nrepositories = \"{given}\"\n"));
+            assert!(
+                Workspace::open(&dir, None).is_err(),
+                "{given:?} was accepted"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_unreadable_file_is_an_error_to_run_in_and_the_default_to_plan_with() {
+        let (dir, _) = workspace("broken-layout", &[]);
+        std::fs::write(
+            dir.join(".ostraka/ostraka.toml"),
+            "[workspace\nrepositories = ",
+        )
+        .expect("write");
+        let err = Workspace::open(&dir, None)
+            .expect_err("must refuse")
+            .to_string();
+        assert!(err.contains("ostraka.toml"), "{err}");
+        assert_eq!(
+            Workspace::at(&dir).repositories_from,
+            RepositoriesFrom::Default
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

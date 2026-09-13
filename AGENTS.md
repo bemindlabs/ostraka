@@ -95,6 +95,30 @@ of worktrees, and is *recorded* somewhere that may be neither, and deriving the
 second two from the first was the assumption that a workspace held exactly one
 repository.
 
+**Where the repositories live is the operator's call.** `repositories/` is the
+default and nothing more. `[workspace] repositories` in `.ostraka/ostraka.toml`
+names another directory — relative to the workspace, absolute, or under `~/` —
+and `--repositories` overrides it for one command; `init --repositories` writes
+it down. The principle that made this cheap was already settled: nothing is ever
+written into a repository, so moving where they are cannot move anything of
+Ostraka's with them. Worktrees and records stay in `.ostraka/`, and deleting the
+workspace still deletes every trace.
+
+It is read by the binary, not added to `ostraka_core::config::Config`. Where a
+workspace keeps its repositories is not a question about how any repository is
+verified, and a repository's own `ostraka.toml` — which wins for the gate — has
+no business answering it. The published parser ignores a table it does not
+know, so one file serves both and no public type grew a field.
+
+A choice that does not hold is refused by name. A directory that is missing, a
+file, or the workspace itself — which would list `.ostraka` and `notes` as
+repositories — is an error naming the path and whether the file or the flag set
+it, because "no repositories" sends somebody to clone into a directory that was
+never the one they meant. `Workspace::open` is that strict version and every
+command runs through it; `Workspace::at` stays lenient for `init` and the setup
+screen, which are planning rather than running and must still work on a
+directory whose config does not parse yet.
+
 **A workspace can start a repository, and stops at `git init`.** "Nothing to
 work on yet" has two halves and only one of them needs the operator: cloning
 needs a URL nobody here knows, and starting needs a name. `w` then `n` takes
