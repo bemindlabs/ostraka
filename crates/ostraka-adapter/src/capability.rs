@@ -19,8 +19,8 @@ pub struct Capabilities {
     ///
     /// **Deprecated, and it should never have been a field.** Under the rule
     /// above it is exactly `event_format != EventFormat::None`, which the
-    /// profile already says — so the two can disagree, and they did: `codex`
-    /// and `kimi-cli` both claimed it while invoking their CLI in a prose mode,
+    /// profile already says — so the two can disagree, and they did: two
+    /// shipped profiles both claimed it while invoking their CLI in a prose mode,
     /// on the strength of what the binary is able to do elsewhere. Nothing
     /// reads this, which is the only reason that never produced a wrong answer.
     ///

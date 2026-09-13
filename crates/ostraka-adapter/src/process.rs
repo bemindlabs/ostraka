@@ -426,6 +426,10 @@ impl ProcessSession {
         // that still knows what was said.
         self.last_said = self.pending.iter().rev().find_map(|event| match event {
             Event::Message { text, .. } if !text.trim().is_empty() => Some(text.clone()),
+            // A vendor that reports failure as a structured error event on
+            // stdout is saying exactly the thing a failed run needs quoted.
+            // Raised in review.
+            Event::Error { message, .. } if !message.trim().is_empty() => Some(message.clone()),
             _ => None,
         });
     }
@@ -479,11 +483,11 @@ impl Session for ProcessSession {
             Some(stderr_text)
         } else {
             // Nothing on stderr is not nothing said. Reported from a real run:
-            // claude-code with `--output-format json` puts an API refusal on
-            // stdout, in the document it prints, and leaves stderr empty — and
-            // the run reported "the author could not run, and said nothing"
-            // while the refusal sat in its own event log. The last thing the
-            // vendor said is the best account there is.
+            // a CLI in its JSON output mode put an API refusal into the document
+            // it printed on stdout and left stderr empty — and the run reported
+            // "the author could not run, and said nothing" while the refusal
+            // sat in its own event log. The last thing the vendor said is the
+            // best account there is.
             self.last_said.clone()
         };
         // A terminal sends Ctrl-C to the whole foreground process group, so the
@@ -593,7 +597,7 @@ mod tests {
 
     #[test]
     fn a_json_vendor_that_fails_in_its_document_is_quoted_not_called_silent() {
-        // The shape claude-code actually produced: one JSON document on stdout
+        // The shape the real run produced: one JSON document on stdout
         // carrying the refusal in `/result`, a non-zero exit, empty stderr.
         let profile = Profile::parse(
             r#"
@@ -615,6 +619,34 @@ mod tests {
                 .as_deref()
                 .is_some_and(|d| d.contains("safeguards flagged")),
             "{:?}",
+            outcome.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_failure_reported_as_an_error_event_on_stdout_is_quoted() {
+        // A line-delimited vendor that reports its failure as a structured
+        // error event rather than as prose. Raised in review.
+        let profile = Profile::parse(
+            r#"
+            id = "jsonl-sh"
+            command = "sh"
+            args = ['-c', 'printf "%s\n" "{\"type\":\"error\",\"message\":\"quota exhausted for this key\"}"; exit 1', '--', '{{prompt}}']
+            event_format = "jsonl"
+            "#,
+        )
+        .expect("valid profile");
+        let adapter = ProcessAdapter::new(profile);
+        let mut session = adapter.launch(&spec(), Path::new(".")).expect("launches");
+        while session.next_event().is_some() {}
+        let outcome = session.finish();
+        assert_eq!(outcome.exit_code, Some(1));
+        assert!(
+            outcome
+                .diagnostics
+                .as_deref()
+                .is_some_and(|d| d.contains("quota exhausted")),
+            "an error event was not quoted: {:?}",
             outcome.diagnostics
         );
     }
