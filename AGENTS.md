@@ -248,6 +248,21 @@ old code first and failed there: a reviewer that stages its own edit, one that
 edits without staging, and a check that writes outside the policy. The fourth is
 the clean path, which the guard must not cost anything.
 
+**A reviewer nobody named is one that can only read.** Automatic routing ordered
+reviewers by whether they invoked a different binary, then by id, and never
+asked whether a profile had a review invocation at all. A profile with no
+`review_args` reviews with its author invocation — the one that can write — so
+`kimi-cli` became the reviewer in any workspace where its id sorted first.
+
+When routing picks a reviewer, a profile that declares `review_args` now comes
+before one that does not, and that preference outranks the different-binary
+one: whether a verdict can be trusted comes before how good it is. It is asked
+only of reviewers — ordering authors by it would push the one read-only profile
+into the wrong seat. It remains an ordering rather than a refusal, like the
+binary preference beside it: a workspace whose only other profile cannot read
+still gets a pair, a named reviewer is still honoured, and a reviewer that
+actually writes is refused by the tree check above rather than by routing.
+
 **Promotion re-asks the gate; it never stores its answer.** A run mints its
 token in memory and the token dies with the process, so `ostraka promote` calls
 `gate::reaffirm`, which builds a token from the run record against the

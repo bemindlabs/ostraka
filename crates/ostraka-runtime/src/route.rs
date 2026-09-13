@@ -65,17 +65,17 @@ pub fn select(
         (Some(a), Some(r)) => (find(a)?, find(r)?),
         (Some(a), None) => {
             let author = find(a)?;
-            let reviewer = first_other(profiles, Some(&author))?;
+            let reviewer = first_other(profiles, Some(&author), Side::Review)?;
             (author, reviewer)
         }
         (None, Some(r)) => {
             let reviewer = find(r)?;
-            let author = first_other(profiles, Some(&reviewer))?;
+            let author = first_other(profiles, Some(&reviewer), Side::Author)?;
             (author, reviewer)
         }
         (None, None) => {
-            let author = first_other(profiles, None)?;
-            let reviewer = first_other(profiles, Some(&author))?;
+            let author = first_other(profiles, None, Side::Author)?;
+            let reviewer = first_other(profiles, Some(&author), Side::Review)?;
             (author, reviewer)
         }
     };
@@ -101,6 +101,13 @@ pub fn select(
     })
 }
 
+/// Which side of a run an automatic choice is being made for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Author,
+    Review,
+}
+
 /// The profile to pair with another one, or the first to pick when there is no
 /// other one yet.
 ///
@@ -114,13 +121,33 @@ pub fn select(
 /// and a set of blind spots, and picking them over an actually different vendor
 /// because their ids happen to sort first would weaken every unattended run.
 /// Naming one explicitly still gets it: this orders a choice nobody made.
-fn first_other(profiles: &[Profile], exclude: Option<&Profile>) -> Result<Profile> {
+///
+/// When the choice is a reviewer, one thing outranks even that: whether the
+/// profile has a review invocation at all. A profile that declares no
+/// `review_args` reviews with its author invocation, which can write — and a
+/// reviewer that can write can alter the change it is judging. Two shipped
+/// profiles are in that position, and routing used to pick one as a reviewer
+/// whenever its id sorted first. Posture comes before binary because one is a
+/// question of whether the verdict can be trusted and the other of how good it
+/// is. It is still an ordering, not a refusal: a workspace whose only other
+/// profile has no review invocation gets that profile, and the run refuses on
+/// its own if the worktree changes under review.
+fn first_other(profiles: &[Profile], exclude: Option<&Profile>, side: Side) -> Result<Profile> {
     let excluded_id = exclude.map(|p| p.id.as_str()).unwrap_or_default();
     let excluded_command = exclude.map(|p| p.command.as_str());
     let mut others: Vec<&Profile> = profiles.iter().filter(|p| p.id != excluded_id).collect();
     others.sort_by(|a, b| {
-        let same = |p: &Profile| excluded_command == Some(p.command.as_str());
-        same(a).cmp(&same(b)).then_with(|| a.id.cmp(&b.id))
+        // Named for what is compared, not for what it implies. A profile with
+        // no review invocation reviews with its author one, which is usually
+        // the one that can write — usually, not by definition, so the name says
+        // the fact and the doc comment above says why it matters.
+        let reviews_with_author_invocation =
+            |p: &Profile| side == Side::Review && p.review_args.is_none();
+        let same_binary_as_other = |p: &Profile| excluded_command == Some(p.command.as_str());
+        reviews_with_author_invocation(a)
+            .cmp(&reviews_with_author_invocation(b))
+            .then_with(|| same_binary_as_other(a).cmp(&same_binary_as_other(b)))
+            .then_with(|| a.id.cmp(&b.id))
     });
 
     let mut unusable: Vec<String> = Vec::new();
@@ -290,6 +317,67 @@ mod tests {
         )
         .expect("routes");
         assert_eq!(routing.reviewer.id(), "zz-other");
+    }
+
+    fn reviewing_profile(id: &str) -> Profile {
+        Profile::parse(&format!(
+            r#"
+            id = "{id}"
+            command = "true"
+            args = ["{{{{prompt}}}}", "--write"]
+            review_args = ["{{{{prompt}}}}", "--read-only"]
+            "#
+        ))
+        .expect("valid")
+    }
+
+    #[test]
+    fn an_unpicked_reviewer_is_one_with_a_review_invocation_first() {
+        // `a` sorts first and would have been the reviewer, but it has no
+        // review invocation, so it would review with the one that can write.
+        let profiles = [profile("a"), reviewing_profile("b"), profile("writer")];
+        let routing = select(&profiles, Some("writer"), None, root(), None).expect("routes");
+        assert_eq!(routing.reviewer.id(), "b");
+    }
+
+    #[test]
+    fn posture_outranks_a_different_binary_when_choosing_a_reviewer() {
+        // `other` is a different binary from the author and has no review
+        // invocation; `same` shares the author's binary and can only read.
+        // Whether a verdict can be trusted comes before how good it is.
+        let author = command_profile("author", "true");
+        let other = command_profile("other", "sh");
+        let same = reviewing_profile("same");
+        let routing =
+            select(&[author, other, same], Some("author"), None, root(), None).expect("routes");
+        assert_eq!(routing.reviewer.id(), "same");
+    }
+
+    #[test]
+    fn posture_is_not_asked_of_an_author() {
+        // Only a reviewer needs to be unable to write. Picking an author by
+        // whether it can review would push the one read-only profile into the
+        // wrong seat.
+        let profiles = [profile("a"), reviewing_profile("b")];
+        let routing = select(&profiles, None, None, root(), None).expect("routes");
+        assert_eq!(routing.author.id(), "a");
+        assert_eq!(routing.reviewer.id(), "b");
+    }
+
+    #[test]
+    fn a_writable_reviewer_is_still_used_when_it_is_the_only_one() {
+        // An ordering, not a refusal: the tree check in the orchestrator is what
+        // refuses a reviewer that actually writes.
+        let profiles = [profile("a"), profile("b")];
+        let routing = select(&profiles, Some("a"), None, root(), None).expect("routes");
+        assert_eq!(routing.reviewer.id(), "b");
+    }
+
+    #[test]
+    fn a_named_writable_reviewer_is_honoured() {
+        let profiles = [profile("a"), reviewing_profile("b"), profile("c")];
+        let routing = select(&profiles, Some("b"), Some("c"), root(), None).expect("routes");
+        assert_eq!(routing.reviewer.id(), "c");
     }
 
     #[test]

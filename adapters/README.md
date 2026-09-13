@@ -293,6 +293,9 @@ across every vendor.
   the only lever is a custom agent specification, which is a file a TOML profile
   cannot ship. So the profile declares no `review_args`, and a review run
   through it can edit the worktree it is judging. Route it as an author.
+  Automatic routing already does: a reviewer nobody named is drawn from the
+  profiles that declare a review invocation first, and a worktree that changes
+  under review is refused before anything is committed.
 - **Kimi CLI's `config.toml` is carried, and it is not a credential.** It is
   where the CLI defines the providers and models its login authenticates
   against, so a relocated share directory without it fails with `LLM not set`
