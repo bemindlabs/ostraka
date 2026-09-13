@@ -275,9 +275,34 @@ pub fn run_task(
     };
     record.checks = passed.records().to_vec();
 
-    // 5. Review, by an adapter that is not the one that wrote the change.
-    log.enter(Phase::Reviewing);
+    // 5. Freeze the change. What the gate left behind is what gets reviewed,
+    // and what gets reviewed is the only thing an approval may commit.
     let diff = worktree::diff(wt.path())?;
+    let reviewed = worktree::tree(wt.path())?;
+
+    // Policy again, on the change as it now stands. The check above saw what
+    // the author touched before any check ran; a check that writes a file
+    // outside the declared paths put it in this diff and in the commit without
+    // policy ever looking.
+    let staged = worktree::staged_paths(wt.path())?;
+    if !config.policy.permits(&staged) {
+        return finish(
+            log,
+            record,
+            Outcome::Rejected,
+            None,
+            Some(Refusal::PolicyViolation {
+                reason: format!(
+                    "the change as it stood after the gate writes outside declared paths: \
+                     {staged:?}"
+                ),
+            }),
+            diff,
+        );
+    }
+
+    // 6. Review, by an adapter that is not the one that wrote the change.
+    log.enter(Phase::Reviewing);
     let (verdict, reviewer_usage) = collect_verdict(
         routing.reviewer.as_ref(),
         task,
@@ -293,7 +318,33 @@ pub fn run_task(
     };
     record.approval = Some(approval.clone());
 
-    // 6. The gate decides. Nothing above this line can mint a token.
+    // The reviewer ran inside the worktree it was judging, and two shipped
+    // profiles have no read-only posture at all. So the tree is compared before
+    // anything is minted: a worktree that no longer matches what was reviewed
+    // has not been reviewed, whatever the verdict says — and committing it
+    // would put a reviewer's own ungated, unreviewed edit under an approval.
+    // Refused rather than repaired: resetting to the reviewed tree would hide
+    // that a reviewer wrote to a change it was only meant to read, and the
+    // worktree a refused run keeps is the evidence of exactly that.
+    let after = worktree::restage(wt.path())?;
+    if after != reviewed {
+        return finish(
+            log,
+            record,
+            Outcome::Rejected,
+            None,
+            Some(Refusal::PolicyViolation {
+                reason: format!(
+                    "the worktree changed while it was being reviewed (tree {reviewed} was \
+                     reviewed, {after} is what is there now); a reviewer must not write to the \
+                     change it judges, so nothing was committed"
+                ),
+            }),
+            diff,
+        );
+    }
+
+    // 7. The gate decides. Nothing above this line can mint a token.
     match gate::evaluate(
         passed,
         &task.author,

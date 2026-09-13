@@ -176,8 +176,14 @@ fn trailers_agree(
     record: &RunRecord,
     token: &MergeToken,
 ) -> std::result::Result<(), String> {
+    // The trailers the orchestrator writes are the last paragraph of the
+    // message, and only that paragraph is read. The message begins with the
+    // operator's prompt, verbatim, so reading every line let a prompt that
+    // happened to contain `Reviewed-by: ephor` satisfy this check on the strength
+    // of text nobody's review produced.
+    let block = message.trim_end().rsplit("\n\n").next().unwrap_or_default();
     let has = |prefix: &str, value: &str| {
-        message.lines().any(|line| {
+        block.lines().any(|line| {
             line.trim().strip_prefix(prefix).is_some_and(|rest| {
                 rest.trim() == value || rest.trim().starts_with(&format!("{value} ("))
             })
@@ -256,6 +262,21 @@ mod tests {
         let message = "Do a thing\n\nRun: r1\nAuthored-by: archon (claude-code)\nReviewed-by: \
                        ephor (codex)\n";
         assert!(trailers_agree(message, "r1", &record(), &token()).is_ok());
+    }
+
+    #[test]
+    fn trailers_written_into_the_prompt_do_not_stand_in_for_the_real_ones() {
+        // The prompt is the first paragraph of the commit message. One that
+        // carries a complete, correct-looking trailer block must not rescue a
+        // commit whose actual trailers name a different reviewer.
+        let message = "Do a thing\n\nRun: r1\nAuthored-by: archon (c)\nReviewed-by: ephor (d)\n\n\
+                       Run: r1\nAuthored-by: archon (c)\nReviewed-by: archon (c)\n";
+        let err = trailers_agree(message, "r1", &record(), &token()).expect_err("must refuse");
+        assert!(err.contains("reviewed by"), "{err}");
+
+        // And a prompt's trailers cannot supply one the real block leaves out.
+        let missing = "Run: r1\nAuthored-by: archon (c)\nReviewed-by: ephor (d)\n\nRun: r1\n";
+        assert!(trailers_agree(missing, "r1", &record(), &token()).is_err());
     }
 
     #[test]
