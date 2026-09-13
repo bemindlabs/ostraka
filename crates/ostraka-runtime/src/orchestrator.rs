@@ -78,6 +78,32 @@ pub fn run_task(
     reviewer_identity: &ActorId,
     watcher: Option<Box<dyn Watcher>>,
 ) -> Result<RunReport> {
+    run_task_until(
+        places,
+        config,
+        routing,
+        task,
+        reviewer_identity,
+        watcher,
+        &ostraka_adapter::interrupt::Stop::new(),
+    )
+}
+
+/// [`run_task`], for a run that can be stopped without stopping any other.
+///
+/// `stop` is the same one `routing` was built with by
+/// [`crate::route::select_until`]: the adapters answer to it through the
+/// routing, and the gate's checks answer to it here. Ctrl-C still stops every
+/// run, because a `Stop` also answers to the process-wide request.
+pub fn run_task_until(
+    places: &Places<'_>,
+    config: &Config,
+    routing: &Routing,
+    task: &TaskSpec,
+    reviewer_identity: &ActorId,
+    watcher: Option<Box<dyn Watcher>>,
+    stop: &ostraka_adapter::interrupt::Stop,
+) -> Result<RunReport> {
     let repo = places.repo;
     let run_id = format!("{}-{}", task.id, now_rfc3339().replace([':', '-'], ""));
     let mut log = RunLog::create(places.records, &run_id)?.watched_by(watcher);
@@ -252,7 +278,7 @@ pub fn run_task(
 
     // 4. Gate. These commands actually run; their output is captured.
     log.enter(Phase::Gating);
-    let passed = match gate::run_checks(&config.gate, wt.path(), &mut |record| {
+    let passed = match gate::run_checks_until(&config.gate, wt.path(), stop, &mut |record| {
         log_checked(&mut log, record)
     }) {
         Ok(p) => p,

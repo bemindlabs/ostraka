@@ -49,6 +49,30 @@ pub fn select(
     isolation_root: &Path,
     timeout: Option<std::time::Duration>,
 ) -> Result<Routing> {
+    select_until(
+        profiles,
+        author_id,
+        reviewer_id,
+        isolation_root,
+        timeout,
+        &ostraka_adapter::interrupt::Stop::new(),
+    )
+}
+
+/// [`select`], with both adapters answering to one run's stop.
+///
+/// Pass the same stop to [`crate::orchestrator::run_task_until`], which uses it
+/// for the gate: the adapters get theirs here because this is where they are
+/// built, and a run whose author stopped but whose checks did not has not
+/// stopped.
+pub fn select_until(
+    profiles: &[Profile],
+    author_id: Option<&str>,
+    reviewer_id: Option<&str>,
+    isolation_root: &Path,
+    timeout: Option<std::time::Duration>,
+    stop: &ostraka_adapter::interrupt::Stop,
+) -> Result<Routing> {
     if profiles.is_empty() {
         return Err(Error::Other("no adapter profiles found".to_string()));
     }
@@ -91,12 +115,14 @@ pub fn select(
         author: Box::new(
             ProcessAdapter::new(author)
                 .isolated_under(isolation_root)
-                .within(timeout),
+                .within(timeout)
+                .stopped_by(stop.clone()),
         ),
         reviewer: Box::new(
             ProcessAdapter::reviewing(reviewer)
                 .isolated_under(isolation_root)
-                .within(timeout),
+                .within(timeout)
+                .stopped_by(stop.clone()),
         ),
     })
 }
