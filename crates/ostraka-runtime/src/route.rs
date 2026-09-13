@@ -137,11 +137,16 @@ fn first_other(profiles: &[Profile], exclude: Option<&Profile>, side: Side) -> R
     let excluded_command = exclude.map(|p| p.command.as_str());
     let mut others: Vec<&Profile> = profiles.iter().filter(|p| p.id != excluded_id).collect();
     others.sort_by(|a, b| {
-        let writable = |p: &Profile| side == Side::Review && p.review_args.is_none();
-        let same = |p: &Profile| excluded_command == Some(p.command.as_str());
-        writable(a)
-            .cmp(&writable(b))
-            .then_with(|| same(a).cmp(&same(b)))
+        // Named for what is compared, not for what it implies. A profile with
+        // no review invocation reviews with its author one, which is usually
+        // the one that can write — usually, not by definition, so the name says
+        // the fact and the doc comment above says why it matters.
+        let reviews_with_author_invocation =
+            |p: &Profile| side == Side::Review && p.review_args.is_none();
+        let same_binary_as_other = |p: &Profile| excluded_command == Some(p.command.as_str());
+        reviews_with_author_invocation(a)
+            .cmp(&reviews_with_author_invocation(b))
+            .then_with(|| same_binary_as_other(a).cmp(&same_binary_as_other(b)))
             .then_with(|| a.id.cmp(&b.id))
     });
 
