@@ -161,8 +161,20 @@ fn carry(source: &Path, link: &Path, profile_id: &str) -> Result<()> {
     // Already provisioned. Re-pointing it would overwrite whatever an operator
     // put here deliberately, and the link is to a path rather than to a
     // snapshot, so it does not go stale.
-    if std::fs::symlink_metadata(link).is_ok() {
-        return Ok(());
+    match std::fs::symlink_metadata(link) {
+        Ok(_) => return Ok(()),
+        // Genuinely not there: go and make it.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // There, and unreadable. Treating that as missing would send the link
+        // step to a path that exists, where "already exists" now counts as
+        // success — and a permissions problem in a vendor's home would pass as
+        // provisioned. Raised in review.
+        Err(e) => {
+            return Err(Error::Isolation {
+                id: profile_id.to_string(),
+                message: format!("could not check {}: {e}", link.display()),
+            });
+        }
     }
     if !source.exists() {
         return Ok(());
@@ -239,6 +251,35 @@ mod tests {
         link_once(&source, &link).expect("the first one links");
         link_once(&source, &link).expect("the second one finds it done");
         assert_eq!(std::fs::read_to_string(&link).expect("reads"), "token");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_that_cannot_be_checked_is_an_error_not_a_success() {
+        use std::os::unix::fs::PermissionsExt;
+        // Root reads through permissions, so there is nothing to observe there.
+        // SAFETY: reads the effective uid; no memory contract.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let home = tempdir();
+        let vendor = home.join(".vendor");
+        std::fs::create_dir_all(&vendor).expect("vendor dir");
+        std::fs::write(vendor.join("auth.json"), "token").expect("credential");
+
+        // A home directory whose contents cannot be inspected.
+        let root = tempdir();
+        std::fs::create_dir_all(root.join("vendor")).expect("home");
+        std::fs::set_permissions(root.join("vendor"), std::fs::Permissions::from_mode(0o000))
+            .expect("lock it");
+        let outcome = isolation(&["auth.json"]).provision_from(&root, "vendor", Some(&home));
+        std::fs::set_permissions(root.join("vendor"), std::fs::Permissions::from_mode(0o755))
+            .expect("unlock it");
+
+        assert!(
+            outcome.is_err(),
+            "an unreadable vendor home was reported as provisioned"
+        );
     }
 
     #[test]
