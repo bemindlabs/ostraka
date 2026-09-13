@@ -236,16 +236,23 @@ fn a_run_the_operator_stopped_says_so_rather_than_blaming_the_agent() {
     let f = fixture("interrupted");
     let writer = agent(&f.repo, "writer", "echo working; sleep 120");
     let reviewer = agent(&f.repo, "reviewer", &verdict("APPROVE"));
-    let routing = route::select(
+    // A stop of this run's own, not the process-wide Ctrl-C flag. The flag is
+    // shared by every test in this binary, and they run in parallel: setting it
+    // here used to interrupt whichever other run happened to be going at the
+    // time, which is how a test that stops one of two runs first failed only
+    // when the whole file ran. Ctrl-C stopping everything is still pinned, in
+    // the adapter's tests, which serialise on the flag.
+    let stop = ostraka_adapter::interrupt::Stop::new();
+    let routing = route::select_until(
         &[writer, reviewer],
         Some("writer"),
         Some("reviewer"),
         &f.repo.join(".ostraka/vendor-home"),
         None,
+        &stop,
     )
     .unwrap();
 
-    ostraka_adapter::interrupt::clear();
     let (worktrees, records) = places(&f);
     let places = orchestrator::Places {
         repo: &f.repo,
@@ -255,24 +262,22 @@ fn a_run_the_operator_stopped_says_so_rather_than_blaming_the_agent() {
         notes: None,
         skills: None,
     };
-    // Scoped so the signalling thread cannot outlive this test and set the
-    // flag underneath another one.
     let report = std::thread::scope(|scope| {
         scope.spawn(|| {
             std::thread::sleep(std::time::Duration::from_millis(400));
-            ostraka_adapter::interrupt::request();
+            stop.request();
         });
-        orchestrator::run_task(
+        orchestrator::run_task_until(
             &places,
             &config("true"),
             &routing,
             &task("do a thing", "archon"),
             &ActorId::new("ephor"),
             None,
+            &stop,
         )
         .expect("runs")
     });
-    ostraka_adapter::interrupt::clear();
 
     assert!(!report.approved());
     assert!(report.record.approval.is_none(), "a reviewer was called");
@@ -1278,4 +1283,93 @@ fn a_clean_review_still_commits_exactly_what_was_reviewed() {
     assert!(report.approved(), "{:?}", report.refusal);
     let committed = committed_paths(&f, &report.record.run_id).expect("a commit");
     assert_eq!(committed.trim(), "added.txt", "{committed}");
+}
+
+#[test]
+fn stopping_one_of_two_runs_leaves_the_other_to_finish() {
+    // End to end, through routing, the orchestrator and the gate: two runs at
+    // once, each with its own stop. One author would sleep for two minutes and
+    // is asked to stop; the other run must not notice and must be approved.
+    let f = fixture("stop-one");
+    let slow = agent(
+        &f.repo,
+        "slow",
+        "echo starting && sleep 120 && echo never > slow.txt",
+    );
+    let quick = agent(&f.repo, "quick", "sleep 1 && echo done > quick.txt");
+    let reviewer = agent(&f.repo, "reviewer", &verdict("APPROVE"));
+    let (worktrees, records) = places(&f);
+    let vendor_home = f.repo.join(".ostraka/vendor-home");
+    let started = std::time::Instant::now();
+
+    let stop_slow = ostraka_adapter::interrupt::Stop::new();
+    let stop_quick = ostraka_adapter::interrupt::Stop::new();
+
+    let (slow_report, quick_report) = std::thread::scope(|scope| {
+        let run = |author: Profile, id: &'static str, stop: ostraka_adapter::interrupt::Stop| {
+            let reviewer = reviewer.clone();
+            let (worktrees, records, repo, vendor_home) = (
+                worktrees.clone(),
+                records.clone(),
+                f.repo.clone(),
+                vendor_home.clone(),
+            );
+            scope.spawn(move || {
+                let author_id = author.id.clone();
+                let routing = route::select_until(
+                    &[author, reviewer],
+                    Some(&author_id),
+                    Some("reviewer"),
+                    &vendor_home,
+                    None,
+                    &stop,
+                )
+                .unwrap();
+                let places = orchestrator::Places {
+                    repo: &repo,
+                    worktrees: &worktrees,
+                    records: &records,
+                    name: "work",
+                    notes: None,
+                    skills: None,
+                };
+                let mut task = task(id, "archon");
+                task.id = id.to_string();
+                orchestrator::run_task_until(
+                    &places,
+                    &config("true"),
+                    &routing,
+                    &task,
+                    &ActorId::new("ephor"),
+                    None,
+                    &stop,
+                )
+                .expect("run completes")
+            })
+        };
+        let slow_run = run(slow, "t-slow", stop_slow.clone());
+        let quick_run = run(quick, "t-quick", stop_quick.clone());
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        stop_slow.request();
+        (
+            slow_run.join().expect("slow thread"),
+            quick_run.join().expect("quick thread"),
+        )
+    });
+
+    assert!(
+        matches!(slow_report.refusal, Some(Refusal::Interrupted)),
+        "the stopped run was not interrupted: {:?}",
+        slow_report.refusal
+    );
+    assert!(
+        quick_report.approved(),
+        "stopping one run disturbed the other: {:?}",
+        quick_report.refusal
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(60),
+        "the stopped run was waited out rather than stopped ({:?})",
+        started.elapsed()
+    );
 }

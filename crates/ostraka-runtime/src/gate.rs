@@ -120,12 +120,30 @@ pub fn run_checks(
     worktree: &Path,
     finished: &mut dyn FnMut(&CheckRecord),
 ) -> std::result::Result<AllChecksPassed, Refusal> {
+    run_checks_until(
+        spec,
+        worktree,
+        &ostraka_adapter::interrupt::Stop::new(),
+        finished,
+    )
+}
+
+/// [`run_checks`], answering to one run's stop as well as to Ctrl-C.
+///
+/// The gate is usually the longest part of a run, so a run that can be stopped
+/// everywhere except its checks cannot really be stopped.
+pub fn run_checks_until(
+    spec: &GateSpec,
+    worktree: &Path,
+    stop: &ostraka_adapter::interrupt::Stop,
+    finished: &mut dyn FnMut(&CheckRecord),
+) -> std::result::Result<AllChecksPassed, Refusal> {
     let mut records = Vec::with_capacity(spec.checks.len());
     let mut failed = Vec::new();
 
     let ceiling = spec.timeout_secs.map(Duration::from_secs);
     for check in &spec.checks {
-        let record = run_one(check, worktree, ceiling);
+        let record = run_one(check, worktree, ceiling, stop);
         // Reported one at a time, as each finishes. The gate is usually the
         // longest part of a run — four cargo checks on this repository take
         // twelve seconds — and a caller that only learns the outcome at the end
@@ -144,8 +162,13 @@ pub fn run_checks(
     }
 }
 
-fn run_one(check: &Check, worktree: &Path, ceiling: Option<Duration>) -> CheckRecord {
-    let mut record = run_command(&check.cmd, worktree, ceiling);
+fn run_one(
+    check: &Check,
+    worktree: &Path,
+    ceiling: Option<Duration>,
+    stop: &ostraka_adapter::interrupt::Stop,
+) -> CheckRecord {
+    let mut record = run_command_until(&check.cmd, worktree, ceiling, stop);
     record.name = check.name.clone();
     record
 }
@@ -155,6 +178,21 @@ fn run_one(check: &Check, worktree: &Path, ceiling: Option<Duration>) -> CheckRe
 /// Shared with worktree preparation, which needs exactly this and must not be
 /// reported as a gate check.
 pub fn run_command(cmd: &str, worktree: &Path, ceiling: Option<Duration>) -> CheckRecord {
+    run_command_until(
+        cmd,
+        worktree,
+        ceiling,
+        &ostraka_adapter::interrupt::Stop::new(),
+    )
+}
+
+/// [`run_command`], answering to one run's stop as well as to Ctrl-C.
+pub fn run_command_until(
+    cmd: &str,
+    worktree: &Path,
+    ceiling: Option<Duration>,
+    until: &ostraka_adapter::interrupt::Stop,
+) -> CheckRecord {
     let started = Instant::now();
     let check = Check {
         name: String::new(),
@@ -180,7 +218,7 @@ pub fn run_command(cmd: &str, worktree: &Path, ceiling: Option<Duration>) -> Che
         .spawn();
 
     let (exit_code, stdout, stderr) = match spawned {
-        Ok(child) => wait_for(child, ceiling),
+        Ok(child) => wait_for(child, ceiling, until),
         // A check that could not be started has not passed. Recording the
         // failure is the point; swallowing it would be the bug.
         Err(e) => (None, String::new(), e.to_string()),
@@ -221,6 +259,7 @@ fn stop(child: &mut std::process::Child) {
 fn wait_for(
     mut child: std::process::Child,
     ceiling: Option<Duration>,
+    until: &ostraka_adapter::interrupt::Stop,
 ) -> (Option<i32>, String, String) {
     fn reader(stream: Option<impl Read + Send + 'static>) -> std::sync::mpsc::Receiver<String> {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -237,23 +276,22 @@ fn wait_for(
     let out = reader(child.stdout.take());
     let err = reader(child.stderr.take());
 
-    let killed = match ceiling {
-        None => false,
-        Some(ceiling) => {
-            let deadline = Instant::now() + ceiling;
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => break false,
-                    Err(_) => break false,
-                    Ok(None) => {}
-                }
-                if Instant::now() >= deadline || ostraka_adapter::interrupt::requested() {
-                    stop(&mut child);
-                    break true;
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
+    // Polled whether or not there is a ceiling. With none, this used to wait on
+    // the child outright — so a check with no `timeout_secs` could not be
+    // stopped by anything, Ctrl-C included, and a run was only as stoppable as
+    // its slowest unbounded check.
+    let deadline = ceiling.map(|ceiling| Instant::now() + ceiling);
+    let killed = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break false,
+            Err(_) => break false,
+            Ok(None) => {}
         }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) || until.requested() {
+            stop(&mut child);
+            break true;
+        }
+        std::thread::sleep(Duration::from_millis(25));
     };
 
     let status = child.wait().ok();
@@ -369,6 +407,27 @@ pub fn reaffirm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_check_with_no_ceiling_can_still_be_stopped() {
+        // Unbounded checks used to be unstoppable: with no deadline there was
+        // no loop, only a wait on the child.
+        let stop = ostraka_adapter::interrupt::Stop::new();
+        let started = Instant::now();
+        let record = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(300));
+                stop.request();
+            });
+            run_command_until("sleep 120", Path::new("."), None, &stop)
+        });
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "an unbounded check ignored its stop for {:?}",
+            started.elapsed()
+        );
+        assert!(!record.passed(), "a stopped check passed");
+    }
     use ostraka_core::gate::{ReviewPolicy, Verdict};
 
     fn spec(cmds: &[(&str, &str, bool)]) -> GateSpec {

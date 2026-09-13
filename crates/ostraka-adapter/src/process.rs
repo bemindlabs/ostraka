@@ -47,6 +47,10 @@ pub struct ProcessAdapter {
     /// Wall-clock ceiling for one invocation. `None` means wait forever, which
     /// is what this did before the ceiling existed.
     timeout: Option<Duration>,
+    /// The run this adapter belongs to, for stopping it alone. A fresh one
+    /// answers only to Ctrl-C, which is what an adapter nobody gave a stop to
+    /// has always done.
+    stop: crate::interrupt::Stop,
 }
 
 impl ProcessAdapter {
@@ -57,6 +61,7 @@ impl ProcessAdapter {
             role: Role::Author,
             isolation_root: None,
             timeout: None,
+            stop: crate::interrupt::Stop::new(),
         }
     }
 
@@ -71,6 +76,7 @@ impl ProcessAdapter {
             role: Role::Review,
             isolation_root: None,
             timeout: None,
+            stop: crate::interrupt::Stop::new(),
         }
     }
 
@@ -81,6 +87,16 @@ impl ProcessAdapter {
     /// that can be stopped by one wedged subprocess has not automated anything.
     pub fn within(mut self, timeout: Option<Duration>) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// The stop this adapter's sessions answer to, besides Ctrl-C.
+    ///
+    /// Bound when the routing is, like the ceiling and the isolation root: which
+    /// run a vendor belongs to is decided before it is launched, not by
+    /// whatever happens to be waiting on it later.
+    pub fn stopped_by(mut self, stop: crate::interrupt::Stop) -> Self {
+        self.stop = stop;
         self
     }
 
@@ -254,6 +270,7 @@ impl VendorAdapter for ProcessAdapter {
             drained: false,
             stderr_tail,
             stderr_reader,
+            stop: self.stop.clone(),
         }))
     }
 }
@@ -328,6 +345,7 @@ pub struct ProcessSession {
     drained: bool,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
     stderr_reader: Option<JoinHandle<()>>,
+    stop: crate::interrupt::Stop,
 }
 
 impl ProcessSession {
@@ -364,7 +382,7 @@ impl ProcessSession {
                     let expired = self
                         .deadline
                         .is_some_and(|deadline| Instant::now() >= deadline);
-                    if !expired && !crate::interrupt::requested() {
+                    if !expired && !self.stop.requested() {
                         continue;
                     }
                     self.timed_out = expired;
@@ -452,7 +470,7 @@ impl Session for ProcessSession {
         // and the drain ends at EOF instead. The run still ended because the
         // operator said so, and reporting it as the agent failing would blame
         // the work for their decision.
-        let interrupted = self.interrupted || crate::interrupt::requested();
+        let interrupted = self.interrupted || self.stop.requested();
 
         AdapterOutcome {
             exit_code,
@@ -629,6 +647,63 @@ mod tests {
         assert!(
             outcome.interrupted,
             "an interrupt in flight was not recorded"
+        );
+    }
+
+    #[test]
+    fn a_stop_for_one_run_stops_that_vendor_and_not_another() {
+        let _signals = exclusive();
+        // Two vendors going at once, each with a stop of its own. Asking one to
+        // stop must end that one quickly and leave the other to finish — which
+        // a single process-wide flag could not do, and is why the browser used
+        // to refuse a second run.
+        let stopped = crate::interrupt::Stop::new();
+        let first = ProcessAdapter::new(shell_profile("echo working; sleep 120"))
+            .stopped_by(stopped.clone());
+        let second = ProcessAdapter::new(shell_profile("sleep 1; echo finished"))
+            .stopped_by(crate::interrupt::Stop::new());
+        let started = Instant::now();
+        let a = first.launch(&spec(), Path::new(".")).expect("launches");
+        let b = second.launch(&spec(), Path::new(".")).expect("launches");
+
+        let one = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(300));
+                stopped.request();
+            });
+            a.finish()
+        });
+        let two = b.finish();
+
+        assert!(one.interrupted, "the run that was asked to stop did not");
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "waited {:?}",
+            started.elapsed()
+        );
+        assert!(!two.interrupted, "stopping one run stopped another");
+        assert_eq!(two.exit_code, Some(0), "the other run did not finish");
+    }
+
+    #[test]
+    fn ctrl_c_still_stops_a_run_that_has_a_stop_of_its_own() {
+        let _signals = exclusive();
+        // A per-run stop adds a way to stop one run; it must not take away the
+        // way to stop all of them.
+        let adapter = ProcessAdapter::new(shell_profile("echo working; sleep 120"))
+            .stopped_by(crate::interrupt::Stop::new());
+        let session = adapter.launch(&spec(), Path::new(".")).expect("launches");
+        let outcome = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(300));
+                crate::interrupt::request();
+            });
+            session.finish()
+        });
+        crate::interrupt::clear();
+        assert!(
+            outcome.interrupted,
+            "Ctrl-C did not reach a run with its own stop"
         );
     }
 
