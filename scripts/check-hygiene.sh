@@ -204,6 +204,36 @@ for template in crates/ostraka/templates/*.toml; do
 done
 ok "the profiles init writes are the ones this repository ships"
 
+# 7c. Rule 1 in AGENTS.md: no vendor names in the runtime or in the adapter
+#     layer, because a supported CLI is a profile and not code. Nothing checked
+#     it, so a name reached a comment in process.rs and another reached a doc
+#     comment in capability.rs, both through review. The names are read out of
+#     the profiles themselves — every `id` and `command` in adapters/ — so a new
+#     vendor is covered the day its profile lands.
+#
+#     Test modules are not searched. The tests that enforce this rule have to
+#     name what they forbid, and a fixture quoting a vendor's output is a
+#     fixture; everything above a file's `#[cfg(test)]` is what ships.
+vendor_names=$(for f in adapters/*.toml; do
+    sed -n 's/^id *= *"\(.*\)"/\1/p; s/^command *= *"\(.*\)"/\1/p' "$f"
+done | sort -u)
+named=""
+for src in $(find crates/ostraka-adapter/src crates/ostraka-runtime/src -name '*.rs' | sort); do
+    shipped=$(awk '/^#\[cfg\(test\)\]/ { exit } { print FNR": "$0 }' "$src")
+    for name in $vendor_names; do
+        hits=$(printf '%s\n' "$shipped" | grep -iw -- "$name" || true)
+        [ -n "$hits" ] && named="$named$(printf '%s\n' "$hits" | sed "s|^|$src:|;s|\$| [$name]|")
+"
+    done
+done
+if [ -n "$named" ]; then
+    bad "a vendor is named outside the profiles, in code that ships:"
+    printf '%s' "$named" | sed 's/^/      /'
+    note "a supported CLI is a TOML file in adapters/; describe the shape, not the product"
+else
+    ok "no vendor is named in the adapter or runtime outside their tests"
+fi
+
 # 7a. A profile `init` writes arrives alone: no adapters/README.md, no docs/,
 #     nothing but itself in .ostraka/adapters/. A comment that says "see
 #     adapters/README.md" is a pointer to nothing on every machine that installed

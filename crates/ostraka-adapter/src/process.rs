@@ -271,6 +271,7 @@ impl VendorAdapter for ProcessAdapter {
             stderr_tail,
             stderr_reader,
             stop: self.stop.clone(),
+            last_said: None,
         }))
     }
 }
@@ -346,6 +347,9 @@ pub struct ProcessSession {
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
     stderr_reader: Option<JoinHandle<()>>,
     stop: crate::interrupt::Stop,
+    /// The last thing the vendor said on stdout, for explaining a failure that
+    /// left stderr empty.
+    last_said: Option<String>,
 }
 
 impl ProcessSession {
@@ -415,6 +419,19 @@ impl ProcessSession {
                 self.pending.push_back(event);
             }
         }
+
+        // Kept before the events are handed out. A caller drains them before it
+        // calls `finish`, and some vendors say why they failed only here — so
+        // by the time a failure needs explaining, this is the one place left
+        // that still knows what was said.
+        self.last_said = self.pending.iter().rev().find_map(|event| match event {
+            Event::Message { text, .. } if !text.trim().is_empty() => Some(text.clone()),
+            // A vendor that reports failure as a structured error event on
+            // stdout is saying exactly the thing a failed run needs quoted.
+            // Raised in review.
+            Event::Error { message, .. } if !message.trim().is_empty() => Some(message.clone()),
+            _ => None,
+        });
     }
 }
 
@@ -462,8 +479,16 @@ impl Session for ProcessSession {
         // wrong.
         let diagnostics = if exit_code == Some(0) {
             None
+        } else if !stderr_text.trim().is_empty() {
+            Some(stderr_text)
         } else {
-            (!stderr_text.trim().is_empty()).then_some(stderr_text)
+            // Nothing on stderr is not nothing said. Reported from a real run:
+            // a CLI in its JSON output mode put an API refusal into the document
+            // it printed on stdout and left stderr empty — and the run reported
+            // "the author could not run, and said nothing" while the refusal
+            // sat in its own event log. The last thing the vendor said is the
+            // best account there is.
+            self.last_said.clone()
         };
         // A terminal sends Ctrl-C to the whole foreground process group, so the
         // child usually dies of the same signal before the poll above notices
@@ -547,6 +572,91 @@ mod tests {
             base_ref: "HEAD".into(),
             model: None,
         }
+    }
+
+    #[test]
+    fn a_failure_reported_only_on_stdout_is_still_the_reason_given() {
+        let adapter = ProcessAdapter::new(shell_profile(
+            "echo 'API Error: the request was refused'; exit 1",
+        ));
+        let mut session = adapter.launch(&spec(), Path::new(".")).expect("launches");
+        // The orchestrator drains every event before it finishes a session, so
+        // the fallback has to survive that.
+        while session.next_event().is_some() {}
+        let outcome = session.finish();
+        assert_eq!(outcome.exit_code, Some(1));
+        assert!(
+            outcome
+                .diagnostics
+                .as_deref()
+                .is_some_and(|d| d.contains("API Error")),
+            "the vendor's own words were dropped: {:?}",
+            outcome.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_json_vendor_that_fails_in_its_document_is_quoted_not_called_silent() {
+        // The shape the real run produced: one JSON document on stdout
+        // carrying the refusal in `/result`, a non-zero exit, empty stderr.
+        let profile = Profile::parse(
+            r#"
+            id = "json-sh"
+            command = "sh"
+            args = ['-c', 'printf "%s" "{\"result\":\"API Error: safeguards flagged this message\",\"is_error\":true}"; exit 1', '--', '{{prompt}}']
+            event_format = "json"
+            event_text = "/result"
+            "#,
+        )
+        .expect("valid profile");
+        let adapter = ProcessAdapter::new(profile);
+        let mut session = adapter.launch(&spec(), Path::new(".")).expect("launches");
+        while session.next_event().is_some() {}
+        let outcome = session.finish();
+        assert!(
+            outcome
+                .diagnostics
+                .as_deref()
+                .is_some_and(|d| d.contains("safeguards flagged")),
+            "{:?}",
+            outcome.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_failure_reported_as_an_error_event_on_stdout_is_quoted() {
+        // A line-delimited vendor that reports its failure as a structured
+        // error event rather than as prose. Raised in review.
+        let profile = Profile::parse(
+            r#"
+            id = "jsonl-sh"
+            command = "sh"
+            args = ['-c', 'printf "%s\n" "{\"type\":\"error\",\"message\":\"quota exhausted for this key\"}"; exit 1', '--', '{{prompt}}']
+            event_format = "jsonl"
+            "#,
+        )
+        .expect("valid profile");
+        let adapter = ProcessAdapter::new(profile);
+        let mut session = adapter.launch(&spec(), Path::new(".")).expect("launches");
+        while session.next_event().is_some() {}
+        let outcome = session.finish();
+        assert_eq!(outcome.exit_code, Some(1));
+        assert!(
+            outcome
+                .diagnostics
+                .as_deref()
+                .is_some_and(|d| d.contains("quota exhausted")),
+            "an error event was not quoted: {:?}",
+            outcome.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_success_does_not_record_what_was_said_as_a_diagnostic() {
+        let adapter = ProcessAdapter::new(shell_profile("echo 'all done'"));
+        let mut session = adapter.launch(&spec(), Path::new(".")).expect("launches");
+        while session.next_event().is_some() {}
+        assert_eq!(session.finish().diagnostics, None);
     }
 
     #[test]
