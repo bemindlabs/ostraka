@@ -190,7 +190,7 @@ fn take_stock(app: &mut App, records_root: &Path) {
     // Asked to leave while something was running: the browser stays up until
     // the run it started has actually stopped, so the last thing on screen is
     // what happened rather than a terminal that froze on its way out.
-    if app.leaving && !app.situation().running {
+    if app.leaving && !app.anything_running() {
         app.quit = true;
     }
 }
@@ -507,12 +507,13 @@ fn unavailable(app: &App, command: Command) -> String {
     let situation = app.situation();
     match command {
         Command::NewRun if situation.running => {
-            "a run is already going \u{2014} s asks it to stop".to_string()
+            "a run is already going in this pane \u{2014} s asks it to stop, ctrl-t opens another"
+                .to_string()
         }
         Command::NewRun => {
             "this directory cannot run anything yet \u{2014} i sets it up".to_string()
         }
-        Command::Stop => "nothing is running".to_string(),
+        Command::Stop => "nothing is running in this pane".to_string(),
         Command::Fix => "nothing is in the way".to_string(),
         Command::NextPane | Command::ClosePane => "this is the only pane".to_string(),
         Command::Setup => "this directory is already set up".to_string(),
@@ -921,7 +922,7 @@ fn start_run(app: &mut App) {
         app.status = Some("nothing to run \u{2014} write what the agent should do".to_string());
         return;
     }
-    if app.anything_running() {
+    if app.pane().running() {
         app.status = Some(unavailable(app, Command::NewRun));
         return;
     }
@@ -967,7 +968,12 @@ fn leave(app: &mut App) {
 /// writing into a worktree is the thing Ctrl-C was taught to prevent.
 fn depart(app: &mut App) {
     if app.anything_running() {
-        app.thread_mut().stop();
+        // Every pane's run, not only the one in front. The browser is leaving,
+        // and a run left going in a pane nobody is looking at is still a vendor
+        // writing into a worktree.
+        for pane in &mut app.panes {
+            pane.thread.stop();
+        }
         app.leaving = true;
         app.status = Some("stopping the run \u{2014} the browser closes when it has".to_string());
     } else {
@@ -1275,25 +1281,29 @@ mod tests {
     }
 
     #[test]
-    fn one_run_at_a_time_across_every_pane() {
-        // Not a property of panes. The request to stop is a single flag,
-        // because a signal is single, so two runs would both answer it.
+    fn a_run_in_one_pane_does_not_keep_another_from_starting_one() {
+        // Each run has a stop of its own now, so a run in one pane is no
+        // longer a reason to refuse one in another. The pane in front is what
+        // is asked.
         let mut a = app();
         running(&mut a);
         handle(&mut a, control('t'), Path::new("/p/.ostraka"));
         assert!(!a.pane().running(), "the new pane inherited the run");
+        assert!(a.anything_running(), "the first pane's run went away");
+        assert!(
+            a.commands().contains(&Command::NewRun),
+            "a new run was not offered beside a run in another pane"
+        );
 
         typed(&mut a, "a second task somewhere else");
         handle(&mut a, press(KeyCode::Enter), Path::new("/p/.ostraka"));
-        assert!(a.pane().thread.live.is_none(), "a second run was started");
         assert!(
-            a.status
+            !a.status
                 .as_deref()
                 .is_some_and(|s| s.contains("already going")),
-            "{:?}",
+            "refused because of a run in another pane: {:?}",
             a.status
         );
-        ostraka_adapter::interrupt::clear();
     }
 
     #[test]
@@ -1502,14 +1512,22 @@ mod tests {
     fn quitting_while_a_run_is_going_stops_it_before_leaving() {
         // Walking away here leaves a vendor writing into a worktree, which is
         // the thing Ctrl-C was taught to prevent.
+        // In every pane, not only the one in front.
         let mut a = app();
+        running(&mut a);
+        handle(&mut a, control('t'), Path::new("/p/.ostraka"));
         running(&mut a);
         handle(&mut a, control('c'), Path::new("/p/.ostraka"));
         handle(&mut a, press(KeyCode::Char('y')), Path::new("/p/.ostraka"));
 
         assert!(!a.quit, "the browser left while a run was going");
         assert!(a.leaving);
-        assert!(a.thread().live.as_ref().expect("a session").stopping);
+        for (at, pane) in a.panes.iter().enumerate() {
+            assert!(
+                pane.thread.live.as_ref().expect("a session").stopping,
+                "pane {at}'s run was left going"
+            );
+        }
         ostraka_adapter::interrupt::clear();
     }
 
@@ -1518,7 +1536,7 @@ mod tests {
         let mut a = app();
         a.focus = Focus::Keys;
         handle(&mut a, press(KeyCode::Char('s')), Path::new("/p/.ostraka"));
-        assert_eq!(a.status.as_deref(), Some("nothing is running"));
+        assert_eq!(a.status.as_deref(), Some("nothing is running in this pane"));
     }
 
     #[test]

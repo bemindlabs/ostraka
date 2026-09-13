@@ -16,9 +16,9 @@
 pub struct Situation {
     /// This directory cannot be run until something is written into it.
     pub unconfigured: bool,
-    /// A run is going, anywhere in the browser. There is one at a time —
-    /// running several at once is the parallel-execution question, and it is
-    /// not answered yet.
+    /// A run is going in the pane in front. Other panes may have runs of their
+    /// own: each run has a stop of its own, so a run in one pane is no reason to
+    /// refuse a run in another.
     pub running: bool,
     /// How many lines of work are open.
     pub panes: usize,

@@ -134,6 +134,7 @@ pub fn execute(
     workspace: &Workspace,
     args: &Args,
     watcher: Option<Box<dyn Watcher>>,
+    stop: &ostraka_adapter::interrupt::Stop,
 ) -> Result<RunReport, Box<dyn std::error::Error>> {
     // `--from` names a run, and a run is not a ref. The branch a run's commit
     // lands on is `ostraka/<id>` — internal knowledge that was reachable only
@@ -166,7 +167,7 @@ pub fn execute(
     // Vendors that can only be isolated by relocating their home directory get
     // one here, beside the run records and ignored by git for the same reason.
     let vendor_home = workspace.ostraka().join("vendor-home");
-    let routing = route::select(
+    let routing = route::select_until(
         &profiles,
         args.adapter.as_deref(),
         args.review_adapter.as_deref(),
@@ -175,6 +176,7 @@ pub fn execute(
             .policy
             .timeout_secs
             .map(std::time::Duration::from_secs),
+        stop,
     );
     // A routing failure is the moment somebody most needs to know that a CLI
     // this binary can drive is installed and simply has no profile here. The
@@ -227,13 +229,14 @@ pub fn execute(
         skills: skills.as_deref(),
     };
 
-    Ok(orchestrator::run_task(
+    Ok(orchestrator::run_task_until(
         &places,
         &config,
         &routing,
         &task,
         &ActorId::new(&args.reviewer),
         watcher,
+        stop,
     )?)
 }
 
@@ -266,7 +269,12 @@ fn run_with(
     // typing into. Where a run failed for want of a profile and one is
     // installed, the operator is asked; accepting writes it and the run is
     // tried once more, on a workspace that now declares what it uses.
-    let report = match execute(workspace, args, None) {
+    let report = match execute(
+        workspace,
+        args,
+        None,
+        &ostraka_adapter::interrupt::Stop::new(),
+    ) {
         Ok(report) => report,
         Err(e) => {
             let Some(problem) = e.downcast_ref::<crate::discover::NoAdapter>() else {
@@ -280,7 +288,12 @@ fn run_with(
                 !json && crate::offer::at_a_terminal(),
             )?;
             match choice {
-                crate::offer::Choice::Wrote => execute(workspace, args, None)?,
+                crate::offer::Choice::Wrote => execute(
+                    workspace,
+                    args,
+                    None,
+                    &ostraka_adapter::interrupt::Stop::new(),
+                )?,
                 // Once. A second failure is the answer, not another question.
                 crate::offer::Choice::Declined | crate::offer::Choice::NotAsked => return Err(e),
             }

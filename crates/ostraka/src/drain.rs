@@ -14,11 +14,10 @@
 //! buys nothing here: these tasks are subprocesses, not sockets, and there are
 //! as many of them as somebody asked for rather than thousands.
 //!
-//! **One Ctrl-C stops everything, and that is the right answer.** The interrupt
-//! flag is global and its own documentation calls that deliberate: there is one
-//! process and one Ctrl-C. Stopping *one* run of several is a different
-//! question — it is the browser's `s` key, it needs a per-run handle, and it is
-//! not answered here.
+//! **One Ctrl-C stops everything, and that is the right answer.** Each worker's
+//! run has a stop of its own, but a `Stop` also answers to the process-wide
+//! request, so Ctrl-C reaches every worker at once. Stopping *one* run of
+//! several is the browser's `s` key, which asks only the pane in front.
 //!
 //! **Output is a line per task, not a transcript per run.** Four transcripts
 //! interleaved on one terminal are four transcripts nobody can read, so the
@@ -95,7 +94,12 @@ pub fn run(workspace: &Workspace, args: crate::run::Args, workers: usize, json: 
 
                     // `execute` rather than `run`, which prints a transcript.
                     // Four of those at once is four nobody can read.
-                    match crate::run::execute(workspace, &mine, None) {
+                    match crate::run::execute(
+                        workspace,
+                        &mine,
+                        None,
+                        &ostraka_adapter::interrupt::Stop::new(),
+                    ) {
                         Ok(report) => {
                             let outcome = if report.approved() {
                                 approved.fetch_add(1, Ordering::SeqCst);

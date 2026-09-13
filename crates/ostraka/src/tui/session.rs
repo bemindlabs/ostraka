@@ -38,6 +38,9 @@ pub struct Session {
     pub failed: Option<String>,
     /// A stop has been asked for and the vendors have not noticed yet.
     pub stopping: bool,
+    /// This run's own stop. Requesting it stops this run and nothing else;
+    /// Ctrl-C, which is the process-wide request, still stops it too.
+    stop: ostraka_adapter::interrupt::Stop,
     started: Instant,
     steps_in: Option<Receiver<Step>>,
     done_in: Option<Receiver<Result<Finished, String>>>,
@@ -48,35 +51,42 @@ impl Session {
     /// Starts a run on a thread and returns something to watch it with.
     pub fn start(workspace: Workspace, args: run::Args) -> Self {
         let prompt = args.prompt.clone();
-        // Before the thread, not inside it. A stop asked for in the same
-        // breath as the run — n, a task, enter, s — would otherwise be wiped
-        // by the worker clearing the flag a moment later, and the run nobody
-        // wanted would carry on.
-        ostraka_adapter::interrupt::clear();
+        // Made before the thread and owned by this session, not shared. A stop
+        // asked for in the same breath as the run — n, a task, enter, s — lands
+        // on a flag the run is already holding, and asking this pane to stop
+        // cannot reach a run in any other pane.
+        let stop = ostraka_adapter::interrupt::Stop::new();
+        let worker_stop = stop.clone();
         let (steps_out, steps_in) = mpsc::channel();
         let (done_out, done_in) = mpsc::channel();
 
         let worker = std::thread::spawn(move || {
-            let result = run::execute(&workspace, &args, Some(Box::new(Channel(steps_out))))
-                .map(|report| Finished {
-                    run_id: report.record.run_id.clone(),
-                    outcome: report.record.outcome,
-                    summary: match (&report.token, &report.refusal) {
-                        (Some(_), _) => "approved — nothing merged".to_string(),
-                        (None, Some(refusal)) => {
-                            format!("rejected — {}", run::describe(refusal))
-                        }
-                        (None, None) => "rejected".to_string(),
-                    },
-                })
-                // Flattened to a string here, on the thread that produced it.
-                // A boxed error is not `Send`, and the screen has no use for
-                // one that a sentence does not serve better.
-                .map_err(|e| e.to_string());
+            let result = run::execute(
+                &workspace,
+                &args,
+                Some(Box::new(Channel(steps_out))),
+                &worker_stop,
+            )
+            .map(|report| Finished {
+                run_id: report.record.run_id.clone(),
+                outcome: report.record.outcome,
+                summary: match (&report.token, &report.refusal) {
+                    (Some(_), _) => "approved — nothing merged".to_string(),
+                    (None, Some(refusal)) => {
+                        format!("rejected — {}", run::describe(refusal))
+                    }
+                    (None, None) => "rejected".to_string(),
+                },
+            })
+            // Flattened to a string here, on the thread that produced it.
+            // A boxed error is not `Send`, and the screen has no use for
+            // one that a sentence does not serve better.
+            .map_err(|e| e.to_string());
             let _ = done_out.send(result);
         });
 
         Self {
+            stop,
             prompt,
             steps: Vec::new(),
             phase: None,
@@ -143,14 +153,15 @@ impl Session {
         }
     }
 
-    /// Asks the run to stop, the same way Ctrl-C asks the command to.
+    /// Asks this run, and only this run, to stop.
     ///
-    /// The flag is global because a signal is global; the adapters notice
-    /// within a poll and kill what they launched. The run still finishes — as
+    /// Through the run's own stop rather than the process-wide flag, so a run
+    /// in another pane carries on. The adapters and the gate notice within a
+    /// poll and kill what they launched. The run still finishes — as
     /// `Interrupted`, which is its own outcome and not a verdict on the change.
     pub fn stop(&mut self) {
         if self.live() {
-            ostraka_adapter::interrupt::request();
+            self.stop.request();
             self.stopping = true;
         }
     }
@@ -187,6 +198,7 @@ impl Session {
             steps_in: None,
             done_in: None,
             worker: None,
+            stop: ostraka_adapter::interrupt::Stop::new(),
         }
     }
 }
