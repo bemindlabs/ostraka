@@ -131,13 +131,14 @@ pub fn run_task_until(
     //    git ignores is missing from it — and the agent needs the project's
     //    tools as much as the gate does.
     log.enter(Phase::Preparing);
-    match worktree::prepare(
+    match worktree::prepare_until(
         repo,
         wt.path(),
         &config.worktree,
         places.notes,
         places.skills,
         config.gate.timeout_secs.map(std::time::Duration::from_secs),
+        stop,
     ) {
         Ok(steps) => {
             for step in steps {
@@ -146,6 +147,21 @@ pub fn run_task_until(
                     raw: None,
                 })?;
             }
+        }
+        // A setup command that ended because this run was asked to stop is a
+        // stopped run, reported the way a stopped author is. Only the setup
+        // command answers to the stop: a link that could not be made is a real
+        // problem with the environment, and a stop that arrived at the same
+        // moment must not hide it.
+        Err(problem) if problem.step == "setup" && stop.requested() => {
+            return finish(
+                log,
+                record,
+                Outcome::Rejected,
+                None,
+                Some(Refusal::Interrupted),
+                String::new(),
+            );
         }
         Err(problem) => {
             return finish(

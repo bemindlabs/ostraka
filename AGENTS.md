@@ -287,6 +287,31 @@ binary preference beside it: a workspace whose only other profile cannot read
 still gets a pair, a named reviewer is still honoured, and a reviewer that
 actually writes is refused by the tree check above rather than by routing.
 
+**Which reviewers a workspace prefers is the workspace's to say.** Read-only was
+not the whole question. `agy` reviews read-only and was chosen whenever its id
+sorted first, but it is not handed the repository's `AGENTS.md`, so it judged
+changes without the rules they were written under. Routing could not see that,
+because a profile has no way to declare it. Adding that to `Profile` or
+`Capabilities` is a breaking change, since neither is `#[non_exhaustive]`.
+
+So `[routing] reviewers` in `.ostraka/ostraka.toml` lists them, in order, and the
+binary reads it for the same reason it reads `[workspace] repositories`: it is
+about this workspace, not about how a repository is verified. A run nobody named
+a reviewer for takes the first profile on the list that exists here, is not the
+author named for it, and answers. Asking and planning take their read-only
+profile from the same list. A name with no profile behind it is skipped, not
+refused, because the list is written once and a machine may lack one CLI. An
+empty or missing list leaves routing's own ordering as it was. `init` writes
+the profiles that review read-only and are handed the repository's instructions.
+
+**An identity nobody chose is the profile that did the work.** Records and commit
+authors used to say `author` and `reviewer` for every run nobody named anyone
+for, which is true of every run and so tells a log of fifty runs nothing. They
+now name the author and reviewer profiles, which the trailers beside them
+already carry. A named `--author` or `--reviewer` is kept as given. The gate is
+unaffected: routing already refuses an author and reviewer that are one profile,
+so two profile ids always differ.
+
 **Promotion re-asks the gate; it never stores its answer.** A run mints its
 token in memory and the token dies with the process, so `ostraka promote` calls
 `gate::reaffirm`, which builds a token from the run record against the

@@ -43,7 +43,7 @@ $ ostraka run "add a Usage section to README.md" \
     --adapter claude-code --review-adapter codex
 run t2237200-1-20260909T062815Z
   pass  check    25ms
-approved — written by author, reviewed by reviewer
+approved — written by claude-code, reviewed by codex
 ```
 
 The interesting output is the other one. Both of these are real runs against the
@@ -381,7 +381,12 @@ write `@codex/` for the directory.
 is usually right — it prefers a reviewer that is a *different binary* from the
 author, which is the property that makes a review worth having. Naming one is a
 decision, and a decision is honoured; the gate still refuses a reviewer that is
-the author.
+the author. A workspace can say which reviewers it prefers, in order, with
+`[routing] reviewers` in `.ostraka/ostraka.toml`. A run nobody named a reviewer
+for takes the first of them that answers, and `init` writes a list of the
+profiles that review read-only and are handed the repository's own `AGENTS.md`.
+Records and commits name the profiles that did the work, unless `--author` or
+`--reviewer` names someone else.
 
 **`l` looks up a run**, in a dialog rather than a column: a permanent list costs
 half the width of the screen to show something you read once in a while. Opening

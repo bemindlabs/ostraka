@@ -59,6 +59,7 @@ impl Kind {
         } else if project.join("pyproject.toml").is_file()
             || project.join("setup.py").is_file()
             || project.join("requirements.txt").is_file()
+            || has_python_at_root(project)
         {
             Self::Python
         } else {
@@ -74,6 +75,15 @@ impl Kind {
             Self::Unknown => "no recognisable project",
         }
     }
+}
+
+/// Python files sitting at the top of a project, with no manifest to say so.
+fn has_python_at_root(project: &Path) -> bool {
+    std::fs::read_dir(project)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .any(|e| e.path().is_file() && e.path().extension().is_some_and(|x| x == "py"))
 }
 
 /// What will happen to one file.
@@ -401,10 +411,11 @@ fn config_for(kind: Kind) -> String {
     out.push_str("]\n\n");
     if kind == Kind::Unknown {
         out.push_str(
-            "# The check above fails on purpose. Ostraka could not tell what kind of\n\
-             # project this is, and a gate that declares nothing would approve\n\
-             # anything a reviewer waved through. Replace it with the commands you\n\
-             # would want run before trusting a change you did not write.\n\n",
+            "# `declare-your-checks` above fails on purpose. Ostraka could not tell\n\
+             # what kind of project this is, and a gate that declares nothing would\n\
+             # approve anything a reviewer waved through. Replace that check with the\n\
+             # commands you would want run before trusting a change you did not\n\
+             # write, and delete this comment with it.\n\n",
         );
     }
     out.push_str(
@@ -422,6 +433,12 @@ fn config_for(kind: Kind) -> String {
          [gate.review]\n\
          # Whoever wrote a change cannot be the one who approves it.\n\
          must_differ_from_author = true\n\n\
+         [routing]\n\
+         # Who reviews when nobody names a reviewer: the first of these that\n\
+         # answers on this machine. Each one reviews read-only and is handed the\n\
+         # repository's own AGENTS.md, so a change is judged against the rules it\n\
+         # was written under. A profile left off the list can still be named.\n\
+         reviewers = [\"claude-code\", \"codex\", \"copilot-cli\", \"grok\"]\n\n\
          [worktree]\n\
          base = \"worktrees\"\n",
     );
@@ -825,6 +842,40 @@ mod tests {
         assert!(text.contains("/.ostraka/"), "{text}");
         assert!(text.contains("/worktrees/"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_python_project_with_nothing_but_python_files_is_one() {
+        let dir = scratch();
+        std::fs::write(dir.join("main.py"), "print('hi')\n").expect("write");
+        assert_eq!(Kind::detect(&dir), Kind::Python);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_reviewers_init_prefers_are_shipped_and_can_only_read() {
+        let config = config_for(Kind::Rust);
+        let reviewers: Vec<String> = config
+            .lines()
+            .find_map(|line| line.strip_prefix("reviewers = "))
+            .map(|list| {
+                list.trim_matches(|c| c == '[' || c == ']')
+                    .split(',')
+                    .map(|id| id.trim().trim_matches('"').to_string())
+                    .collect()
+            })
+            .expect("a reviewers line");
+        assert!(!reviewers.is_empty());
+        for id in &reviewers {
+            let (_, profile) = TEMPLATES
+                .iter()
+                .find(|(name, _)| name.strip_suffix(".toml") == Some(id.as_str()))
+                .unwrap_or_else(|| panic!("{id} is preferred and not shipped"));
+            assert!(
+                profile.lines().any(|l| l.starts_with("review_args")),
+                "{id} is preferred as a reviewer and has no read-only invocation"
+            );
+        }
     }
 
     #[test]

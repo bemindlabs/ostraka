@@ -82,12 +82,25 @@ impl RepositoriesFrom {
 struct Layout {
     #[serde(default)]
     workspace: LayoutTable,
+    #[serde(default)]
+    routing: RoutingTable,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 struct LayoutTable {
     #[serde(default)]
     repositories: Option<String>,
+}
+
+/// `[routing]`: who this workspace would rather have review, in order.
+///
+/// A workspace's preference, for the same reason as `[workspace]`: which of the
+/// profiles on this machine should judge changes is not a question about how a
+/// repository is verified, and the published `Config` stays untouched.
+#[derive(Debug, Default, serde::Deserialize)]
+struct RoutingTable {
+    #[serde(default)]
+    reviewers: Vec<String>,
 }
 
 /// A path somebody wrote down, made into one this process can use.
@@ -498,6 +511,17 @@ impl Workspace {
     }
 
     /// Reads every `*.toml` in `.ostraka/adapters/`, in sorted order.
+    /// The reviewers this workspace prefers, in order, for a run nobody named
+    /// a reviewer for. Empty where it says nothing, which leaves the choice to
+    /// routing. Read when asked: it is a file somebody edits.
+    pub fn reviewers(&self) -> Vec<String> {
+        std::fs::read_to_string(self.config_path())
+            .ok()
+            .and_then(|text| toml::from_str::<Layout>(&text).ok())
+            .map(|layout| layout.routing.reviewers)
+            .unwrap_or_default()
+    }
+
     pub fn profiles(&self) -> Loaded<Vec<Profile>> {
         let dir = self.adapters();
         if !dir.is_dir() {

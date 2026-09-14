@@ -193,6 +193,33 @@ pub fn prepare(
     skills: Option<&Path>,
     ceiling: Option<std::time::Duration>,
 ) -> std::result::Result<Vec<String>, SetupProblem> {
+    prepare_until(
+        project,
+        worktree,
+        config,
+        notes,
+        skills,
+        ceiling,
+        &ostraka_adapter::interrupt::Stop::new(),
+    )
+}
+
+/// [`prepare`], with the setup command answering to one run's stop as well as
+/// to Ctrl-C.
+///
+/// A setup command used to be the one part of a run only Ctrl-C could stop, so
+/// stopping one pane's run in the browser waited out a `npm ci` it had asked to
+/// end. A setup stopped this way is reported as a setup problem that says it
+/// was stopped; the caller, which knows it asked, reports the run as stopped.
+pub fn prepare_until(
+    project: &Path,
+    worktree: &Path,
+    config: &ostraka_core::config::WorktreeConfig,
+    notes: Option<&Path>,
+    skills: Option<&Path>,
+    ceiling: Option<std::time::Duration>,
+    until: &ostraka_adapter::interrupt::Stop,
+) -> std::result::Result<Vec<String>, SetupProblem> {
     let mut done = Vec::new();
 
     // The workspace's notes, linked rather than copied and rather than
@@ -244,7 +271,7 @@ pub fn prepare(
     }
 
     if let Some(command) = config.setup.as_deref().filter(|c| !c.trim().is_empty()) {
-        let record = crate::gate::run_command(command, worktree, ceiling);
+        let record = crate::gate::run_command_until(command, worktree, ceiling, until);
         if record.exit_code != Some(0) {
             let tail: Vec<&str> = record
                 .stderr
@@ -734,6 +761,35 @@ mod tests {
     #[test]
     fn an_empty_identity_falls_back_rather_than_producing_an_at_sign_alone() {
         assert_eq!(email_local(&ActorId::new("")), "agent");
+    }
+
+    #[test]
+    fn a_setup_command_stops_when_its_run_is_asked_to() {
+        let dir = scratch("setup-stop");
+        let stop = ostraka_adapter::interrupt::Stop::new();
+        let asker = stop.clone();
+        let started = std::time::Instant::now();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            asker.request();
+        });
+        let problem = prepare_until(
+            &dir.join("project"),
+            &dir.join("wt"),
+            &prep_config(&[], Some("sleep 60")),
+            None,
+            None,
+            None,
+            &stop,
+        )
+        .expect_err("a stopped setup is not a prepared worktree");
+        assert_eq!(problem.step, "setup");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the setup outlived its stop: {:?}",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

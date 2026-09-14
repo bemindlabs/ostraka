@@ -87,7 +87,11 @@ impl Consulted {
 /// the one routing already applies to reviewers, except here it refuses rather
 /// than orders: a reviewer that writes is caught by the tree check before a
 /// commit, but a question has no commit to catch it before.
-fn reader(profiles: &[Profile], named: Option<&str>) -> Result<Profile, Failure> {
+fn reader(
+    profiles: &[Profile],
+    named: Option<&str>,
+    preferred: &[String],
+) -> Result<Profile, Failure> {
     if let Some(id) = named {
         let Some(profile) = profiles.iter().find(|p| p.id == id) else {
             return Err(format!("no adapter profile with id {id:?}").into());
@@ -100,6 +104,15 @@ fn reader(profiles: &[Profile], named: Option<&str>) -> Result<Profile, Failure>
             .into());
         }
         return Ok(profile.clone());
+    }
+    // The workspace's reviewers first: the reason to prefer a reviewer, that it
+    // is handed the repository's own rules, is the reason to prefer it here.
+    if let Some(id) = run::preferred_reviewer(preferred, profiles, None, |p| {
+        p.review_args.is_some() && ProcessAdapter::new(p.clone()).probe().is_ready()
+    }) {
+        if let Some(profile) = profiles.iter().find(|p| p.id == id) {
+            return Ok(profile.clone());
+        }
     }
     let mut readers: Vec<&Profile> = profiles
         .iter()
@@ -138,7 +151,7 @@ pub fn consult(
     let config = workspace.config_for(&repo)?;
     config.validate()?;
     let profiles = workspace.profiles()?;
-    let profile = reader(&profiles, args.adapter.as_deref())?;
+    let profile = reader(&profiles, args.adapter.as_deref(), &workspace.reviewers())?;
 
     let id = format!("{}-{}", mode.word(), run::task_id());
     let mut log = RunLog::create(&workspace.ostraka().join("consulted"), &id)?.watched_by(watcher);
@@ -149,15 +162,31 @@ pub fn consult(
     log.enter(Phase::Preparing);
     let notes = workspace.notes_if_present();
     let skills = workspace.skills_if_present();
-    if let Err(problem) = worktree::prepare(
+    if let Err(problem) = worktree::prepare_until(
         &repo.path,
         wt.path(),
         &config.worktree,
         notes.as_deref(),
         skills.as_deref(),
         config.gate.timeout_secs.map(Duration::from_secs),
+        stop,
     ) {
         discard(&repo.path, &wt);
+        // Stopped while its setup command ran: the operator's stop, answered
+        // as one, not a consultation that failed.
+        if problem.step == "setup" && stop.requested() {
+            return Ok(Consulted {
+                id,
+                mode,
+                adapter: profile.id,
+                answer: String::new(),
+                wrote: Vec::new(),
+                worktree: wt.path().to_path_buf(),
+                exit_code: None,
+                diagnostics: None,
+                stopped: true,
+            });
+        }
         return Err(format!(
             "the worktree could not be prepared ({}): {}",
             problem.step, problem.reason
@@ -174,7 +203,7 @@ pub fn consult(
         id: id.clone(),
         prompt: mode.consulting(&args.prompt),
         adapter: profile.id.clone(),
-        author: ActorId::new(&args.author),
+        author: ActorId::new(run::identity(&args.author, run::AUTHOR, &profile.id)),
         base_ref: args.base_ref.clone(),
         model: args.model.clone(),
     };
@@ -438,6 +467,42 @@ mod tests {
             consulted.summary().starts_with("refused"),
             "{}",
             consulted.summary()
+        );
+    }
+
+    #[test]
+    fn a_consultation_stopped_during_setup_is_a_stop_not_a_failure() {
+        let (scratch, workspace) = workspace("setup-stop");
+        let config = scratch.0.join(".ostraka/ostraka.toml");
+        let mut text = std::fs::read_to_string(&config).expect("config");
+        text.push_str("\n[worktree]\nsetup = \"sleep 60\"\n");
+        std::fs::write(&config, text).expect("config");
+
+        let stop = Stop::new();
+        let asker = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            asker.request();
+        });
+        let started = std::time::Instant::now();
+        let consulted = consult(
+            &workspace,
+            &asked("what is the answer?", "reader"),
+            Mode::Ask,
+            None,
+            &stop,
+        )
+        .expect("a stop is an answer, not an error");
+        assert!(consulted.stopped);
+        assert!(!consulted.clean());
+        assert_eq!(consulted.summary(), "stopped by the operator");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "the setup outlived its stop"
+        );
+        assert!(
+            !consulted.worktree.exists(),
+            "a stopped setup left its worktree"
         );
     }
 
