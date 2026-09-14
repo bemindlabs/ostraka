@@ -437,8 +437,16 @@ fn prompt_key(app: &mut App, key: KeyEvent, records_root: &Path) {
             app.pane_mut().history_at = None;
             app.pick = 0;
         }
-        KeyCode::Left => app.pane_mut().left(),
-        KeyCode::Right => app.pane_mut().right(),
+        // Walking into another word is walking away from whatever was picked
+        // in the last one.
+        KeyCode::Left => {
+            app.pane_mut().left();
+            app.pick = 0;
+        }
+        KeyCode::Right => {
+            app.pane_mut().right();
+            app.pick = 0;
+        }
         KeyCode::Up => app.recall(-1),
         KeyCode::Down => app.recall(1),
         KeyCode::PageUp => app.scroll_by(-(app.page as i16)),
@@ -1347,6 +1355,29 @@ mod tests {
         assert!(
             a.thread().live.is_none(),
             "enter ran a task the menu was still completing"
+        );
+    }
+
+    #[test]
+    fn walking_back_into_a_mention_starts_its_menu_at_the_top() {
+        let root = Path::new("/p/.ostraka");
+        let mut a = app();
+        a.mentionable = mention::Mentionable {
+            loaded: true,
+            repository: None,
+            agents: vec![],
+            paths: vec!["src/".into(), "src/main.rs".into()],
+        };
+        typed(&mut a, "@src/ x");
+        // A pick left over from a longer list, which the new word does not have.
+        a.pick = 2;
+        handle(&mut a, press(KeyCode::Left), root);
+        handle(&mut a, press(KeyCode::Left), root);
+        assert_eq!(a.mentioning().as_deref(), Some("src/"));
+        assert_eq!(a.pick, 0);
+        assert_eq!(
+            a.mention_picked().map(|c| c.text),
+            Some("src/main.rs".to_string())
         );
     }
 

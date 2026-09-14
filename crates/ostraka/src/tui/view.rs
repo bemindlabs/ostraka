@@ -553,7 +553,9 @@ impl App {
     }
 
     pub fn mention_picked(&self) -> Option<Candidate> {
-        self.mention_matches().get(self.pick).cloned()
+        let matches = self.mention_matches();
+        let at = self.pick.min(matches.len().saturating_sub(1));
+        matches.get(at).cloned()
     }
 
     /// Reads what `@` can name, once for each repository a pane is in.
@@ -1451,14 +1453,15 @@ fn render_mention(frame: &mut Frame, app: &App, box_area: Rect) {
     };
     // The kind is the last word on the row, and the path has what is left.
     let room = usize::from(width).saturating_sub(18);
-    let first = app.pick.saturating_sub(SHOWN - 1);
+    let pick = app.pick.min(matches.len().saturating_sub(1));
+    let first = pick.saturating_sub(SHOWN - 1);
     let lines: Vec<Line<'static>> = matches
         .iter()
         .enumerate()
         .skip(first)
         .take(SHOWN)
         .map(|(i, candidate)| {
-            let here = i == app.pick;
+            let here = i == pick;
             Line::from(vec![
                 Span::styled(if here { theme::CURSOR } else { " " }, theme::accent()),
                 Span::styled(

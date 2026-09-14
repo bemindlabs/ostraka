@@ -179,28 +179,34 @@ pub fn complete(prompt: &str, at: usize, candidate: &Candidate) -> Option<(Strin
 /// `@src/`, an id with a typo, an address — is text, and stays in the task.
 pub fn agents_named(prompt: &str, agents: &[String]) -> (String, Option<String>, Option<String>) {
     let mut named: Vec<String> = Vec::new();
-    let lines: Vec<String> = prompt
-        .split('\n')
-        .map(|line| {
-            let mut kept: Vec<&str> = Vec::new();
-            for word in line.split(' ') {
-                let id = word
-                    .strip_prefix('@')
-                    .filter(|id| agents.iter().any(|a| a == id));
-                match id {
-                    Some(id) if named.len() < 2 => named.push(id.to_string()),
-                    _ => kept.push(word),
-                }
+    let mut task = String::with_capacity(prompt.len());
+    let mut rest = prompt;
+    while !rest.is_empty() {
+        let word_at = rest
+            .find(|c: char| !c.is_whitespace())
+            .unwrap_or(rest.len());
+        let (space, after) = rest.split_at(word_at);
+        let word_len = after.find(char::is_whitespace).unwrap_or(after.len());
+        let (word, tail) = after.split_at(word_len);
+        task.push_str(space);
+        let id = word
+            .strip_prefix('@')
+            .filter(|id| agents.iter().any(|a| a == id));
+        match id {
+            // The name goes, with one space after it, so `@codex fix it` is
+            // `fix it`. Nothing else is rewritten: a task's indentation, tabs
+            // and double spaces can be part of what is being asked.
+            Some(id) if named.len() < 2 => {
+                named.push(id.to_string());
+                rest = tail.strip_prefix(' ').unwrap_or(tail);
+                continue;
             }
-            kept.join(" ").trim_end().to_string()
-        })
-        .collect();
+            _ => task.push_str(word),
+        }
+        rest = tail;
+    }
     let mut named = named.into_iter();
-    (
-        lines.join("\n").trim().to_string(),
-        named.next(),
-        named.next(),
-    )
+    (task.trim().to_string(), named.next(), named.next())
 }
 
 /// Every path git would show in `repo`, and every directory above one.
@@ -333,6 +339,14 @@ mod tests {
         let (task, author, _) = agents_named("mail me@example.org about @nobody", &agents);
         assert_eq!(task, "mail me@example.org about @nobody");
         assert_eq!(author, None);
+    }
+
+    #[test]
+    fn taking_an_agent_out_rewrites_nothing_else() {
+        let agents = vec!["codex".to_string()];
+        let (task, author, _) = agents_named("@codex fix this:\n    keep  two\tspaces", &agents);
+        assert_eq!(task, "fix this:\n    keep  two\tspaces");
+        assert_eq!(author.as_deref(), Some("codex"));
     }
 
     #[test]
