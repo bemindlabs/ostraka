@@ -335,7 +335,10 @@ starts a fresh thread from `HEAD`.
 
 **The box has the keys.** What you type is the task; `enter` runs it, `alt-enter`
 takes another line, and the up arrow offers back what you have asked here
-before. `esc` hands the keys back for a moment — `n` takes the box again. Every
+before. The left and right arrows move through the task, and a click in the box
+puts the cursor on the character under it. The browser reads the mouse to do
+that, so the wheel scrolls what you are reading, and selecting text to copy
+needs shift held — option in Terminal.app and iTerm2. `esc` hands the keys back for a moment — `n` takes the box again. Every
 command is also on the `ctrl-x` leader and in the `ctrl-k` palette, and the list
 of commands is the authority for all three, so a key cannot do what the palette
 has decided not to offer.
