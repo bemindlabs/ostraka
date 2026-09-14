@@ -440,12 +440,28 @@ with fifty runs behind it that read as a browser that had lost them. The
 opening screen summarises the five most recent — enough to recognise where the
 work got to, and not a second list.
 
-**Panes are switched between, not shown side by side.** A pane is a line of
+**Panes sit side by side where there is room, and take turns where there is not.** A pane is a line of
 work — a thread, the repository it runs in, and the task being written into it
 — and everything else belongs to the workspace and stays where it is. Two
 transcripts on an eighty-column terminal are two transcripts nobody can read,
 and the width is what this screen spends on the thing being read; which pane you
 are in is a row at the top, and it only appears once there is more than one.
+
+That sentence was the whole decision while it was true of every terminal, and it
+never was of a wide one. From 160 columns, two eighty-column transcripts can
+both be read, so each pane gets a column of its own, up to three, one more for
+every eighty columns. Below that the old rule holds unchanged. There is still one
+box and one breadcrumb, and both belong to the pane in front, which is the
+column with its name underlined. The layout is the operator's to arrange: `<`
+and `>` swap the pane in front with its neighbour, and `+`, `-` and `=` change
+its share of the width. All five are on the leader and in the palette, and the
+three widths are offered only while the panes are side by side, where a width
+means anything. A weight is a share, not a width: every column gets its minimum
+first and the weights share out the rest, so a pane made as narrow as it goes
+can still be read. With more panes than columns, the window follows the pane in
+front. A click on a column gives it the keys. The wheel scrolls the column under
+it. A column beside the one in front keeps its own scroll instead of jumping
+whenever the keys move.
 
 **Every pane can run, and stopping one pane stops only that pane.** This read
 "one run at a time across every pane" for as long as the reason it gave was

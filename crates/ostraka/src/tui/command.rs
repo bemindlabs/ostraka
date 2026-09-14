@@ -22,6 +22,8 @@ pub struct Situation {
     pub running: bool,
     /// How many lines of work are open.
     pub panes: usize,
+    /// The panes are drawn side by side, which is when a width means anything.
+    pub split: bool,
     /// Something outside the project's own configuration is in the way, and
     /// the browser knows the steps out of it.
     pub blocked: bool,
@@ -41,6 +43,11 @@ pub enum Command {
     NewPane,
     NextPane,
     ClosePane,
+    MovePaneLeft,
+    MovePaneRight,
+    WiderPane,
+    NarrowerPane,
+    EvenPanes,
     NextDetail,
     Promote,
     Prune,
@@ -53,7 +60,7 @@ pub enum Command {
 impl Command {
     /// In the order the palette offers them: what someone reaches for most,
     /// first.
-    pub const ALL: [Command; 18] = [
+    pub const ALL: [Command; 23] = [
         Command::NewRun,
         Command::Stop,
         Command::Fix,
@@ -65,6 +72,11 @@ impl Command {
         Command::NewPane,
         Command::NextPane,
         Command::ClosePane,
+        Command::MovePaneLeft,
+        Command::MovePaneRight,
+        Command::WiderPane,
+        Command::NarrowerPane,
+        Command::EvenPanes,
         Command::NextDetail,
         Command::Promote,
         Command::Prune,
@@ -87,6 +99,11 @@ impl Command {
             Command::NewPane => "new pane",
             Command::NextPane => "next pane",
             Command::ClosePane => "close this pane",
+            Command::MovePaneLeft => "move pane left",
+            Command::MovePaneRight => "move pane right",
+            Command::WiderPane => "widen this pane",
+            Command::NarrowerPane => "narrow this pane",
+            Command::EvenPanes => "even out the panes",
             Command::NextDetail => "next section",
             Command::Promote => "promote run",
             Command::Prune => "prune worktrees",
@@ -111,6 +128,11 @@ impl Command {
             Command::NewPane => "t",
             Command::NextPane => "]",
             Command::ClosePane => "X",
+            Command::MovePaneLeft => "<",
+            Command::MovePaneRight => ">",
+            Command::WiderPane => "+",
+            Command::NarrowerPane => "-",
+            Command::EvenPanes => "=",
             Command::NextDetail => "tab",
             Command::Promote => "p",
             Command::Prune => "u",
@@ -139,6 +161,13 @@ impl Command {
             Command::NewPane => 't',
             Command::NextPane => ']',
             Command::ClosePane => 'c',
+            // The shapes of what they do, which is easier to find again than a
+            // letter chosen because it was free.
+            Command::MovePaneLeft => '<',
+            Command::MovePaneRight => '>',
+            Command::WiderPane => '+',
+            Command::NarrowerPane => '-',
+            Command::EvenPanes => '=',
             Command::NextDetail => 'd',
             Command::Promote => 'p',
             // `p` is taken and prune is the second thing on this row; `u` is
@@ -164,6 +193,11 @@ impl Command {
             Command::NewPane => "another line of work, open beside this one",
             Command::NextPane => "move to the next line of work",
             Command::ClosePane => "close this line of work",
+            Command::MovePaneLeft => "swap this pane with the one to its left",
+            Command::MovePaneRight => "swap this pane with the one to its right",
+            Command::WiderPane => "give this pane more of the width",
+            Command::NarrowerPane => "give this pane less of the width",
+            Command::EvenPanes => "give every pane the same width",
             Command::NextDetail => "checks, then events, then the diff",
             Command::Promote => "give an approved run a branch; merges nothing",
             // No mention of branches here. The dialog says what is kept, at the
@@ -196,6 +230,11 @@ impl Command {
             Command::NewPane => "pane",
             Command::NextPane => "next",
             Command::ClosePane => "close",
+            Command::MovePaneLeft => "left",
+            Command::MovePaneRight => "right",
+            Command::WiderPane => "wider",
+            Command::NarrowerPane => "narrower",
+            Command::EvenPanes => "even",
             Command::NextDetail => "detail",
             Command::Promote => "promote",
             Command::Prune => "prune",
@@ -245,7 +284,13 @@ impl Command {
                 Command::Fresh => !situation.running,
                 // Only where there is more than one line of work to move
                 // between or close.
-                Command::NextPane | Command::ClosePane => situation.panes > 1,
+                Command::NextPane
+                | Command::ClosePane
+                | Command::MovePaneLeft
+                | Command::MovePaneRight => situation.panes > 1,
+                // A width is a share of a screen the panes are sharing. Switched
+                // between, each one has all of it.
+                Command::WiderPane | Command::NarrowerPane | Command::EvenPanes => situation.split,
                 _ => true,
             })
             .collect()
@@ -274,6 +319,7 @@ mod tests {
         running: false,
         blocked: false,
         panes: 1,
+        split: false,
     };
 
     #[test]
@@ -330,9 +376,28 @@ mod tests {
         // Everything but stopping a run that is not going, setting up a
         // directory that is already set up, and fixing what is not broken.
         // Everything but stopping a run that is not going, setting up a
-        // directory that is already set up, fixing what is not broken, and
-        // moving between or closing panes there is only one of.
-        assert_eq!(Command::matching("", IDLE).len(), Command::ALL.len() - 5);
+        // directory that is already set up, fixing what is not broken,
+        // moving between, closing or moving panes there is only one of, and
+        // sizing panes that are not side by side.
+        assert_eq!(Command::matching("", IDLE).len(), Command::ALL.len() - 10);
+    }
+
+    #[test]
+    fn a_pane_is_sized_only_while_the_panes_share_the_screen() {
+        let several = Situation { panes: 2, ..IDLE };
+        assert!(Command::offered(several).contains(&Command::MovePaneLeft));
+        assert!(!Command::offered(several).contains(&Command::WiderPane));
+        let split = Situation {
+            split: true,
+            ..several
+        };
+        for command in [
+            Command::WiderPane,
+            Command::NarrowerPane,
+            Command::EvenPanes,
+        ] {
+            assert!(Command::offered(split).contains(&command), "{command:?}");
+        }
     }
 
     #[test]

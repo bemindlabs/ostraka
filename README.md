@@ -366,11 +366,12 @@ quitting can discard the task in the box and stop a run that is going.
 `ctrl-t` (`cmd-t` on macOS) opens another line of work beside this one — its
 own thread, its own repository, its own half-written task — and `ctrl-]`
 (`cmd-]` on macOS) moves between them. They
-are switched between rather than shown side by side: two transcripts on an
-eighty-column terminal are two transcripts nobody can read. Runs still happen
-one at a time across all of them, because the request to stop is a single flag;
-a pane with something going is marked on the bar, and says so by name when it
-finishes.
+sit side by side from 160 columns, up to three at once, and take turns on
+anything narrower, where two transcripts would be two nobody can read. Each pane
+runs on its own, a pane with something going is marked, and a pane says so by
+name when its run finishes. Arrange them from the leader: `<` and `>` move the
+pane in front left or right, `+` and `-` widen or narrow it, and `=` evens them
+out. A click on a column gives that pane the keys.
 
 Typing `/` in the box offers the commands at the box, filtered as you type;
 `/settings` shows what this thread and this project are set to. Opening a

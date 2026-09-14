@@ -24,7 +24,7 @@ use crate::chord::label;
 use crate::init::{Action, Plan};
 use crate::remedy::Remedy;
 use crate::tui::command::{Command, Situation};
-use crate::tui::pane::Pane;
+use crate::tui::pane::{self, Pane};
 use crate::tui::theme;
 use crate::tui::thread::{Thread, Turn};
 use crate::workspace::{Repository, Workspace};
@@ -192,6 +192,11 @@ pub struct App {
     /// scrolled, so a click can be read against what was actually on screen.
     pub prompt_text: Rect,
     pub prompt_scroll: u16,
+    /// Which pane each column was drawn for, and where, at the last draw.
+    /// Empty while one pane has the screen.
+    pub columns: Vec<(usize, Rect)>,
+    /// The first pane shown when there are more panes than columns.
+    pub first: usize,
 }
 
 impl App {
@@ -232,6 +237,8 @@ impl App {
             quit: false,
             prompt_text: Rect::default(),
             prompt_scroll: 0,
+            columns: Vec::new(),
+            first: 0,
         }
     }
 
@@ -271,10 +278,61 @@ impl App {
     /// The repository is carried over because a second pane is usually a
     /// second thing to do in the same place; `w` moves it somewhere else.
     pub fn open_pane(&mut self) {
+        self.park();
         let repository = self.pane().repository.clone();
         self.panes.push(Pane::new(repository));
         self.at = self.panes.len() - 1;
         self.scroll = 0;
+    }
+
+    /// Keeps where the pane in front was scrolled to, so a column still on the
+    /// screen does not jump when another pane takes the keys.
+    fn park(&mut self) {
+        let scroll = self.scroll;
+        self.pane_mut().scroll = scroll;
+    }
+
+    /// Gives another pane the keys and moves nothing else.
+    pub fn focus_pane(&mut self, index: usize) {
+        if index >= self.panes.len() || index == self.at {
+            return;
+        }
+        self.park();
+        self.at = index;
+        self.scroll = self.pane().scroll;
+    }
+
+    /// Swaps this pane with its neighbour. The keys go with it, because the
+    /// pane being moved is the one somebody is arranging.
+    pub fn move_pane(&mut self, delta: isize) -> bool {
+        let Some(to) = self
+            .at
+            .checked_add_signed(delta)
+            .filter(|to| *to < self.panes.len())
+        else {
+            return false;
+        };
+        self.panes.swap(self.at, to);
+        self.at = to;
+        true
+    }
+
+    /// Gives this pane a larger or smaller share of the width.
+    pub fn resize_pane(&mut self, delta: i16) -> bool {
+        let pane = self.pane_mut();
+        let weight = pane
+            .weight
+            .saturating_add_signed(delta)
+            .clamp(1, pane::MAX_WEIGHT);
+        let changed = weight != pane.weight;
+        pane.weight = weight;
+        changed
+    }
+
+    pub fn even_panes(&mut self) {
+        for pane in &mut self.panes {
+            pane.weight = pane::WEIGHT;
+        }
     }
 
     /// Moves to the next pane, wrapping.
@@ -282,6 +340,7 @@ impl App {
         if self.panes.len() < 2 {
             return;
         }
+        self.park();
         let count = self.panes.len() as isize;
         self.at = ((self.at as isize + delta).rem_euclid(count)) as usize;
         self.scroll = 0;
@@ -365,6 +424,7 @@ impl App {
             running: self.pane().running(),
             blocked: self.blocked.is_some(),
             panes: self.panes.len(),
+            split: self.columns.len() > 1,
         }
     }
 
@@ -526,11 +586,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     );
 
     let content = theme::inset(rows[3]);
+    app.columns.clear();
     if app.setup.is_some() {
         render_setup(frame, app, content);
     } else {
         match app.screen {
-            Screen::Work => render_work(frame, app, content),
+            Screen::Work => match columns_for(app, screen.width) {
+                1 => render_work(frame, app, content),
+                count => render_columns(frame, app, content, count),
+            },
             Screen::Record => render_record(frame, app, content),
         }
     }
@@ -667,21 +731,165 @@ fn where_we_are(project: &Path) -> String {
     }
 }
 
+/// The narrowest terminal that puts panes side by side. Two columns of eighty
+/// are two transcripts somebody can read; below that, switching reads better.
+const SPLIT_WIDTH: u16 = 160;
+/// How much width each further column needs before it is added.
+const COLUMN: u16 = 80;
+/// The width every column is given before the weights share out the rest, so
+/// a pane made as narrow as it goes is still a pane somebody can read.
+const COLUMN_MIN: u16 = 48;
+/// More than this and each is too narrow to be worth the room it takes.
+const MAX_COLUMNS: usize = 3;
+/// A rule down the middle of a cell either side of it.
+const SEAM: u16 = 3;
+
+/// How many panes the work screen shows at once on a terminal this wide.
+fn columns_for(app: &App, width: u16) -> usize {
+    if width < SPLIT_WIDTH {
+        return 1;
+    }
+    app.panes
+        .len()
+        .min(MAX_COLUMNS)
+        .min(usize::from(width / COLUMN))
+        .max(1)
+}
+
+/// Shares `total` cells between columns by weight, after giving each column its
+/// minimum. Whatever rounding leaves over goes to the last column.
+fn column_widths(total: u16, weights: &[u16]) -> Vec<u16> {
+    let count = u16::try_from(weights.len()).unwrap_or(u16::MAX).max(1);
+    let floor = COLUMN_MIN.min(total / count);
+    let spare = u32::from(total.saturating_sub(floor * count));
+    let sum = weights.iter().map(|w| u32::from(*w)).sum::<u32>().max(1);
+    let mut widths: Vec<u16> = weights
+        .iter()
+        .map(|w| floor + u16::try_from(spare * u32::from(*w) / sum).unwrap_or(0))
+        .collect();
+    let used: u16 = widths.iter().sum();
+    if let Some(last) = widths.last_mut() {
+        *last += total.saturating_sub(used);
+    }
+    widths
+}
+
+/// The panes side by side, each in its own column, with the pane in front
+/// always among them.
+fn render_columns(frame: &mut Frame, app: &mut App, area: Rect, count: usize) {
+    if app.at < app.first {
+        app.first = app.at;
+    }
+    if app.at >= app.first + count {
+        app.first = app.at + 1 - count;
+    }
+    app.first = app.first.min(app.panes.len() - count);
+
+    let shown: Vec<usize> = (app.first..app.first + count).collect();
+    let weights: Vec<u16> = shown.iter().map(|i| app.panes[*i].weight).collect();
+    let seams = SEAM * (count as u16 - 1);
+    let widths = column_widths(area.width.saturating_sub(seams), &weights);
+
+    let mut x = area.x;
+    for (n, (index, width)) in shown.into_iter().zip(widths).enumerate() {
+        if n > 0 {
+            let rule: Vec<Line<'static>> = (0..area.height)
+                .map(|_| Line::from(Span::styled(theme::CONTINUE, theme::muted())))
+                .collect();
+            frame.render_widget(
+                Paragraph::new(rule),
+                Rect {
+                    x: x + 1,
+                    width: 1,
+                    ..area
+                },
+            );
+            x += SEAM;
+        }
+        let column = Rect { x, width, ..area };
+        x += width;
+        app.columns.push((index, column));
+        render_column(frame, app, index, column);
+    }
+}
+
+/// One pane's column: which pane it is, then its transcript.
+fn render_column(frame: &mut Frame, app: &mut App, index: usize, area: Rect) {
+    let front = index == app.at;
+    let pane = &app.panes[index];
+    let mut head = vec![
+        Span::styled(
+            format!("{} ", index + 1),
+            if front {
+                theme::accent()
+            } else {
+                theme::muted()
+            },
+        ),
+        Span::styled(
+            truncate(&pane.title(), area.width.saturating_sub(6) as usize),
+            if front {
+                theme::accent().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else {
+                theme::muted()
+            },
+        ),
+    ];
+    if pane.running() {
+        head.push(Span::styled(" \u{b7}", theme::on(theme::WARN)));
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(head)),
+        Rect {
+            height: area.height.min(1),
+            ..area
+        },
+    );
+    let body = Rect {
+        y: area.y.saturating_add(1),
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    render_transcript(frame, app, index, body);
+}
+
 /// The thread: everything asked here, and what came of it.
 fn render_work(frame: &mut Frame, app: &mut App, area: Rect) {
-    app.page = area.height.saturating_sub(1).max(1);
-    if app.thread().is_empty() {
-        frame.render_widget(Paragraph::new(opening(app, area.width, area.height)), area);
+    render_transcript(frame, app, app.at, area);
+}
+
+/// One pane's thread. The pane in front scrolls with the screen and sets the
+/// page the page keys move by; any other keeps the place it was left at.
+fn render_transcript(frame: &mut Frame, app: &mut App, index: usize, area: Rect) {
+    let front = index == app.at;
+    if front {
+        app.page = area.height.saturating_sub(1).max(1);
+    }
+    if app.panes[index].thread.is_empty() {
+        let lines = if front {
+            opening(app, area.width, area.height)
+        } else {
+            vec![dim("Nothing asked in this pane yet.".to_string())]
+        };
+        frame.render_widget(Paragraph::new(lines), area);
         return;
     }
 
-    let lines = thread_lines(app.thread(), area.width, app.tick);
+    let lines = thread_lines(&app.panes[index].thread, area.width, app.tick);
     let overflow = lines.len().saturating_sub(area.height as usize) as u16;
-    if app.pane().follow {
-        app.scroll = overflow;
+    let pane = &app.panes[index];
+    let scroll = match (pane.follow, front) {
+        (true, _) => overflow,
+        (false, true) => app.scroll,
+        (false, false) => pane.scroll,
     }
-    app.scroll = app.scroll.min(overflow);
-    frame.render_widget(Paragraph::new(lines).scroll((app.scroll, 0)), area);
+    .min(overflow);
+    if front {
+        app.scroll = scroll;
+    } else {
+        app.panes[index].scroll = scroll;
+    }
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), area);
 }
 
 /// What is on screen before anything has been asked in this session.
@@ -1804,6 +2012,8 @@ fn render_keys(frame: &mut Frame, screen: Rect) {
             concat!(label!("]"), " / ", label!("[")),
             "move between them",
         ),
+        ("< / >", "move this pane left or right"),
+        ("+ / - / =", "wider, narrower, even \u{2014} side by side"),
         ("s", "ask a running agent to stop"),
         ("l", "the runs recorded here"),
         ("w", "the repositories, and n starts one"),
@@ -3383,6 +3593,124 @@ mod tests {
             !out.contains("tokens"),
             "the totals outlived the message:\n{out}"
         );
+    }
+
+    #[test]
+    fn panes_sit_side_by_side_on_a_wide_terminal_and_take_turns_on_a_narrow_one() {
+        let mut app = App::new(nowhere(), Vec::new());
+        // Longer than the bar shows, so only a column can show all of it.
+        turn(&mut app, "the task written in the first pane", vec![], None);
+        app.open_pane();
+        turn(
+            &mut app,
+            "the task written in the second pane",
+            vec![],
+            None,
+        );
+
+        let wide = screen(&mut app, 200, 30);
+        assert!(
+            wide.contains("the task written in the first pane"),
+            "{wide}"
+        );
+        assert!(
+            wide.contains("the task written in the second pane"),
+            "{wide}"
+        );
+        assert_eq!(app.columns.len(), 2);
+        assert!(app.situation().split);
+
+        let narrow = screen(&mut app, 120, 30);
+        assert!(
+            !narrow.contains("the task written in the first pane"),
+            "{narrow}"
+        );
+        assert!(
+            narrow.contains("the task written in the second pane"),
+            "{narrow}"
+        );
+        assert!(app.columns.is_empty());
+        assert!(!app.situation().split);
+    }
+
+    #[test]
+    fn the_screen_fits_a_wide_terminal_with_panes_side_by_side() {
+        let mut app = App::new(nowhere(), Vec::new());
+        for _ in 0..4 {
+            app.open_pane();
+        }
+        for (width, height) in [(160, 24), (200, 30), (320, 50)] {
+            let out = screen(&mut app, width, height);
+            for line in out.lines() {
+                assert!(line.chars().count() <= width as usize, "{line}");
+            }
+            for (_, column) in &app.columns {
+                assert!(column.right() <= width, "a column ran off the screen");
+            }
+        }
+    }
+
+    #[test]
+    fn a_wider_pane_takes_width_from_the_rest_and_none_goes_below_the_minimum() {
+        assert_eq!(column_widths(200, &[3, 3]), vec![100, 100]);
+        let lopsided = column_widths(200, &[pane::MAX_WEIGHT, 1]);
+        assert!(lopsided[0] > lopsided[1]);
+        assert!(lopsided[1] >= COLUMN_MIN, "{lopsided:?}");
+        assert_eq!(lopsided.iter().sum::<u16>(), 200);
+        assert_eq!(column_widths(241, &[3, 3, 3]).iter().sum::<u16>(), 241);
+    }
+
+    #[test]
+    fn more_panes_than_columns_keep_the_one_in_front_on_screen() {
+        let mut app = App::new(nowhere(), Vec::new());
+        for _ in 0..4 {
+            app.open_pane();
+        }
+        screen(&mut app, 200, 30);
+        assert_eq!(app.columns.len(), 2);
+        assert!(
+            app.columns.iter().any(|(i, _)| *i == 4),
+            "{:?}",
+            app.columns
+        );
+
+        app.focus_pane(0);
+        screen(&mut app, 200, 30);
+        assert!(
+            app.columns.iter().any(|(i, _)| *i == 0),
+            "{:?}",
+            app.columns
+        );
+    }
+
+    #[test]
+    fn moving_a_pane_swaps_it_with_its_neighbour_and_the_keys_go_with_it() {
+        let mut app = App::new(nowhere(), Vec::new());
+        app.pane_mut().prompt = "left".to_string();
+        app.open_pane();
+        app.pane_mut().prompt = "right".to_string();
+
+        assert!(app.move_pane(-1));
+        assert_eq!(app.at, 0);
+        assert_eq!(app.pane().prompt, "right");
+        assert_eq!(app.panes[1].prompt, "left");
+        assert!(!app.move_pane(-1), "moved past the edge");
+    }
+
+    #[test]
+    fn a_column_beside_the_one_in_front_keeps_its_place() {
+        let mut app = App::new(nowhere(), Vec::new());
+        let steps: Vec<Step> = (0..60).map(|_| Step::Entered(Phase::Authoring)).collect();
+        turn(&mut app, "a long transcript", steps, None);
+        screen(&mut app, 200, 30);
+        app.scroll_by(-10);
+        screen(&mut app, 200, 30);
+        let place = app.scroll;
+
+        app.open_pane();
+        screen(&mut app, 200, 30);
+        assert_eq!(app.panes[0].scroll, place, "the column jumped");
+        assert!(!app.panes[0].follow);
     }
 
     #[test]

@@ -206,7 +206,30 @@ fn mouse(app: &mut App, event: MouseEvent) {
     if app.dialog.is_some() {
         return;
     }
+    let column = app
+        .columns
+        .iter()
+        .find(|(_, area)| area.contains(Position::new(event.column, event.row)))
+        .map(|(index, _)| *index);
     match event.kind {
+        // A click on a column gives that pane the keys, and nothing else: the
+        // task somebody was writing in it is still there to go on with.
+        MouseEventKind::Down(MouseButton::Left) if column.is_some() => {
+            app.focus_pane(column.unwrap_or(app.at));
+            app.focus = Focus::Prompt;
+        }
+        // The wheel scrolls the column under it, which may not be the one in
+        // front.
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            if column.is_some_and(|index| index != app.at) =>
+        {
+            let up = matches!(event.kind, MouseEventKind::ScrollUp);
+            let pane = &mut app.panes[column.unwrap_or(app.at)];
+            pane.scroll = pane.scroll.saturating_add_signed(if up { -3 } else { 3 });
+            if up {
+                pane.follow = false;
+            }
+        }
         MouseEventKind::Down(MouseButton::Left) => {
             let area = app.prompt_text;
             if !area.contains(Position::new(event.column, event.row)) {
@@ -427,6 +450,11 @@ fn command_key(app: &mut App, key: KeyEvent, records_root: &Path) {
         KeyCode::Char('t') => perform(app, Command::NewPane, records_root),
         KeyCode::Char(']') => perform(app, Command::NextPane, records_root),
         KeyCode::Char('X') => perform(app, Command::ClosePane, records_root),
+        KeyCode::Char('<') => perform(app, Command::MovePaneLeft, records_root),
+        KeyCode::Char('>') => perform(app, Command::MovePaneRight, records_root),
+        KeyCode::Char('+') => perform(app, Command::WiderPane, records_root),
+        KeyCode::Char('-') => perform(app, Command::NarrowerPane, records_root),
+        KeyCode::Char('=') => perform(app, Command::EvenPanes, records_root),
         KeyCode::Char('j') | KeyCode::Down => {
             app.move_by(1);
             load_detail(app, records_root);
@@ -543,6 +571,21 @@ fn perform(app: &mut App, command: Command, records_root: &Path) {
                 to_work(app);
             }
         }
+        Command::MovePaneLeft | Command::MovePaneRight => {
+            let left = command == Command::MovePaneLeft;
+            if !app.move_pane(if left { -1 } else { 1 }) {
+                let side = if left { "left" } else { "right" };
+                app.status = Some(format!("this pane is already the {side}most"));
+            }
+        }
+        Command::WiderPane | Command::NarrowerPane => {
+            let wider = command == Command::WiderPane;
+            if !app.resize_pane(if wider { 1 } else { -1 }) {
+                let limit = if wider { "wide" } else { "narrow" };
+                app.status = Some(format!("this pane is as {limit} as it goes"));
+            }
+        }
+        Command::EvenPanes => app.even_panes(),
         Command::Promote => app.status = Some(promote_selected(app)),
         Command::Reload => match index::list(records_root) {
             Ok(runs) => {
@@ -573,7 +616,12 @@ fn unavailable(app: &App, command: Command) -> String {
         }
         Command::Stop => "nothing is running in this pane".to_string(),
         Command::Fix => "nothing is in the way".to_string(),
-        Command::NextPane | Command::ClosePane => "this is the only pane".to_string(),
+        Command::NextPane | Command::ClosePane | Command::MovePaneLeft | Command::MovePaneRight => {
+            "this is the only pane".to_string()
+        }
+        Command::WiderPane | Command::NarrowerPane | Command::EvenPanes => {
+            "a width is a share of the screen \u{2014} panes share it from 160 columns".to_string()
+        }
         Command::Setup => "this directory is already set up".to_string(),
         other => format!("{} is not available here", other.name()),
     }
@@ -1185,6 +1233,60 @@ mod tests {
         assert_eq!(a.focus, Focus::Prompt);
         typed(&mut a, ",");
         assert_eq!(a.pane().prompt, "hello, world");
+    }
+
+    fn drawn(a: &mut App, width: u16, height: u16) {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                .expect("terminal");
+        terminal.draw(|frame| view::draw(frame, a)).expect("draws");
+    }
+
+    #[test]
+    fn a_click_on_a_column_gives_that_pane_the_keys_and_keeps_both_tasks() {
+        let root = Path::new("/p/.ostraka");
+        let mut a = app();
+        typed(&mut a, "left task");
+        handle(&mut a, chord('t'), root);
+        typed(&mut a, "right task");
+        drawn(&mut a, 200, 30);
+
+        let (index, area) = a.columns[0];
+        assert_eq!(index, 0);
+        mouse(&mut a, click(area.x + 2, area.y + 3));
+        assert_eq!(a.at, 0);
+        typed(&mut a, "!");
+        assert_eq!(a.pane().prompt, "left task!");
+        assert_eq!(a.panes[1].prompt, "right task");
+    }
+
+    #[test]
+    fn the_panes_are_arranged_from_the_keys() {
+        let root = Path::new("/p/.ostraka");
+        let mut a = app();
+        handle(&mut a, chord('t'), root);
+        assert_eq!(a.at, 1);
+
+        handle(&mut a, chord('x'), root);
+        handle(&mut a, press(KeyCode::Char('<')), root);
+        assert_eq!(a.at, 0, "the pane did not move left");
+
+        // Not side by side yet, so a width has nothing to be a share of.
+        handle(&mut a, chord('x'), root);
+        handle(&mut a, press(KeyCode::Char('+')), root);
+        assert_eq!(a.pane().weight, pane::WEIGHT);
+        assert!(a.status.as_deref().is_some_and(|s| s.contains("160")));
+
+        drawn(&mut a, 200, 30);
+        handle(&mut a, chord('x'), root);
+        handle(&mut a, press(KeyCode::Char('+')), root);
+        assert_eq!(a.pane().weight, pane::WEIGHT + 1);
+        drawn(&mut a, 200, 30);
+        assert!(a.columns[0].1.width > a.columns[1].1.width);
+
+        handle(&mut a, chord('x'), root);
+        handle(&mut a, press(KeyCode::Char('=')), root);
+        assert_eq!(a.pane().weight, pane::WEIGHT);
     }
 
     #[test]
