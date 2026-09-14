@@ -356,7 +356,7 @@ command for themselves. `ctrl-c` stays control everywhere.
 |---|---|---|---|
 | `auto` | runs the task | yes | yes |
 | `ask` | answers a question from the repository | no | nothing to gate |
-| `plan` | writes a plan; enter on an empty box then runs it | no, until you agree | the run is |
+| `plan` | writes a plan; enter on an empty box then runs it | no, until you agree | the run that follows is |
 | `loop` | runs the task, and if it is refused, tries again with the reason, up to three times | yes | every attempt |
 
 `/ask`, `/plan`, `/loop` and `/auto` in the box choose one too, and
