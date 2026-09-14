@@ -368,6 +368,15 @@ again after a failed check, a sent-back change or no change at all. It never
 tries again after a vendor error, a timeout, a stop or a policy violation. No
 mode merges anything.
 
+**`@` names a file, a directory or an agent.** Typing `@` offers what it could
+be, and tab completes it. A directory opens one level down; anything else is
+finished with a space. A path such as `@src/main.rs` stays in the task, and the
+agent reads it from its worktree. An agent such as `@codex` leaves the task and
+writes this one run. A second agent named reviews it. The thread's own choice of
+agents is unchanged. Paths are what git would show, so nothing it ignores is
+offered. A name that is both an agent and a directory is taken as the agent;
+write `@codex/` for the directory.
+
 **`a` chooses who writes and who reviews.** Routing picks a pair on its own and
 is usually right — it prefers a reviewer that is a *different binary* from the
 author, which is the property that makes a review worth having. Naming one is a
