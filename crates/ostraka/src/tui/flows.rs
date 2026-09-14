@@ -21,6 +21,7 @@
 
 use super::view::{App, Dialog, Focus, Screen};
 use super::{handle, take_stock};
+use crate::chord::{self, label};
 use crate::workspace::Workspace;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -184,6 +185,16 @@ impl Driver {
         self
     }
 
+    /// A browser chord, held with whatever this platform holds them with.
+    fn chord(&mut self, c: char) -> &mut Self {
+        handle(
+            &mut self.app,
+            KeyEvent::new(KeyCode::Char(c), chord::MODIFIER),
+            &self.records_root,
+        );
+        self
+    }
+
     fn ctrl(&mut self, c: char) -> &mut Self {
         handle(
             &mut self.app,
@@ -308,7 +319,7 @@ fn setting_up_a_directory_leaves_a_browser_that_can_run_something() {
     d.shows("cannot run anything yet");
     assert!(d.app.thread().live.is_none());
 
-    d.ctrl('x').key(KeyCode::Char('i'));
+    d.chord('x').key(KeyCode::Char('i'));
     d.hides("not an Ostraka project yet");
     d.shows("Write a task below");
     assert!(
@@ -338,7 +349,7 @@ fn onboarding_an_empty_workspace_says_what_is_missing_before_it_is_missed() {
     d.shows("fails on purpose");
 
     // Taking the offer does not make the warning untrue, so it stays.
-    d.ctrl('x').key(KeyCode::Char('i'));
+    d.chord('x').key(KeyCode::Char('i'));
     assert!(scratch.path().join(".ostraka/ostraka.toml").is_file());
     assert!(
         d.app.blocked.is_some(),
@@ -358,7 +369,7 @@ fn a_task_in_a_repository_git_does_not_know_offers_the_steps_out_of_it() {
     // is what an operator who copied a directory rather than cloning one has.
     std::fs::create_dir_all(scratch.path().join("repositories/work")).expect("repository");
     let mut d = Driver::open(scratch.path());
-    d.ctrl('x').key(KeyCode::Char('i'));
+    d.chord('x').key(KeyCode::Char('i'));
 
     d.typed("write a file").key(KeyCode::Enter);
     assert!(
@@ -405,7 +416,7 @@ fn a_task_in_a_repository_git_does_not_know_offers_the_steps_out_of_it() {
     );
     d.key(KeyCode::Esc);
 
-    d.ctrl('x').key(KeyCode::Char('x'));
+    d.chord('x').key(KeyCode::Char('x'));
     d.shows("nothing is in the way");
     assert!(d.app.blocked.is_none());
 }
@@ -417,10 +428,10 @@ fn a_workspace_with_nothing_in_it_can_start_a_repository_and_work_in_it() {
     // init` does not do — the commit a worktree branches from.
     let scratch = Scratch::new("start-here");
     let mut d = Driver::open(scratch.path());
-    d.ctrl('x').key(KeyCode::Char('i'));
+    d.chord('x').key(KeyCode::Char('i'));
     d.shows("Nothing has been cloned into");
 
-    d.ctrl('x').key(KeyCode::Char('w'));
+    d.chord('x').key(KeyCode::Char('w'));
     assert_eq!(d.app.dialog, Some(Dialog::Repos));
     d.shows("start one here");
 
@@ -437,7 +448,7 @@ fn a_workspace_with_nothing_in_it_can_start_a_repository_and_work_in_it() {
         d.app.blocked.is_some(),
         "a repository with no commits read as ready"
     );
-    d.ctrl('x').key(KeyCode::Char('x'));
+    d.chord('x').key(KeyCode::Char('x'));
     d.shows("no commits");
     d.shows("Commit what is here");
 }
@@ -689,7 +700,7 @@ fn choosing_an_agent_the_workspace_has_not_written_writes_it_first() {
     let dir = scratch.path();
     let mut d = Driver::open(dir);
 
-    d.ctrl('x').key(KeyCode::Char('a'));
+    d.chord('x').key(KeyCode::Char('a'));
     assert_eq!(d.app.dialog, Some(Dialog::Agents));
 
     // A profile this build ships, which this workspace does not have. `codex`
@@ -744,7 +755,7 @@ fn only_what_is_installed_is_ever_offered() {
     let _guard = exclusive();
     let scratch = project("agents-offer", 0);
     let mut d = Driver::open(scratch.path());
-    d.ctrl('x').key(KeyCode::Char('a'));
+    d.chord('x').key(KeyCode::Char('a'));
 
     assert!(
         d.app.agents.iter().any(|a| a.configured),
@@ -780,7 +791,7 @@ fn the_browser_shows_what_a_run_left_before_it_removes_any_of_it() {
     d.task("write a file");
     assert!(!d.last().approved(), "the gate let it through");
 
-    d.ctrl('x').key(KeyCode::Char('u'));
+    d.chord('x').key(KeyCode::Char('u'));
     assert_eq!(d.app.dialog, Some(Dialog::Prune));
     assert_eq!(
         d.app.leftovers.len(),
@@ -796,7 +807,7 @@ fn the_browser_shows_what_a_run_left_before_it_removes_any_of_it() {
     d.key(KeyCode::Esc);
     assert!(left.is_dir(), "esc removed something");
 
-    d.ctrl('x').key(KeyCode::Char('u'));
+    d.chord('x').key(KeyCode::Char('u'));
     d.key(KeyCode::Char('y'));
     assert!(!left.exists(), "y did not remove the worktree");
     assert_eq!(d.app.dialog, None);
@@ -889,7 +900,7 @@ fn a_run_can_be_stopped_from_the_browser_and_is_not_called_a_verdict() {
     d.typed("a task nobody wants finished").key(KeyCode::Enter);
     // In the same breath as starting it, which is the ordering that used to
     // lose the request to the run clearing the flag behind it.
-    d.ctrl('x').key(KeyCode::Char('s'));
+    d.chord('x').key(KeyCode::Char('s'));
     assert!(d.app.thread().live.as_ref().expect("a session").stopping);
     d.shows("stopping");
 
@@ -909,7 +920,7 @@ fn two_panes_run_at_once_and_stopping_one_leaves_the_other_going() {
     d.typed("the first task").key(KeyCode::Enter);
     assert!(d.app.thread().running(), "the first run did not start");
 
-    d.ctrl('t');
+    d.chord('t');
     d.typed("the second task").key(KeyCode::Enter);
     assert!(
         d.app.thread().running(),
@@ -923,7 +934,7 @@ fn two_panes_run_at_once_and_stopping_one_leaves_the_other_going() {
     );
 
     // Stop the pane in front, and only it.
-    d.ctrl('x').key(KeyCode::Char('s'));
+    d.chord('x').key(KeyCode::Char('s'));
     d.until("the second run to stop", |app| {
         app.thread().turns.len() == 1
     });
@@ -943,8 +954,8 @@ fn two_panes_run_at_once_and_stopping_one_leaves_the_other_going() {
     );
 
     // And the first stops on its own when it is asked.
-    d.ctrl(']');
-    d.ctrl('x').key(KeyCode::Char('s'));
+    d.chord(']');
+    d.chord('x').key(KeyCode::Char('s'));
     d.until("the first run to stop", |app| {
         app.panes[0].thread.turns.len() == 1
     });
@@ -985,7 +996,7 @@ fn a_run_is_looked_up_in_a_dialog_and_read_on_a_screen_of_its_own() {
     d.task("write a file");
     d.task("write it again");
 
-    d.ctrl('x').key(KeyCode::Char('l'));
+    d.chord('x').key(KeyCode::Char('l'));
     assert_eq!(d.app.dialog, Some(Dialog::Runs));
     d.shows("write a file");
     d.shows("enter opens it");
@@ -1021,7 +1032,7 @@ fn the_agents_dialog_names_who_writes_and_who_reviews() {
     let scratch = project("agents", 0);
     let mut d = Driver::open(scratch.path());
 
-    d.ctrl('x').key(KeyCode::Char('a'));
+    d.chord('x').key(KeyCode::Char('a'));
     assert_eq!(d.app.dialog, Some(Dialog::Agents));
     d.shows("automatic");
     d.shows("writer");
@@ -1053,7 +1064,7 @@ fn a_fresh_thread_goes_back_to_head() {
     d.task("write a file");
     assert!(d.app.thread().continuing());
 
-    d.ctrl('x').key(KeyCode::Char('f'));
+    d.chord('x').key(KeyCode::Char('f'));
     assert_eq!(d.app.thread().base_ref, "HEAD");
     assert!(d.app.thread().turns.is_empty());
     // The thread is empty; the directory is not, and the screen says which.
@@ -1073,13 +1084,13 @@ fn the_palette_reaches_a_command_by_name_and_the_leader_by_letter() {
     .expect("write");
     let mut d = Driver::open(scratch.path());
 
-    d.ctrl('k').typed("keys").key(KeyCode::Enter);
+    d.chord('k').typed("keys").key(KeyCode::Enter);
     assert_eq!(d.app.dialog, Some(Dialog::Keys));
     d.shows("promote a record");
-    d.shows("ctrl-x");
+    d.shows(label!("x"));
     d.key(KeyCode::Esc);
 
-    d.ctrl('x').key(KeyCode::Char('h'));
+    d.chord('x').key(KeyCode::Char('h'));
     assert_eq!(d.app.dialog, Some(Dialog::Keys));
     d.key(KeyCode::Esc);
     assert_eq!(d.app.dialog, None);

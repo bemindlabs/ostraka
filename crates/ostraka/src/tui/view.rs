@@ -20,6 +20,7 @@
 //! colour of something being tested, the reviewer is its own — so a transcript
 //! can be scanned for "what did the reviewer say" without reading it.
 
+use crate::chord::label;
 use crate::init::{Action, Plan};
 use crate::remedy::Remedy;
 use crate::tui::command::{Command, Situation};
@@ -629,7 +630,10 @@ fn pane_bar(app: &App, width: u16) -> Line<'static> {
     }
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     if used + 16 <= width as usize {
-        spans.push(Span::styled("    ctrl-t new", theme::muted()));
+        spans.push(Span::styled(
+            concat!("    ", label!("t"), " new"),
+            theme::muted(),
+        ));
     }
     Line::from(spans)
 }
@@ -984,7 +988,11 @@ fn render_prompt(frame: &mut Frame, app: &App, area: Rect) {
 
     let text: Vec<Line<'static>> = if !writing && app.pane().prompt.is_empty() {
         vec![Line::from(Span::styled(
-            "n  write a task     l  runs     ctrl-k  commands     ?  keys",
+            concat!(
+                "n  write a task     l  runs     ",
+                label!("k"),
+                "  commands     ?  keys"
+            ),
             theme::muted(),
         ))]
     } else {
@@ -1266,10 +1274,10 @@ pub fn settings_rows(app: &App) -> Vec<(&'static str, String, bool)> {
 /// what falls off the end is what falls off the end.
 fn commands_row(app: &App, width: u16) -> Line<'static> {
     let mut spans = vec![
-        Span::styled("ctrl-x", theme::on(theme::WARN)),
+        Span::styled(label!("x"), theme::on(theme::WARN)),
         Span::styled("  ", theme::muted()),
     ];
-    let mut used = 8usize;
+    let mut used = label!("x").len() + 2;
     for (i, command) in Command::offered(app.situation()).iter().enumerate() {
         let text = format!("{} {}", command.leader(), command.name());
         let sep = usize::from(i > 0) * 3;
@@ -1314,7 +1322,10 @@ fn status_bar(app: &App, width: u16) -> Line<'static> {
         return Line::from(Span::styled(status.clone(), theme::on(theme::WARN)));
     }
     if app.leader {
-        let mut spans = vec![Span::styled("ctrl-x  ", theme::on(theme::WARN))];
+        let mut spans = vec![Span::styled(
+            concat!(label!("x"), "  "),
+            theme::on(theme::WARN),
+        )];
         for (i, command) in Command::offered(app.situation()).iter().enumerate() {
             if i > 0 {
                 spans.push(Span::styled(" \u{b7} ", theme::muted()));
@@ -1741,8 +1752,11 @@ fn render_keys(frame: &mut Frame, screen: Rect) {
         ("up / down", "what you have asked here before"),
         ("esc", "put the task aside, and take the keys back"),
         ("n", "take the box back"),
-        ("ctrl-t", "another line of work, open beside this one"),
-        ("ctrl-] / ctrl-[", "move between them"),
+        (label!("t"), "another line of work, open beside this one"),
+        (
+            concat!(label!("]"), " / ", label!("[")),
+            "move between them",
+        ),
         ("s", "ask a running agent to stop"),
         ("l", "the runs recorded here"),
         ("w", "the repositories, and n starts one"),
@@ -1750,8 +1764,8 @@ fn render_keys(frame: &mut Frame, screen: Rect) {
         ("p", "promote a record; merges nothing"),
         ("u", "clear the worktrees finished runs left"),
         ("pgup / pgdn", "scroll"),
-        ("ctrl-k", "commands"),
-        ("ctrl-x", "leader: the same commands, one key away"),
+        (label!("k"), "commands"),
+        (label!("x"), "leader: the same commands, one key away"),
         ("?", "this list"),
         ("q", "quit"),
     ];
@@ -2572,7 +2586,7 @@ mod tests {
         // box on the work screen, so the bare `w` this used to offer typed a
         // letter into the box and opened nothing. Commands are behind the
         // leader, and the step says so.
-        assert!(out.contains("ctrl-x w"), "{out}");
+        assert!(out.contains(concat!(label!("x"), " w")), "{out}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2889,7 +2903,7 @@ mod tests {
         app.focus = Focus::Keys;
         let idle = screen(&mut app, 100, 18);
         assert!(idle.contains("write a task"), "{idle}");
-        assert!(idle.contains("ctrl-k"), "{idle}");
+        assert!(idle.contains(label!("k")), "{idle}");
     }
 
     #[test]
@@ -3329,7 +3343,7 @@ mod tests {
         let mut app = App::new(nowhere(), Vec::new());
         app.leader = true;
         let out = screen(&mut app, 120, 16);
-        assert!(out.contains("ctrl-x"), "{out}");
+        assert!(out.contains(label!("x")), "{out}");
         assert!(out.contains("write a task"), "{out}");
     }
 
@@ -3338,7 +3352,7 @@ mod tests {
         let mut app = App::new(nowhere(), Vec::new());
         app.open(Dialog::Keys);
         let out = screen(&mut app, 110, 26);
-        assert!(out.contains("ctrl-x"), "{out}");
+        assert!(out.contains(label!("x")), "{out}");
         assert!(out.contains("alt-enter"), "{out}");
         assert!(out.contains("esc closes this"), "{out}");
     }
@@ -3435,13 +3449,13 @@ mod tests {
     fn the_pane_bar_appears_only_when_there_is_something_to_navigate() {
         let mut app = App::new(nowhere(), Vec::new());
         // One line of work needs no bar saying which one it is.
-        assert!(!screen(&mut app, 100, 20).contains("ctrl-t new"));
+        assert!(!screen(&mut app, 100, 20).contains(concat!(label!("t"), " new")));
 
         app.open_pane();
         let out = screen(&mut app, 100, 20);
         assert!(out.contains("1 new"), "{out}");
         assert!(out.contains("2 new"), "{out}");
-        assert!(out.contains("ctrl-t new"), "{out}");
+        assert!(out.contains(concat!(label!("t"), " new")), "{out}");
     }
 
     #[test]
@@ -3479,20 +3493,20 @@ mod tests {
 
         let short = screen(&mut app, 92, 20);
         assert!(
-            !short.contains("ctrl-x  n"),
+            !short.contains(concat!(label!("x"), "  n")),
             "a short terminal lost a row to the commands:\n{short}"
         );
         assert!(!short.contains("writes "), "{short}");
 
         let medium = screen(&mut app, 92, 30);
-        assert!(medium.contains("ctrl-x  n"), "{medium}");
+        assert!(medium.contains(concat!(label!("x"), "  n")), "{medium}");
         assert!(
             !medium.contains("writes "),
             "the routing row arrived before there was room:\n{medium}"
         );
 
         let tall = screen(&mut app, 92, 40);
-        assert!(tall.contains("ctrl-x  n"), "{tall}");
+        assert!(tall.contains(concat!(label!("x"), "  n")), "{tall}");
         assert!(tall.contains("writes automatic"), "{tall}");
 
         // And the status line survives all three, because it is the one that
@@ -3513,7 +3527,7 @@ mod tests {
             .lines()
             .find(|l| l.contains(" write a task"))
             .expect("the commands row");
-        assert!(row.contains("ctrl-x"), "the chord is not named: {row}");
+        assert!(row.contains(label!("x")), "the chord is not named: {row}");
     }
 
     #[test]

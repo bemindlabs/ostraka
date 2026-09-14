@@ -1,7 +1,7 @@
 //! Walking a remedy from a shell.
 //!
 //! The browser has been able to take these steps since it learned to diagnose
-//! anything: `ctrl-x x` names the problem, shows the way out of it, and takes
+//! anything: the leader then `x` names the problem, shows the way out of it, and takes
 //! one step per keypress. The command line could only ever say what was wrong.
 //!
 //! The steps themselves are [`crate::remedy`], which is why they moved out of
