@@ -288,6 +288,12 @@ impl App {
     /// Keeps where the pane in front was scrolled to, so a column still on the
     /// screen does not jump when another pane takes the keys.
     fn park(&mut self) {
+        // Only the work screen's scroll belongs to a pane. The record screen
+        // scrolls the same field, and parking it would move a column to wherever
+        // a record had been read to.
+        if self.screen != Screen::Work {
+            return;
+        }
         let scroll = self.scroll;
         self.pane_mut().scroll = scroll;
     }
@@ -299,7 +305,9 @@ impl App {
         }
         self.park();
         self.at = index;
-        self.scroll = self.pane().scroll;
+        if self.screen == Screen::Work {
+            self.scroll = self.pane().scroll;
+        }
     }
 
     /// Swaps this pane with its neighbour. The keys go with it, because the
@@ -3681,6 +3689,23 @@ mod tests {
             "{:?}",
             app.columns
         );
+    }
+
+    #[test]
+    fn reading_a_record_does_not_move_a_pane_it_was_not_about() {
+        let mut app = App::new(nowhere(), Vec::new());
+        app.pane_mut().scroll = 7;
+        app.screen = Screen::Record;
+        app.scroll = 40;
+        app.open_pane();
+        assert_eq!(
+            app.panes[0].scroll, 7,
+            "a record's scroll was parked in a pane"
+        );
+        // Opening a pane starts its screen at the top; the record is read again.
+        app.scroll = 40;
+        app.focus_pane(0);
+        assert_eq!(app.scroll, 40, "a pane's scroll was put over the record");
     }
 
     #[test]
