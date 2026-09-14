@@ -142,7 +142,7 @@ impl Plan {
 /// Kept here rather than read from disk because the binary is installed on its
 /// own; a profile someone has to fetch separately is a profile they will not
 /// have.
-pub const TEMPLATES: [(&str, &str); 6] = [
+pub const TEMPLATES: [(&str, &str); 7] = [
     ("agy.toml", include_str!("../templates/agy.toml")),
     (
         "claude-code.toml",
@@ -155,6 +155,10 @@ pub const TEMPLATES: [(&str, &str); 6] = [
     ),
     ("grok.toml", include_str!("../templates/grok.toml")),
     ("kimi-cli.toml", include_str!("../templates/kimi-cli.toml")),
+    (
+        "kimi-code.toml",
+        include_str!("../templates/kimi-code.toml"),
+    ),
 ];
 
 /// Writes one shipped profile into a workspace's `adapters/`.

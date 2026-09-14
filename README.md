@@ -520,7 +520,7 @@ have to be injectable, and an injectable gate is a bypassable gate.
 
 ## Vendors
 
-Adapter profiles are data. Six ship, each run end to end before it was
+Adapter profiles are data. Seven ship, each run end to end before it was
 committed:
 
 | Profile | CLI |
@@ -530,9 +530,10 @@ committed:
 | `copilot-cli` | `copilot` |
 | `grok` | `grok` |
 | `kimi-cli` | `kimi-cli` |
+| `kimi-code` | `kimi` |
 | `agy` | `agy` |
 
-Adding a seventh is a TOML file in `adapters/`, not a release: point `command` at
+Adding an eighth is a TOML file in `adapters/`, not a release: point `command` at
 a CLI on your PATH and `ostraka adapters` will find it. No vendor name appears
 anywhere in the runtime. See [`adapters/README.md`](adapters/README.md).
 

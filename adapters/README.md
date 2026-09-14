@@ -15,6 +15,7 @@ them can actually run on this machine; `ostraka check` validates all of them.
 | `copilot-cli` | `copilot` | yes |
 | `grok` | `grok` | yes |
 | `kimi-cli` | `kimi-cli` | yes |
+| `kimi-code` | `kimi` | yes |
 | `agy` | `agy` | yes |
 
 Nothing is shipped that has not been run end to end. A profile for a CLI you have
@@ -184,6 +185,7 @@ reading a file.
 | `copilot` | no user-level instructions path exists | yes | `--no-custom-instructions`, which also drops the repository's |
 | `grok` | yes, and twice over — its own `~/.grok`, *and* another vendor's `~/.claude` by design | yes | `GROK_HOME` for the first, nine `compat.*` variables for the second |
 | `kimi-cli` | yes — skills, plugins, MCP registry and history, all under `~/.kimi` | yes | `KIMI_SHARE_DIR`, with `config.toml` carried |
+| `kimi` (Kimi Code) | yes — its own `AGENTS.md` and user-scoped skills, under `~/.kimi-code` | yes | `KIMI_CODE_HOME`, with `config.toml` carried |
 | `agy` | none found to inherit | n/a | none needed — and none arrives either, see below |
 
 Instruction files turned out to be the smaller half. A baseline `claude -p` in an
@@ -308,6 +310,19 @@ across every vendor.
   `~/.claude/skills` and `~/.codex/skills`, which are home-derived and outside
   what `KIMI_SHARE_DIR` moves; `--skills-dir` overrides discovery but refuses a
   directory that does not exist, so it cannot be shipped unconditionally.
+- **Kimi Code is a different program from Kimi CLI, and it has the same gap
+  in a stricter form.** Its prompt mode writes, and `--plan`, `--yolo` and
+  `--auto` are all refused with `--prompt` rather than silently ignored. It has
+  one headless posture and no read-only one, so the profile declares no
+  `review_args` and is an author only. Asking and planning refuse it for the
+  same reason.
+- **Kimi Code's relocation was measured in both directions.** A home
+  containing an `AGENTS.md` canary and a user skill passed both to the model. A
+  home built the way a run builds it, with `credentials` and `config.toml` only,
+  passed neither, and the repository's `AGENTS.md` still arrived. The variable
+  does not reach `~/.agents/skills`, which is found from the home directory
+  itself. It was empty on the machine this was measured on, so nothing leaked,
+  but the profile cannot promise that for any other machine.
 - **A relocated home accumulates.** Sessions, caches and a vendor's own memory
   store live there across runs. It is isolation from the operator, not a fresh
   sandbox each time.
