@@ -19,6 +19,7 @@ mod theme;
 mod thread;
 mod view;
 
+use crate::chord::{self, label};
 use crate::init;
 use crate::workspace::Workspace;
 use command::Command;
@@ -57,7 +58,16 @@ pub fn run(workspace: &Workspace) -> Outcome {
     // Installs a panic hook that restores the terminal first. Without it a
     // panic leaves the operator staring at a shell with no echo and no prompt.
     let mut terminal = ratatui::try_init()?;
+    // After ratatui's hook, so a panic gives the keyboard back before the
+    // terminal is restored rather than leaving the shell in the protocol.
+    let restore = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        chord::leave();
+        restore(info);
+    }));
+    chord::enter();
     let result = event_loop(&mut terminal, &mut app, &records_root);
+    chord::leave();
     ratatui::restore();
     result?;
 
@@ -237,18 +247,21 @@ fn handle(app: &mut App, key: KeyEvent, records_root: &Path) {
     // swallow the key that opens the commands. Then a half-finished chord, then
     // what is open over the screen, then whoever has the keyboard.
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    // Command on macOS, control elsewhere. Leaving stays on control everywhere,
+    // because command-c is copy.
+    let held = chord::held(key.modifiers);
     match key.code {
-        KeyCode::Char('k') if control => return app.open(Dialog::Commands),
-        KeyCode::Char('x') if control => {
+        KeyCode::Char('k') if held => return app.open(Dialog::Commands),
+        KeyCode::Char('x') if held => {
             app.leader = true;
             return;
         }
         KeyCode::Char('c') if control => return leave(app),
         // Panes are switched between while the box has the keys, so they are
         // chords rather than letters.
-        KeyCode::Char('t') if control => return perform(app, Command::NewPane, records_root),
-        KeyCode::Char(']') if control => return perform(app, Command::NextPane, records_root),
-        KeyCode::Char('[') if control => {
+        KeyCode::Char('t') if held => return perform(app, Command::NewPane, records_root),
+        KeyCode::Char(']') if held => return perform(app, Command::NextPane, records_root),
+        KeyCode::Char('[') if held => {
             app.next_pane(-1);
             to_work(app);
             return;
@@ -506,10 +519,12 @@ fn perform(app: &mut App, command: Command, records_root: &Path) {
 fn unavailable(app: &App, command: Command) -> String {
     let situation = app.situation();
     match command {
-        Command::NewRun if situation.running => {
-            "a run is already going in this pane \u{2014} s asks it to stop, ctrl-t opens another"
-                .to_string()
-        }
+        Command::NewRun if situation.running => concat!(
+            "a run is already going in this pane \u{2014} s asks it to stop, ",
+            label!("t"),
+            " opens another"
+        )
+        .to_string(),
         Command::NewRun => {
             "this directory cannot run anything yet \u{2014} i sets it up".to_string()
         }
@@ -1069,6 +1084,11 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
+    /// A browser chord, held with whatever this platform holds them with.
+    fn chord(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), chord::MODIFIER)
+    }
+
     fn app() -> App {
         App::new(Workspace::at(Path::new("/p")), Vec::new())
     }
@@ -1107,11 +1127,11 @@ mod tests {
         // box with no way out of it.
         let mut a = app();
         typed(&mut a, "half a task");
-        handle(&mut a, control('k'), Path::new("/p/.ostraka"));
+        handle(&mut a, chord('k'), Path::new("/p/.ostraka"));
         assert_eq!(a.dialog, Some(Dialog::Commands));
         handle(&mut a, press(KeyCode::Esc), Path::new("/p/.ostraka"));
 
-        handle(&mut a, control('x'), Path::new("/p/.ostraka"));
+        handle(&mut a, chord('x'), Path::new("/p/.ostraka"));
         assert!(a.leader);
         assert_eq!(a.pane().prompt, "half a task", "the chords ate the task");
     }
@@ -1133,7 +1153,7 @@ mod tests {
     #[test]
     fn the_leader_acts_and_then_disarms() {
         let mut a = app();
-        handle(&mut a, control('x'), Path::new("/p/.ostraka"));
+        handle(&mut a, chord('x'), Path::new("/p/.ostraka"));
         handle(&mut a, press(KeyCode::Char('q')), Path::new("/p/.ostraka"));
         assert!(!a.leader, "the leader outlived the key that completed it");
         assert_eq!(a.dialog, Some(Dialog::Leaving));
@@ -1168,9 +1188,9 @@ mod tests {
     #[test]
     fn a_leader_letter_nobody_uses_disarms_rather_than_doing_something_else() {
         // The dangerous version is a chord that falls through to the box:
-        // ctrl-x then a stray letter would then be typed into the task.
+        // the leader then a stray letter would then be typed into the task.
         let mut a = app();
-        handle(&mut a, control('x'), Path::new("/p/.ostraka"));
+        handle(&mut a, chord('x'), Path::new("/p/.ostraka"));
         handle(&mut a, press(KeyCode::Char('z')), Path::new("/p/.ostraka"));
         assert!(!a.leader);
         assert!(!a.quit);
@@ -1251,13 +1271,13 @@ mod tests {
         let mut a = app();
         assert_eq!(a.panes.len(), 1);
 
-        handle(&mut a, control('t'), Path::new("/p/.ostraka"));
+        handle(&mut a, chord('t'), Path::new("/p/.ostraka"));
         assert_eq!(a.panes.len(), 2);
         assert_eq!(a.at, 1);
 
-        handle(&mut a, control(']'), Path::new("/p/.ostraka"));
+        handle(&mut a, chord(']'), Path::new("/p/.ostraka"));
         assert_eq!(a.at, 0, "the next pane wrapped the wrong way");
-        handle(&mut a, control('['), Path::new("/p/.ostraka"));
+        handle(&mut a, chord('['), Path::new("/p/.ostraka"));
         assert_eq!(a.at, 1);
     }
 
@@ -1267,16 +1287,16 @@ mod tests {
         // and looking at something else.
         let mut a = app();
         typed(&mut a, "the first thought");
-        handle(&mut a, control('t'), Path::new("/p/.ostraka"));
+        handle(&mut a, chord('t'), Path::new("/p/.ostraka"));
         assert!(
             a.pane().prompt.is_empty(),
             "a new pane opened with the old task in it"
         );
 
         typed(&mut a, "the second");
-        handle(&mut a, control(']'), Path::new("/p/.ostraka"));
+        handle(&mut a, chord(']'), Path::new("/p/.ostraka"));
         assert_eq!(a.pane().prompt, "the first thought");
-        handle(&mut a, control(']'), Path::new("/p/.ostraka"));
+        handle(&mut a, chord(']'), Path::new("/p/.ostraka"));
         assert_eq!(a.pane().prompt, "the second");
     }
 
@@ -1287,7 +1307,7 @@ mod tests {
         // is asked.
         let mut a = app();
         running(&mut a);
-        handle(&mut a, control('t'), Path::new("/p/.ostraka"));
+        handle(&mut a, chord('t'), Path::new("/p/.ostraka"));
         assert!(!a.pane().running(), "the new pane inherited the run");
         assert!(a.anything_running(), "the first pane's run went away");
         assert!(
@@ -1310,7 +1330,7 @@ mod tests {
     fn a_pane_is_not_closed_out_from_under_a_run() {
         // Closing it would abandon the thread writing into a worktree.
         let mut a = app();
-        handle(&mut a, control('t'), Path::new("/p/.ostraka"));
+        handle(&mut a, chord('t'), Path::new("/p/.ostraka"));
         running(&mut a);
         a.focus = Focus::Keys;
         handle(&mut a, press(KeyCode::Char('X')), Path::new("/p/.ostraka"));
@@ -1337,8 +1357,8 @@ mod tests {
     #[test]
     fn a_closed_pane_leaves_the_screen_on_one_that_is_still_there() {
         let mut a = app();
-        handle(&mut a, control('t'), Path::new("/p/.ostraka"));
-        handle(&mut a, control('t'), Path::new("/p/.ostraka"));
+        handle(&mut a, chord('t'), Path::new("/p/.ostraka"));
+        handle(&mut a, chord('t'), Path::new("/p/.ostraka"));
         assert_eq!(a.at, 2);
 
         a.focus = Focus::Keys;
@@ -1401,7 +1421,7 @@ mod tests {
         // complete the chord and the leader stayed armed for ever.
         let mut a = app();
         a.open(Dialog::Keys);
-        handle(&mut a, control('x'), Path::new("/p/.ostraka"));
+        handle(&mut a, chord('x'), Path::new("/p/.ostraka"));
         assert!(a.leader);
         handle(&mut a, press(KeyCode::Char('q')), Path::new("/p/.ostraka"));
         assert!(!a.leader, "the leader was swallowed and stayed armed");
@@ -1411,7 +1431,7 @@ mod tests {
     #[test]
     fn a_dialog_takes_the_keys_before_anything_else_does() {
         let mut a = app();
-        handle(&mut a, control('x'), Path::new("/p/.ostraka"));
+        handle(&mut a, chord('x'), Path::new("/p/.ostraka"));
         handle(&mut a, press(KeyCode::Char('h')), Path::new("/p/.ostraka"));
         assert_eq!(a.dialog, Some(Dialog::Keys));
 
@@ -1427,7 +1447,7 @@ mod tests {
     #[test]
     fn the_palette_types_rather_than_running_commands_by_their_letters() {
         let mut a = app();
-        handle(&mut a, control('k'), Path::new("/p/.ostraka"));
+        handle(&mut a, chord('k'), Path::new("/p/.ostraka"));
         typed(&mut a, "quit");
         assert_eq!(a.query, "quit");
         assert!(!a.quit, "typing a command's name ran it");
@@ -1515,7 +1535,7 @@ mod tests {
         // In every pane, not only the one in front.
         let mut a = app();
         running(&mut a);
-        handle(&mut a, control('t'), Path::new("/p/.ostraka"));
+        handle(&mut a, chord('t'), Path::new("/p/.ostraka"));
         running(&mut a);
         handle(&mut a, control('c'), Path::new("/p/.ostraka"));
         handle(&mut a, press(KeyCode::Char('y')), Path::new("/p/.ostraka"));

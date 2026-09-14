@@ -4,6 +4,7 @@ mod adapters;
 mod banner;
 mod bench;
 mod check;
+mod chord;
 mod discover;
 mod drain;
 mod fix;

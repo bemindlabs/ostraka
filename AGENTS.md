@@ -656,6 +656,21 @@ keystroke has to be read — an open dialog first, then what is being typed into
 then a half-finished chord, then the browser — because any other order lets `q`
 close the browser out from under someone reading the help.
 
+**On macOS the chords are held with command, and only with command.** The
+leader, the palette and the pane chords are `cmd-` there and `ctrl-` everywhere
+else. `chord` holds the modifier and the label together, so the key handler, the
+screen, the steps out of a problem and the tests cannot name different keys.
+`ctrl-c` stays control on every platform, because it is the interrupt and
+command-c is copy, and so does `ctrl-j`, which is a line feed.
+
+The cost is stated plainly, and the operator chose it anyway. A terminal program
+hears command only over the kitty keyboard protocol, which the browser asks for
+on the way in and gives back on the way out, including on a panic. Terminal.app
+and iTerm2 keep command for themselves: `cmd-x` cuts, `cmd-k` clears and `cmd-t`
+opens a tab. So on those two terminals, the leader, the palette and the panes
+cannot be reached by a chord. The bare keys and `/` in the box still reach every
+command. Accepting control as well on macOS was offered and was declined.
+
 **Nothing waits forever.** `policy.timeout_secs` spent this project's life
 declared, documented as a wall-clock ceiling, and read by nothing — which is
 worse than absent, because someone sets it and believes their fleet is bounded.

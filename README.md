@@ -340,6 +340,13 @@ command is also on the `ctrl-x` leader and in the `ctrl-k` palette, and the list
 of commands is the authority for all three, so a key cannot do what the palette
 has decided not to offer.
 
+On macOS every chord is held with command instead — `cmd-x`, `cmd-k`, `cmd-t`,
+`cmd-]` — and the screen names whichever this machine uses. Command reaches a
+terminal program only over the kitty keyboard protocol, so on a Mac the browser
+wants a terminal that speaks it, such as kitty, WezTerm or Ghostty, with those
+keys not bound to the terminal's own actions. Terminal.app and iTerm2 keep
+command for themselves. `ctrl-c` stays control everywhere.
+
 **`a` chooses who writes and who reviews.** Routing picks a pair on its own and
 is usually right — it prefers a reviewer that is a *different binary* from the
 author, which is the property that makes a review worth having. Naming one is a
@@ -353,8 +360,9 @@ it printed, what the reviewer said, the diff read from the commit, and `p` to
 promote it. `?` lists every key, and `q` asks before it leaves —
 quitting can discard the task in the box and stop a run that is going.
 
-`ctrl-t` opens another line of work beside this one — its own thread, its own
-repository, its own half-written task — and `ctrl-]` moves between them. They
+`ctrl-t` (`cmd-t` on macOS) opens another line of work beside this one — its
+own thread, its own repository, its own half-written task — and `ctrl-]`
+(`cmd-]` on macOS) moves between them. They
 are switched between rather than shown side by side: two transcripts on an
 eighty-column terminal are two transcripts nobody can read. Runs still happen
 one at a time across all of them, because the request to stop is a single flag;
