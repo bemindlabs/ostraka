@@ -360,8 +360,9 @@ it printed, what the reviewer said, the diff read from the commit, and `p` to
 promote it. `?` lists every key, and `q` asks before it leaves —
 quitting can discard the task in the box and stop a run that is going.
 
-`ctrl-t` (`cmd-t` on macOS) opens another line of work beside this one — its own thread, its own
-repository, its own half-written task — and `ctrl-]` moves between them. They
+`ctrl-t` (`cmd-t` on macOS) opens another line of work beside this one — its
+own thread, its own repository, its own half-written task — and `ctrl-]`
+(`cmd-]` on macOS) moves between them. They
 are switched between rather than shown side by side: two transcripts on an
 eighty-column terminal are two transcripts nobody can read. Runs still happen
 one at a time across all of them, because the request to stop is a single flag;
