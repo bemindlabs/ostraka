@@ -5,19 +5,20 @@
 //! whatever dialog is open — belongs to the workspace rather than to a pane,
 //! and stays where it is.
 //!
-//! **Panes are switched between, not shown side by side.** Two transcripts on
-//! an eighty-column terminal are two transcripts nobody can read, and the width
-//! is what this screen spends on the thing being read. Which one you are in is
-//! a row at the top; getting to another is one keystroke.
-//!
-//! **One run at a time across all of them.** Not a property of panes: the
-//! request to stop is a single flag, because a signal is single, so two runs
-//! going at once would both stop when either was asked to. Running several is
-//! the parallel-execution question and this does not answer it — what panes
-//! buy is keeping several lines of work open, not running them together.
+//! **Side by side where there is room, switched between where there is not.**
+//! Two transcripts on an eighty-column terminal are two transcripts nobody can
+//! read, so below 160 columns one pane has the screen and the rest are a row at
+//! the top. From 160 columns each gets a column of its own. Where the columns
+//! go, and how wide each is, is the operator's to arrange.
 
 use crate::tui::thread::Thread;
 use crate::workspace::Repository;
+
+/// The share of the width a pane starts with, and the most it can be given.
+/// A pane at the most beside one at the least still leaves the narrow one a
+/// column wide enough to read, because every column is given its minimum first.
+pub const WEIGHT: u16 = 3;
+pub const MAX_WEIGHT: u16 = 9;
 
 pub struct Pane {
     pub thread: Thread,
@@ -33,12 +34,13 @@ pub struct Pane {
     pub history_at: Option<usize>,
     /// Whether the transcript sticks to the bottom as the run writes to it.
     pub follow: bool,
+    /// This pane's share of the width, when the panes are side by side.
+    pub weight: u16,
+    /// Where this pane's transcript was scrolled to while another pane had the
+    /// keys. The pane in front scrolls with the screen; a column beside it
+    /// keeps its own place rather than jumping whenever the keys move.
+    pub scroll: u16,
 }
-
-// Scrolling is not here. It belongs to the screen rather than to the line of
-// work — the record screen scrolls too, and it is the same screen whichever
-// pane is in front — and moving between panes puts it back to the bottom,
-// which is where a transcript somebody has just come back to should be.
 
 impl Default for Pane {
     fn default() -> Self {
@@ -49,6 +51,8 @@ impl Default for Pane {
             cursor: None,
             history_at: None,
             follow: true,
+            weight: WEIGHT,
+            scroll: 0,
         }
     }
 }
