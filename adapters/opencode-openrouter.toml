@@ -1,0 +1,86 @@
+# opencode, pointed at OpenRouter.
+#
+# Verified headless with opencode 1.18.30: `opencode run '<prompt>'` runs one
+# prompt without a terminal, applies edits, prints the reply as plain text on
+# stdout and exits. It is one CLI in front of many providers. This profile pins
+# the provider to OpenRouter, so a second provider through the same CLI is a
+# second profile.
+#
+# Requires opencode 1.18.30 or newer. Older releases have no switch for the
+# isolation below, and measured on 1.0.204 they passed the operator's own
+# `~/.claude/CLAUDE.md` into every run.
+id = "opencode-openrouter"
+command = "opencode"
+
+# Author: the default agent writes files and runs tools without asking.
+#
+# The prompt is the last argument with no `--` in front of it, because a model
+# a run names is appended after it and `--` would turn that into prompt text. A
+# task whose text begins with `-` is therefore read as a flag, and the run stops
+# with a usage error rather than doing something else.
+args = ["run", "{{prompt}}"]
+
+# Reviewer: the plan agent, which is read-only. Asked to create a file, it
+# answered that it cannot create files in plan mode, and nothing was written.
+review_args = ["run", "--agent", "plan", "{{prompt}}"]
+
+# A model a run names, as an OpenRouter model id such as
+# `deepseek/deepseek-v4-pro`. `--model` given twice crashes this CLI, so the
+# default is pinned below through the environment rather than in `args`.
+model_args = ["--model", "openrouter/{{model}}"]
+
+# A login from `opencode auth login` lives in the operator's data directory,
+# which a run leaves where it is. A key can arrive by environment instead.
+inherit_env = ["OPENROUTER_API_KEY"]
+
+[env]
+# The default model when a run names none, which a `--model` from `model_args`
+# overrides; both were measured. `small_model` is pinned to the same one
+# because this CLI asks a second, smaller model to title each session. Left
+# unset, that model was one OpenRouter's catalogue picked (still OpenRouter, but
+# a different model), so the task text reached a model the profile never named.
+# With it pinned, every call in a run went to the one named here.
+OPENCODE_CONFIG_CONTENT = '{"model":"openrouter/deepseek/deepseek-v4.1-flash","small_model":"openrouter/deepseek/deepseek-v4.1-flash"}'
+# Without this, the operator's `~/.claude/CLAUDE.md` reaches the model even with
+# the configuration directory relocated. Measured with a canary: present
+# without it, absent with it, and the repository's own AGENTS.md arrived either
+# way.
+OPENCODE_DISABLE_CLAUDE_CODE = "1"
+# A run is not the moment for a CLI to replace itself.
+OPENCODE_DISABLE_AUTOUPDATE = "1"
+
+# Plain text, so each line of stdout is the reply. `--format json` exists, but
+# the reply sits at `/part/text` of a `text` event, not in the top-level
+# `text` field a JSON-lines profile is read by. A reviewer's verdict line would
+# be buried inside JSON, and the review would fail safe as a rejection. Token
+# counts are only in that JSON stream, one event per line, and usage extraction
+# reads a stream as one document. So there is no `[usage]` block.
+event_format = "none"
+
+# The operator's configuration is kept out by relocating XDG_CONFIG_HOME, which
+# is where this CLI keeps `opencode.json`, user AGENTS.md, agents, commands and
+# plugins. Measured with a canary: present from a configuration directory that
+# held it, absent from a relocated empty one, and the repository's AGENTS.md
+# arrived either way. Nothing is carried, because the login is in the data
+# directory, which is not moved.
+#
+# Two limits, named here rather than discovered later.
+#
+# This CLI exits 0 when a model or provider cannot be used — an unknown model,
+# or OpenRouter with no login — and prints nothing to stdout. An author that
+# failed that way reads as a clean run that changed nothing. A reviewer gives no
+# verdict and is rejected, which is the safe direction. The default probe cannot
+# see it either, because every subcommand that could ask also exits 0, so a
+# machine with opencode installed and no OpenRouter login still looks ready.
+#
+# Relocating XDG_CONFIG_HOME moves it for every tool the agent runs, so a tool
+# that keeps its own login there — `gh` is one — starts a run logged out.
+[isolation]
+home_env = "XDG_CONFIG_HOME"
+home_source = ".config"
+credentials = []
+
+[capabilities]
+headless = true
+streams_json = false
+resumable = true

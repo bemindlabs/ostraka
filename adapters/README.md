@@ -16,6 +16,7 @@ them can actually run on this machine; `ostraka check` validates all of them.
 | `grok` | `grok` | yes |
 | `kimi-cli` | `kimi-cli` | yes |
 | `kimi-code` | `kimi` | yes |
+| `opencode-openrouter` | `opencode` | yes |
 | `agy` | `agy` | yes |
 
 Nothing is shipped that has not been run end to end. A profile for a CLI you have
@@ -186,6 +187,7 @@ reading a file.
 | `grok` | yes, and twice over — its own `~/.grok`, *and* another vendor's `~/.claude` by design | yes | `GROK_HOME` for the first, nine `compat.*` variables for the second |
 | `kimi-cli` | yes — skills, plugins, MCP registry and history, all under `~/.kimi` | yes | `KIMI_SHARE_DIR`, with `config.toml` carried |
 | `kimi` (Kimi Code) | yes — its own `AGENTS.md` and user-scoped skills, under `~/.kimi-code` | yes | `KIMI_CODE_HOME`, with `config.toml` carried |
+| `opencode` | yes — its own configuration under `~/.config/opencode`, *and* another vendor's `~/.claude/CLAUDE.md` | yes | `XDG_CONFIG_HOME` for the first, `OPENCODE_DISABLE_CLAUDE_CODE` (1.18.30 or newer) for the second |
 | `agy` | none found to inherit | n/a | none needed — and none arrives either, see below |
 
 Instruction files turned out to be the smaller half. A baseline `claude -p` in an
@@ -330,6 +332,19 @@ across every vendor.
   does not reach `~/.agents/skills`, which is found from the home directory
   itself. It was empty on the machine this was measured on, so nothing leaked,
   but the profile cannot promise that for any other machine.
+- **opencode reads another vendor's instructions, and only newer releases can
+  be told not to.** Relocating `XDG_CONFIG_HOME` keeps its own configuration
+  out, but the operator's `~/.claude/CLAUDE.md` still reached the model, with a
+  canary, on both 1.0.204 and 1.18.30. 1.18.30 has
+  `OPENCODE_DISABLE_CLAUDE_CODE`, and with it set the canary was absent and the
+  repository's `AGENTS.md` still arrived. 1.0.204 has no such switch, so the
+  profile requires 1.18.30 or newer.
+- **opencode exits 0 when it cannot run at all.** An unknown model, or
+  OpenRouter with no login, prints an error to stderr, nothing to stdout, and
+  exits 0. An author that failed that way reads as a clean run that changed
+  nothing, and a reviewer that failed that way gives no verdict and is rejected.
+  No probe can detect it, because every subcommand that could ask also exits 0.
+  Log in with `opencode auth login` before routing to this profile.
 - **A relocated home accumulates.** Sessions, caches and a vendor's own memory
   store live there across runs. It is isolation from the operator, not a fresh
   sandbox each time.
