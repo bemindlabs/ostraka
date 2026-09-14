@@ -188,6 +188,10 @@ pub struct App {
     /// drawing is a function of state rather than of the clock.
     pub tick: u64,
     pub quit: bool,
+    /// Where the task's text was last drawn, and how far down the box was
+    /// scrolled, so a click can be read against what was actually on screen.
+    pub prompt_text: Rect,
+    pub prompt_scroll: u16,
 }
 
 impl App {
@@ -226,6 +230,8 @@ impl App {
             leaving: false,
             tick: 0,
             quit: false,
+            prompt_text: Rect::default(),
+            prompt_scroll: 0,
         }
     }
 
@@ -408,7 +414,7 @@ impl App {
                 // Forward past the newest is back to what was being written.
                 Some(_) => {
                     self.pane_mut().history_at = None;
-                    self.pane_mut().prompt.clear();
+                    self.pane_mut().replace(String::new());
                     return;
                 }
                 None => 0,
@@ -416,7 +422,7 @@ impl App {
         };
         self.pane_mut().history_at = Some(at);
         let said = history[at].clone();
-        self.pane_mut().prompt = said;
+        self.pane_mut().replace(said);
     }
 
     /// True while what is in the box is a command being picked rather than a
@@ -458,7 +464,14 @@ impl App {
 
     /// How many rows the input box wants, border included.
     fn prompt_height(&self) -> u16 {
-        let lines = self.pane().prompt.lines().count().clamp(1, PROMPT_LINES);
+        // Split rather than `lines`, which drops the empty row a trailing
+        // newline starts — the row the cursor is on after alt-enter.
+        let lines = self
+            .pane()
+            .prompt
+            .split('\n')
+            .count()
+            .clamp(1, PROMPT_LINES);
         lines as u16 + 2
     }
 }
@@ -522,6 +535,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
     }
 
+    (app.prompt_text, app.prompt_scroll) = prompt_view(app, rows[4]);
     render_prompt(frame, app, rows[4]);
     if app.slashing() {
         render_slash(frame, app, rows[4]);
@@ -976,6 +990,24 @@ fn tabs(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Where the task's text sits inside the box, and how far down the box is
+/// scrolled to keep the cursor's row in it.
+///
+/// One function, because the box is drawn from it and a click is read against
+/// it, and two sums of the same margins are how a click lands a cell away.
+fn prompt_view(app: &App, area: Rect) -> (Rect, u16) {
+    // The gutter either side, then the border, then a cell of padding.
+    let text = Rect {
+        x: area.x.saturating_add(theme::GUTTER + 2),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(theme::GUTTER * 2 + 4),
+        height: area.height.saturating_sub(2),
+    };
+    let (row, _) = app.pane().cursor_row();
+    let scroll = row.saturating_sub(usize::from(text.height.max(1)) - 1);
+    (text, u16::try_from(scroll).unwrap_or(u16::MAX))
+}
+
 /// The line that says where typing goes.
 fn render_prompt(frame: &mut Frame, app: &App, area: Rect) {
     let inner = Rect {
@@ -983,6 +1015,7 @@ fn render_prompt(frame: &mut Frame, app: &App, area: Rect) {
         width: area.width.saturating_sub(theme::GUTTER * 2),
         ..area
     };
+    let (_, scroll) = prompt_view(app, area);
     let writing = app.focus == Focus::Prompt && app.dialog.is_none();
     let block = theme::panel(writing).padding(Padding::horizontal(1));
 
@@ -996,29 +1029,41 @@ fn render_prompt(frame: &mut Frame, app: &App, area: Rect) {
             theme::muted(),
         ))]
     } else {
-        let mut lines: Vec<Line<'static>> = app
-            .pane()
-            .prompt
-            .lines()
-            .map(|line| Line::from(Span::styled(line.to_string(), theme::text())))
-            .collect();
-        if lines.is_empty() {
-            lines.push(Line::from(""));
-        }
-        if writing {
-            // The cursor goes on the last line, which is where typing lands.
-            let last = lines.len() - 1;
-            let mut spans = lines[last].spans.clone();
-            spans.push(Span::styled(theme::CURSOR, theme::accent()));
-            if app.pane().prompt.is_empty() {
-                spans.push(Span::styled(
-                    "  say what the agent should do \u{b7} enter runs it",
-                    theme::muted(),
-                ));
-            }
-            lines[last] = Line::from(spans);
-        }
-        lines
+        let pane = app.pane();
+        let (cursor_row, offset) = pane.cursor_row();
+        pane.prompt
+            .split('\n')
+            .enumerate()
+            .map(|(i, line)| {
+                if !writing || i != cursor_row {
+                    return Line::from(Span::styled(line.to_string(), theme::text()));
+                }
+                // At the end of a row the cursor is the bar after it. Inside
+                // one it is the character it would type before, reversed: a bar
+                // there would push the rest of the row a cell to the right of
+                // where a click on it would find it.
+                let (before, after) = line.split_at(offset);
+                let mut spans = vec![Span::styled(before.to_string(), theme::text())];
+                match after.chars().next() {
+                    None => spans.push(Span::styled(theme::CURSOR, theme::accent())),
+                    Some(c) => {
+                        let (under, rest) = after.split_at(c.len_utf8());
+                        spans.push(Span::styled(
+                            under.to_string(),
+                            theme::text().add_modifier(Modifier::REVERSED),
+                        ));
+                        spans.push(Span::styled(rest.to_string(), theme::text()));
+                    }
+                }
+                if pane.prompt.is_empty() {
+                    spans.push(Span::styled(
+                        "  say what the agent should do \u{b7} enter runs it",
+                        theme::muted(),
+                    ));
+                }
+                Line::from(spans)
+            })
+            .collect()
     };
 
     let mark = if writing {
@@ -1027,11 +1072,9 @@ fn render_prompt(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("\u{203a}", theme::muted())
     };
     frame.render_widget(
-        Paragraph::new(text).block(block.title(Line::from(vec![
-            Span::raw(" "),
-            mark,
-            Span::raw(" "),
-        ]))),
+        Paragraph::new(text)
+            .scroll((scroll, 0))
+            .block(block.title(Line::from(vec![Span::raw(" "), mark, Span::raw(" ")]))),
         inner,
     );
 }
@@ -1750,6 +1793,10 @@ fn render_keys(frame: &mut Frame, screen: Rect) {
         ("enter", "run it"),
         ("alt-enter", "another line, for a task that needs one"),
         ("up / down", "what you have asked here before"),
+        (
+            "left / right",
+            "move through the task; a click puts the cursor",
+        ),
         ("esc", "put the task aside, and take the keys back"),
         ("n", "take the box back"),
         (label!("t"), "another line of work, open beside this one"),
@@ -3339,6 +3386,34 @@ mod tests {
     }
 
     #[test]
+    fn a_cursor_inside_the_task_does_not_push_the_rest_of_it_aside() {
+        let mut app = App::new(nowhere(), Vec::new());
+        app.pane_mut().prompt = "hello world".to_string();
+        let end = screen(&mut app, 100, 20);
+        assert!(end.contains(&format!("world{}", theme::CURSOR)), "{end}");
+
+        app.pane_mut().left();
+        let inside = screen(&mut app, 100, 20);
+        assert!(inside.contains("hello world"), "{inside}");
+        assert!(
+            !inside.contains(&format!("world{}", theme::CURSOR)),
+            "the cursor stayed at the end: {inside}"
+        );
+    }
+
+    #[test]
+    fn the_box_scrolls_to_the_row_being_written() {
+        let mut app = App::new(nowhere(), Vec::new());
+        let rows: Vec<String> = (1..=10).map(|i| format!("row {i}")).collect();
+        app.pane_mut().prompt = rows.join("\n");
+        let out = screen(&mut app, 100, 30);
+        assert!(
+            out.contains("row 10"),
+            "the row being written is hidden: {out}"
+        );
+    }
+
+    #[test]
     fn a_pending_leader_says_what_it_is_waiting_for() {
         let mut app = App::new(nowhere(), Vec::new());
         app.leader = true;
@@ -3601,10 +3676,13 @@ mod tests {
         let tall = screen(&mut app, 80, 40);
         assert!(tall.contains("line 5"), "{tall}");
 
-        // On twelve rows the box gives way to the work it is about.
+        // On twelve rows the box gives way to the work it is about. Counted
+        // rather than asked about one row: the box scrolls to the row being
+        // written, so which rows show is the cursor's business, and how many is
+        // the screen's.
         let short = screen(&mut app, 80, 12);
         assert!(
-            !short.contains("line 5"),
+            short.matches("line ").count() <= 2,
             "the box took the screen:\n{short}"
         );
         assert!(short.contains("Write a task below"), "{short}");

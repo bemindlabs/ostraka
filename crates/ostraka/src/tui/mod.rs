@@ -26,8 +26,10 @@ use command::Command;
 use ostraka_runtime::promote::{self, NotPromoted};
 use ostraka_runtime::{index, orchestrator};
 use ratatui::crossterm::event::{
-    self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    self, DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyCode, KeyEvent,
+    KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use ratatui::layout::Position;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -58,16 +60,17 @@ pub fn run(workspace: &Workspace) -> Outcome {
     // Installs a panic hook that restores the terminal first. Without it a
     // panic leaves the operator staring at a shell with no echo and no prompt.
     let mut terminal = ratatui::try_init()?;
-    // After ratatui's hook, so a panic gives the keyboard back before the
-    // terminal is restored rather than leaving the shell in the protocol.
+    // After ratatui's hook, so a panic gives the keyboard and the mouse back
+    // before the terminal is restored, rather than leaving a shell that prints
+    // an escape sequence for every key and every movement of the mouse.
     let restore = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        chord::leave();
+        release_input();
         restore(info);
     }));
-    chord::enter();
+    capture_input();
     let result = event_loop(&mut terminal, &mut app, &records_root);
-    chord::leave();
+    release_input();
     ratatui::restore();
     result?;
 
@@ -161,13 +164,13 @@ fn event_loop(
         if !event::poll(TICK)? {
             continue;
         }
-        let TermEvent::Key(key) = event::read()? else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
+        match event::read()? {
+            TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                handle(app, key, records_root)
+            }
+            TermEvent::Mouse(event) => mouse(app, event),
+            _ => {}
         }
-        handle(app, key, records_root);
     }
 
     // Never walk away from a run. Leaving here with a vendor still writing
@@ -177,6 +180,46 @@ fn event_loop(
         pane.thread.settle_worker();
     }
     Ok(())
+}
+
+/// Asks the terminal for what the browser reads besides plain keys: command as
+/// a modifier where that is the chord, and the mouse, so a click can place the
+/// cursor in the box.
+fn capture_input() {
+    chord::enter();
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture);
+}
+
+/// Gives back what [`capture_input`] asked for.
+fn release_input() {
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+    chord::leave();
+}
+
+/// The mouse. A click in the box puts the cursor where it landed, and the
+/// wheel scrolls what is being read.
+///
+/// The wheel is here because the mouse is captured: a terminal that reports it
+/// to a program no longer scrolls by itself, and many turned the wheel into
+/// arrow keys in a full-screen program, where the up arrow walks history.
+fn mouse(app: &mut App, event: MouseEvent) {
+    if app.dialog.is_some() {
+        return;
+    }
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let area = app.prompt_text;
+            if !area.contains(Position::new(event.column, event.row)) {
+                return;
+            }
+            let row = usize::from(event.row - area.y) + usize::from(app.prompt_scroll);
+            app.focus = Focus::Prompt;
+            app.pane_mut().place(row, event.column - area.x);
+        }
+        MouseEventKind::ScrollUp => app.scroll_by(-3),
+        MouseEventKind::ScrollDown => app.scroll_by(3),
+        _ => {}
+    }
 }
 
 /// Takes whatever the run has said since the last frame.
@@ -313,13 +356,11 @@ fn prompt_key(app: &mut App, key: KeyEvent, records_root: &Path) {
     match key.code {
         // A task worth writing sometimes takes a paragraph, and a box that
         // could not hold one would push the work back out to the shell.
-        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
-            app.pane_mut().prompt.push('\n')
-        }
-        KeyCode::Char('j') if control => app.pane_mut().prompt.push('\n'),
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => app.pane_mut().insert('\n'),
+        KeyCode::Char('j') if control => app.pane_mut().insert('\n'),
         KeyCode::Enter if app.slashing() => {
             let picked = app.slash_picked();
-            app.pane_mut().prompt.clear();
+            app.pane_mut().replace(String::new());
             app.pick = 0;
             match picked {
                 Some(command) => perform(app, command, records_root),
@@ -335,16 +376,18 @@ fn prompt_key(app: &mut App, key: KeyEvent, records_root: &Path) {
         // after looking something up is the normal way of working.
         KeyCode::Esc => app.focus = Focus::Keys,
         KeyCode::Backspace => {
-            app.pane_mut().prompt.pop();
+            app.pane_mut().backspace();
             app.pane_mut().history_at = None;
             app.pick = 0;
         }
+        KeyCode::Left => app.pane_mut().left(),
+        KeyCode::Right => app.pane_mut().right(),
         KeyCode::Up => app.recall(-1),
         KeyCode::Down => app.recall(1),
         KeyCode::PageUp => app.scroll_by(-(app.page as i16)),
         KeyCode::PageDown => app.scroll_by(app.page as i16),
         KeyCode::Char(c) => {
-            app.pane_mut().prompt.push(c);
+            app.pane_mut().insert(c);
             app.pane_mut().history_at = None;
             app.pick = 0;
         }
@@ -955,7 +998,7 @@ fn start_run(app: &mut App) {
         return;
     }
     app.blocked = None;
-    app.pane_mut().prompt.clear();
+    app.pane_mut().replace(String::new());
     app.pane_mut().history_at = None;
     app.status = None;
     app.pane_mut().follow = true;
@@ -1087,6 +1130,80 @@ mod tests {
     /// A browser chord, held with whatever this platform holds them with.
     fn chord(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), chord::MODIFIER)
+    }
+
+    fn click(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn the_arrows_move_through_the_task_and_typing_lands_there() {
+        let root = Path::new("/p/.ostraka");
+        let mut a = app();
+        typed(&mut a, "hello world");
+        for _ in 0.."world".len() {
+            handle(&mut a, press(KeyCode::Left), root);
+        }
+        handle(&mut a, press(KeyCode::Backspace), root);
+        typed(&mut a, ", ");
+        assert_eq!(a.pane().prompt, "hello, world");
+
+        for _ in 0..20 {
+            handle(&mut a, press(KeyCode::Right), root);
+        }
+        typed(&mut a, "!");
+        assert_eq!(a.pane().prompt, "hello, world!");
+    }
+
+    #[test]
+    fn a_click_in_the_box_puts_the_cursor_on_the_character_under_it() {
+        let root = Path::new("/p/.ostraka");
+        let mut a = app();
+        typed(&mut a, "hello world");
+        // The keys handed back: the click is what takes the box again.
+        handle(&mut a, press(KeyCode::Esc), root);
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 20)).expect("terminal");
+        terminal
+            .draw(|frame| view::draw(frame, &mut a))
+            .expect("draws");
+        let area = a.prompt_text;
+        // Read against the drawn screen, not against the sum that placed it:
+        // the two agreeing is the whole point.
+        assert_eq!(
+            terminal.backend().buffer()[(area.x + 5, area.y)].symbol(),
+            " "
+        );
+
+        mouse(&mut a, click(area.x + 5, area.y));
+        assert_eq!(a.focus, Focus::Prompt);
+        typed(&mut a, ",");
+        assert_eq!(a.pane().prompt, "hello, world");
+    }
+
+    #[test]
+    fn a_click_outside_the_box_or_under_a_dialog_moves_nothing() {
+        let mut a = app();
+        typed(&mut a, "hello");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 20)).expect("terminal");
+        terminal
+            .draw(|frame| view::draw(frame, &mut a))
+            .expect("draws");
+        let area = a.prompt_text;
+
+        mouse(&mut a, click(area.x + 1, 0));
+        assert_eq!(a.pane().cursor, None);
+
+        a.open(Dialog::Keys);
+        mouse(&mut a, click(area.x + 1, area.y));
+        assert_eq!(a.pane().cursor, None, "a click reached through a dialog");
     }
 
     fn app() -> App {

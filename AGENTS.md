@@ -671,6 +671,25 @@ opens a tab. So on those two terminals, the leader, the palette and the panes
 cannot be reached by a chord. The bare keys and `/` in the box still reach every
 command. Accepting control as well on macOS was offered and was declined.
 
+**The box has a cursor, and the browser reads the mouse to place it.** Left and
+right move through the task, and a click puts the cursor on the character in the
+cell it landed on. `Pane::cursor` is a byte offset, and `None` means the end. That
+is where a task replaced whole should leave it, and it means code that writes
+`prompt` directly cannot strand the cursor. Inside a row the cursor is the
+character under it, shown reversed, not a bar: a bar would push the rest of the
+row a cell away from where a click on it lands. `view::prompt_view` is the one
+sum of the box's margins, and the box is drawn from it and clicks are read
+against it. A test checks the cell it names against the drawn buffer. A mark
+that takes no cell of its own moves with its letter.
+
+The cost is the terminal's own selection. A terminal that reports the mouse to a
+program stops selecting on a drag, so copying from a transcript needs shift
+held — option in Terminal.app and iTerm2. The wheel is handled for the same
+reason: once the mouse is captured the terminal does not scroll by itself, and
+before this many terminals turned the wheel into arrow keys, where the up arrow
+walks history. Capture is released on the way out and on a panic, as the
+keyboard protocol is.
+
 **Nothing waits forever.** `policy.timeout_secs` spent this project's life
 declared, documented as a wall-clock ceiling, and read by nothing — which is
 worse than absent, because someone sets it and believes their fleet is bounded.
