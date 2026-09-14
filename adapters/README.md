@@ -268,7 +268,14 @@ across every vendor.
   exit zero and an empty worktree; codex's own explanation is in the run record.
   Reproduced with the operator's untouched configuration, so it is not something
   isolation does. Reviewing is unaffected — `--sandbox read-only` runs, and
-  codex is verified in that role under a relocated home.
+  codex is verified in that role under a relocated home. What it cannot do there is
+  read. The same bubblewrap failure stops `--sandbox read-only` from starting
+  too, so a review still works, because the diff is in its prompt. But asking
+  or planning through codex gets an answer about the error, not about the
+  repository. Measured on Ubuntu with
+  `kernel.apparmor_restrict_unprivileged_userns = 1`. Consult through a profile
+  whose read-only posture does not need a user namespace, such as
+  `claude-code`.
 - **Grok discovers another vendor's configuration on purpose.** Its own
   documentation calls this Claude Code compatibility and says no extra setup is
   needed, which is exactly the problem: a headless run on the machine this was
