@@ -564,7 +564,7 @@ have to be injectable, and an injectable gate is a bypassable gate.
 
 ## Vendors
 
-Adapter profiles are data. Seven ship, each run end to end before it was
+Adapter profiles are data. Eight ship, each run end to end before it was
 committed:
 
 | Profile | CLI |
@@ -575,9 +575,10 @@ committed:
 | `grok` | `grok` |
 | `kimi-cli` | `kimi-cli` |
 | `kimi-code` | `kimi` |
+| `opencode-openrouter` | `opencode` |
 | `agy` | `agy` |
 
-Adding an eighth is a TOML file in `adapters/`, not a release: point `command` at
+Adding a ninth is a TOML file in `adapters/`, not a release: point `command` at
 a CLI on your PATH and `ostraka adapters` will find it. No vendor name appears
 anywhere in the runtime. See [`adapters/README.md`](adapters/README.md).
 
