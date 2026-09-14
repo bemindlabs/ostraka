@@ -103,7 +103,8 @@ impl Pane {
         }
         let at = self.at();
         self.prompt.insert(at, c);
-        self.cursor = Some(at + c.len_utf8());
+        let next = at + c.len_utf8();
+        self.cursor = (next < self.prompt.len()).then_some(next);
     }
 
     /// Deletes the character before the cursor.
@@ -130,7 +131,7 @@ impl Pane {
                 break;
             }
         }
-        self.cursor = Some(at);
+        self.cursor = (at < self.prompt.len()).then_some(at);
     }
 
     /// One character forward, with any marks that belong to it.
@@ -290,6 +291,22 @@ mod tests {
         assert_eq!(wide.at(), "\u{4f60}".len());
         wide.place(0, 4);
         assert_eq!(wide.at(), "\u{4f60}\u{597d}".len());
+    }
+
+    #[test]
+    fn a_cursor_at_the_end_is_always_spelled_as_the_end() {
+        // `None` is the end. A `Some` equal to the length would be a second
+        // spelling of the same place, and code that tests for `None` would miss
+        // it.
+        let mut pane = Pane::default();
+        pane.left();
+        assert_eq!(pane.cursor, None);
+        pane.insert('a');
+        assert_eq!(pane.cursor, None);
+        pane.left();
+        pane.insert('b');
+        assert_eq!(pane.prompt, "ba");
+        assert_eq!(pane.cursor, Some(1));
     }
 
     #[test]
