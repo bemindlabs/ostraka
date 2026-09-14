@@ -1,0 +1,63 @@
+# Moonshot's Kimi Code CLI, installed as `kimi`.
+#
+# Verified headless: `kimi --prompt '<prompt>' --output-format text` runs one
+# prompt without a terminal, writes the reply to stdout and exits. It is not
+# `kimi-cli` under a new name. It has its own home directory, its own login and
+# its own flags, so it gets a profile of its own.
+id = "kimi-code"
+command = "kimi"
+
+# Prompt mode applies edits and runs tools without asking. An author needs
+# exactly that, and it is also the whole of the problem below.
+args = ["--prompt", "{{prompt}}", "--output-format", "text"]
+
+# There is no reviewer invocation. That is a limitation, not an omission.
+# `--plan`, `--yolo` and `--auto` are each refused when combined with
+# `--prompt` ("Cannot combine --prompt with --plan"), so prompt mode has exactly
+# one posture, and that posture writes: asked to create a file, it created one.
+# The only other lever is `--agent-file`, a Markdown file this profile cannot
+# ship.
+#
+# So `review_args` is deliberately absent. A review through this profile would
+# reuse the author invocation and could edit the worktree it is judging. Route
+# it as an author. Asking and planning refuse it for the same reason.
+
+# A model is an alias this CLI's own config.toml defines, such as `kimi-code/k3`.
+model_args = ["--model", "{{model}}"]
+# Authentication and endpoint for a key-based login. A subscription login comes
+# from the carried credentials directory instead.
+inherit_env = ["KIMI_API_KEY", "KIMI_CODE_BASE_URL"]
+
+# Text output, so each line of stdout is the reply. `stream-json` also exists,
+# but it reports turns as `{"role": ..., "content": ...}`, not the `type` and
+# `text` fields a JSON-lines profile is read by, so every line would be recorded
+# as raw JSON. Neither format says what a run cost, so this profile has no
+# `[usage]` block and produces no row in the token line.
+event_format = "none"
+
+# Everything per user lives under one directory, named by one variable.
+# Relocating it stops the operator's own AGENTS.md and skills from reaching a
+# run. Measured with a canary in each: a home holding them passed the operator's
+# codeword and a user-scoped skill to the model, while a home built the way a
+# run builds it passed neither, and the repository's own AGENTS.md still
+# arrived.
+#
+# `config.toml` is carried, and it is not a credential. It defines the providers
+# and models the login authenticates against. A home without it refuses to
+# start ("No model configured"), and whatever else the file declares travels
+# with it.
+#
+# Two sources stay out of reach, because this variable does not move them.
+# `~/.agents/skills` is found from the home directory itself, and a
+# repository's own `.agents/`, `.kimi-code/` and `.mcp.json` are repository
+# content, which travels with the task by design.
+[isolation]
+home_env = "KIMI_CODE_HOME"
+home_source = ".kimi-code"
+credentials = ["credentials", "config.toml"]
+
+# `streams_json` describes this invocation, which prints text.
+[capabilities]
+headless = true
+streams_json = false
+resumable = true
