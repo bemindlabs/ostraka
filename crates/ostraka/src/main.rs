@@ -124,13 +124,15 @@ enum Commands {
         /// from the list.
         prompt: Option<String>,
 
-        /// Identity accountable for the change.
-        #[arg(long, default_value = run::AUTHOR)]
-        author: String,
+        /// Identity accountable for the change. Defaults to the profile that
+        /// writes it.
+        #[arg(long)]
+        author: Option<String>,
 
-        /// Identity that reviews it. Must differ from the author.
-        #[arg(long, default_value = run::REVIEWER)]
-        reviewer: String,
+        /// Identity that reviews it. Must differ from the author. Defaults to
+        /// the profile that reviews it.
+        #[arg(long)]
+        reviewer: Option<String>,
 
         /// Adapter profile that writes the change.
         #[arg(long)]
@@ -197,13 +199,15 @@ enum Commands {
         #[arg(long, default_value_t = drain::WORKERS)]
         workers: usize,
 
-        /// Identity accountable for the changes.
-        #[arg(long, default_value = run::AUTHOR)]
-        author: String,
+        /// Identity accountable for the changes. Defaults to the profile that
+        /// writes each one.
+        #[arg(long)]
+        author: Option<String>,
 
-        /// Identity that reviews them. Must differ from the author.
-        #[arg(long, default_value = run::REVIEWER)]
-        reviewer: String,
+        /// Identity that reviews them. Must differ from the author. Defaults to
+        /// the profile that reviews each one.
+        #[arg(long)]
+        reviewer: Option<String>,
 
         /// Adapter profile that writes, where a task has not named one.
         #[arg(long)]
@@ -340,8 +344,10 @@ fn main() -> ExitCode {
         } => {
             let mut args = run::Args::for_task(String::new());
             args.repository = cli.repository.clone();
-            args.author = author.clone();
-            args.reviewer = reviewer.clone();
+            args.author = author.clone().unwrap_or_else(|| run::AUTHOR.to_string());
+            args.reviewer = reviewer
+                .clone()
+                .unwrap_or_else(|| run::REVIEWER.to_string());
             args.adapter = adapter.clone();
             args.review_adapter = review_adapter.clone();
             drain::run(&workspace, args, *workers, cli.json)
@@ -371,8 +377,10 @@ fn main() -> ExitCode {
             let args = run::Args {
                 prompt: prompt.clone().unwrap_or_default(),
                 repository: cli.repository.clone(),
-                author: author.clone(),
-                reviewer: reviewer.clone(),
+                author: author.clone().unwrap_or_else(|| run::AUTHOR.to_string()),
+                reviewer: reviewer
+                    .clone()
+                    .unwrap_or_else(|| run::REVIEWER.to_string()),
                 adapter: adapter.clone(),
                 review_adapter: review_adapter.clone(),
                 base_ref: base_ref.clone(),

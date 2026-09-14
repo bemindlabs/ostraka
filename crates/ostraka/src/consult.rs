@@ -87,7 +87,11 @@ impl Consulted {
 /// the one routing already applies to reviewers, except here it refuses rather
 /// than orders: a reviewer that writes is caught by the tree check before a
 /// commit, but a question has no commit to catch it before.
-fn reader(profiles: &[Profile], named: Option<&str>) -> Result<Profile, Failure> {
+fn reader(
+    profiles: &[Profile],
+    named: Option<&str>,
+    preferred: &[String],
+) -> Result<Profile, Failure> {
     if let Some(id) = named {
         let Some(profile) = profiles.iter().find(|p| p.id == id) else {
             return Err(format!("no adapter profile with id {id:?}").into());
@@ -100,6 +104,15 @@ fn reader(profiles: &[Profile], named: Option<&str>) -> Result<Profile, Failure>
             .into());
         }
         return Ok(profile.clone());
+    }
+    // The workspace's reviewers first: the reason to prefer a reviewer, that it
+    // is handed the repository's own rules, is the reason to prefer it here.
+    if let Some(id) = run::preferred_reviewer(preferred, profiles, None, |p| {
+        p.review_args.is_some() && ProcessAdapter::new(p.clone()).probe().is_ready()
+    }) {
+        if let Some(profile) = profiles.iter().find(|p| p.id == id) {
+            return Ok(profile.clone());
+        }
     }
     let mut readers: Vec<&Profile> = profiles
         .iter()
@@ -138,7 +151,7 @@ pub fn consult(
     let config = workspace.config_for(&repo)?;
     config.validate()?;
     let profiles = workspace.profiles()?;
-    let profile = reader(&profiles, args.adapter.as_deref())?;
+    let profile = reader(&profiles, args.adapter.as_deref(), &workspace.reviewers())?;
 
     let id = format!("{}-{}", mode.word(), run::task_id());
     let mut log = RunLog::create(&workspace.ostraka().join("consulted"), &id)?.watched_by(watcher);
@@ -149,13 +162,14 @@ pub fn consult(
     log.enter(Phase::Preparing);
     let notes = workspace.notes_if_present();
     let skills = workspace.skills_if_present();
-    if let Err(problem) = worktree::prepare(
+    if let Err(problem) = worktree::prepare_until(
         &repo.path,
         wt.path(),
         &config.worktree,
         notes.as_deref(),
         skills.as_deref(),
         config.gate.timeout_secs.map(Duration::from_secs),
+        stop,
     ) {
         discard(&repo.path, &wt);
         return Err(format!(
@@ -174,7 +188,7 @@ pub fn consult(
         id: id.clone(),
         prompt: mode.consulting(&args.prompt),
         adapter: profile.id.clone(),
-        author: ActorId::new(&args.author),
+        author: ActorId::new(run::identity(&args.author, run::AUTHOR, &profile.id)),
         base_ref: args.base_ref.clone(),
         model: args.model.clone(),
     };

@@ -186,10 +186,27 @@ pub fn execute(
     // Vendors that can only be isolated by relocating their home directory get
     // one here, beside the run records and ignored by git for the same reason.
     let vendor_home = workspace.ostraka().join("vendor-home");
+    // A reviewer nobody named is the first one this workspace prefers that
+    // answers. Routing's own ordering only sees what a profile declares, and
+    // whether a reviewer is handed the repository's own rules is not something
+    // a profile can declare without a breaking change.
+    let review_adapter = args.review_adapter.clone().or_else(|| {
+        preferred_reviewer(
+            &workspace.reviewers(),
+            &profiles,
+            args.adapter.as_deref(),
+            |profile| {
+                ostraka_adapter::VendorAdapter::probe(
+                    &ostraka_adapter::process::ProcessAdapter::new(profile.clone()),
+                )
+                .is_ready()
+            },
+        )
+    });
     let routing = route::select_until(
         &profiles,
         args.adapter.as_deref(),
-        args.review_adapter.as_deref(),
+        review_adapter.as_deref(),
         &vendor_home,
         config
             .policy
@@ -216,7 +233,7 @@ pub fn execute(
         id: task_id(),
         prompt: args.prompt.clone(),
         adapter: routing_author_id(&routing),
-        author: ActorId::new(&args.author),
+        author: ActorId::new(identity(&args.author, AUTHOR, &routing_author_id(&routing))),
         base_ref: match continued.as_ref() {
             Some(run) => continue_from(&repo.path, &run.run_id)?,
             None => args.base_ref.clone(),
@@ -242,7 +259,11 @@ pub fn execute(
         &config,
         &routing,
         &task,
-        &ActorId::new(&args.reviewer),
+        &ActorId::new(identity(
+            &args.reviewer,
+            REVIEWER,
+            ostraka_adapter::VendorAdapter::id(routing.reviewer.as_ref()),
+        )),
         watcher,
         stop,
     )?)
@@ -471,6 +492,33 @@ pub fn run_reporting(
     Ok((approved, id))
 }
 
+/// The first reviewer in `preferred` that can review this run: a profile that
+/// exists here, is not the author somebody named, and answers.
+///
+/// A name that matches no profile is skipped rather than refused. The list is
+/// a preference written once for a workspace, and a profile missing from one
+/// machine should not stop runs on it.
+pub fn preferred_reviewer(
+    preferred: &[String],
+    profiles: &[ostraka_adapter::Profile],
+    author: Option<&str>,
+    ready: impl Fn(&ostraka_adapter::Profile) -> bool,
+) -> Option<String> {
+    preferred
+        .iter()
+        .filter(|id| Some(id.as_str()) != author)
+        .filter_map(|id| profiles.iter().find(|p| &p.id == id))
+        .find(|profile| ready(profile))
+        .map(|profile| profile.id.clone())
+}
+
+/// Who a record and a commit name. An identity nobody chose is the profile
+/// that did the work, which is what the trailer beside it already says, and
+/// which a log of fifty runs can tell apart. A chosen one is kept as given.
+pub fn identity<'a>(given: &'a str, unchosen: &str, profile: &'a str) -> &'a str {
+    if given == unchosen { profile } else { given }
+}
+
 fn routing_author_id(routing: &route::Routing) -> String {
     ostraka_adapter::VendorAdapter::id(routing.author.as_ref()).to_string()
 }
@@ -508,6 +556,50 @@ mod tests {
     use super::*;
     use ostraka_core::gate::CheckRecord;
     use ostraka_runtime::gate::Refusal;
+
+    fn profile(id: &str) -> ostraka_adapter::Profile {
+        ostraka_adapter::Profile::parse(&format!(
+            "id = \"{id}\"\ncommand = \"{id}\"\nargs = [\"{{{{prompt}}}}\"]\n"
+        ))
+        .expect("profile")
+    }
+
+    #[test]
+    fn a_workspace_preference_picks_the_first_reviewer_that_can_review() {
+        let profiles = [profile("alpha"), profile("beta"), profile("gamma")];
+        let list = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let ready = |p: &ostraka_adapter::Profile| p.id != "beta";
+
+        // The first that answers, in the workspace's order rather than by id.
+        assert_eq!(
+            preferred_reviewer(&list(&["gamma", "alpha"]), &profiles, None, ready),
+            Some("gamma".to_string())
+        );
+        // Not the author somebody named, not one that does not answer, and
+        // not a name no profile has.
+        assert_eq!(
+            preferred_reviewer(
+                &list(&["missing", "gamma", "beta", "alpha"]),
+                &profiles,
+                Some("gamma"),
+                ready
+            ),
+            Some("alpha".to_string())
+        );
+        // Nothing usable leaves the choice to routing.
+        assert_eq!(
+            preferred_reviewer(&list(&["beta"]), &profiles, None, ready),
+            None
+        );
+        assert_eq!(preferred_reviewer(&[], &profiles, None, ready), None);
+    }
+
+    #[test]
+    fn an_identity_nobody_chose_is_the_profile_that_did_the_work() {
+        assert_eq!(identity(AUTHOR, AUTHOR, "codex"), "codex");
+        assert_eq!(identity(REVIEWER, REVIEWER, "claude-code"), "claude-code");
+        assert_eq!(identity("archon", AUTHOR, "codex"), "archon");
+    }
 
     #[test]
     fn only_what_is_about_the_change_is_tried_again() {
