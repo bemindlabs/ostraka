@@ -13,6 +13,7 @@
 mod command;
 #[cfg(test)]
 mod flows;
+mod mention;
 mod pane;
 mod session;
 mod theme;
@@ -408,6 +409,25 @@ fn prompt_key(app: &mut App, key: KeyEvent, records_root: &Path) {
         KeyCode::Down if app.slashing() => {
             app.pick = (app.pick + 1).min(app.slash_matches().len().saturating_sub(1));
         }
+        // An `@` being written: tab completes it and the arrows pick. Enter
+        // completes too, while what is picked is not already what is written,
+        // because a half-typed path is not a task anybody meant to send.
+        KeyCode::Tab if app.mentioning().is_some() => {
+            app.complete_mention();
+        }
+        KeyCode::Up if !app.mention_matches().is_empty() => {
+            app.pick = app.pick.saturating_sub(1);
+        }
+        KeyCode::Down if !app.mention_matches().is_empty() => {
+            app.pick = (app.pick + 1).min(app.mention_matches().len().saturating_sub(1));
+        }
+        KeyCode::Enter
+            if app
+                .mention_picked()
+                .is_some_and(|picked| Some(picked.text) != app.mentioning()) =>
+        {
+            app.complete_mention();
+        }
         KeyCode::Enter => start_run(app),
         // The task is kept. It took thought to write, and coming back to it
         // after looking something up is the normal way of working.
@@ -417,8 +437,16 @@ fn prompt_key(app: &mut App, key: KeyEvent, records_root: &Path) {
             app.pane_mut().history_at = None;
             app.pick = 0;
         }
-        KeyCode::Left => app.pane_mut().left(),
-        KeyCode::Right => app.pane_mut().right(),
+        // Walking into another word is walking away from whatever was picked
+        // in the last one.
+        KeyCode::Left => {
+            app.pane_mut().left();
+            app.pick = 0;
+        }
+        KeyCode::Right => {
+            app.pane_mut().right();
+            app.pick = 0;
+        }
         KeyCode::Up => app.recall(-1),
         KeyCode::Down => app.recall(1),
         KeyCode::PageUp => app.scroll_by(-(app.page as i16)),
@@ -429,6 +457,11 @@ fn prompt_key(app: &mut App, key: KeyEvent, records_root: &Path) {
             app.pick = 0;
         }
         _ => {}
+    }
+    // Read as a mention starts, so the menu drawn after this key has something
+    // to offer.
+    if app.mentioning().is_some() {
+        app.load_mentionable();
     }
 }
 
@@ -1049,7 +1082,17 @@ fn start_run(app: &mut App) {
     let prompt = app.pane_mut().prompt.trim().to_string();
     // Enter on an empty box, with a plan waiting, is agreeing to the plan.
     let planned = prompt.is_empty() && app.thread().pending_plan.is_some();
-    if prompt.is_empty() && !planned {
+    // Agents named with `@` say who does it, not what is to be done, so a box
+    // holding nothing but names is still an empty task.
+    let agents: Vec<String> = app
+        .workspace
+        .profiles()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|profile| profile.id)
+        .collect();
+    let (task, _, _) = mention::agents_named(&prompt, &agents);
+    if task.is_empty() && !planned {
         // An empty task would be a run whose diff nobody can explain. Say so
         // rather than starting one and refusing it two minutes later.
         app.status = Some("nothing to run \u{2014} write what the agent should do".to_string());
@@ -1083,7 +1126,8 @@ fn start_run(app: &mut App) {
     if planned {
         app.thread_mut().start_planned(workspace, repository);
     } else {
-        app.thread_mut().start(workspace, repository, prompt);
+        app.thread_mut()
+            .start_naming(workspace, repository, prompt, &agents);
     }
 }
 
@@ -1289,6 +1333,66 @@ mod tests {
         typed(&mut a, "!");
         assert_eq!(a.pane().prompt, "left task!");
         assert_eq!(a.panes[1].prompt, "right task");
+    }
+
+    #[test]
+    fn an_at_completes_a_path_and_enter_completes_before_it_runs() {
+        let root = Path::new("/p/.ostraka");
+        let mut a = app();
+        a.mentionable = mention::Mentionable {
+            loaded: true,
+            repository: None,
+            agents: vec!["codex".into()],
+            paths: vec!["src/".into(), "src/main.rs".into()],
+        };
+        typed(&mut a, "fix @s");
+        handle(&mut a, press(KeyCode::Tab), root);
+        assert_eq!(a.pane().prompt, "fix @src/");
+
+        typed(&mut a, "m");
+        handle(&mut a, press(KeyCode::Enter), root);
+        assert_eq!(a.pane().prompt, "fix @src/main.rs ");
+        assert!(
+            a.thread().live.is_none(),
+            "enter ran a task the menu was still completing"
+        );
+    }
+
+    #[test]
+    fn walking_back_into_a_mention_starts_its_menu_at_the_top() {
+        let root = Path::new("/p/.ostraka");
+        let mut a = app();
+        a.mentionable = mention::Mentionable {
+            loaded: true,
+            repository: None,
+            agents: vec![],
+            paths: vec!["src/".into(), "src/main.rs".into()],
+        };
+        typed(&mut a, "@src/ x");
+        // A pick left over from a longer list, which the new word does not have.
+        a.pick = 2;
+        handle(&mut a, press(KeyCode::Left), root);
+        handle(&mut a, press(KeyCode::Left), root);
+        assert_eq!(a.mentioning().as_deref(), Some("src/"));
+        assert_eq!(a.pick, 0);
+        assert_eq!(
+            a.mention_picked().map(|c| c.text),
+            Some("src/main.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn a_box_holding_only_an_agent_is_still_an_empty_task() {
+        let root = Path::new("/p/.ostraka");
+        let mut a = app();
+        typed(&mut a, "   ");
+        handle(&mut a, press(KeyCode::Enter), root);
+        assert!(
+            a.status
+                .as_deref()
+                .is_some_and(|s| s.starts_with("nothing to run"))
+        );
+        assert!(a.thread().live.is_none());
     }
 
     #[test]

@@ -18,6 +18,7 @@
 
 use crate::mode::Mode;
 use crate::run;
+use crate::tui::mention;
 use crate::tui::session::{Finished, Session};
 use crate::workspace::Workspace;
 use ostraka_core::record::Outcome;
@@ -103,11 +104,32 @@ impl Thread {
     /// Starts the next task in this thread's mode, from wherever the chain has
     /// got to. A new task drops any plan still waiting: it was agreed to
     /// nothing, and it was written for a different task.
-    pub fn start(&mut self, workspace: Workspace, repository: Option<String>, prompt: String) {
-        self.history.push(prompt.clone());
+    ///
+    /// The task may name agents with `@`, out of `agents`, the profile ids here.
+    /// A named agent chooses the profile for this one run and leaves the task
+    /// text. The thread's own choice stays as it was, because naming somebody
+    /// for one task is not choosing them for every task after it. What was
+    /// typed, names and all, is what the history and the transcript keep.
+    pub fn start_naming(
+        &mut self,
+        workspace: Workspace,
+        repository: Option<String>,
+        typed: String,
+        agents: &[String],
+    ) {
+        let (task, author, reviewer) = mention::agents_named(&typed, agents);
+        self.history.push(typed.clone());
         self.pending_plan = None;
-        let args = self.args(repository, prompt, self.mode);
-        self.live = Some(Session::start(workspace, args, self.mode));
+        let mut args = self.args(repository, task, self.mode);
+        if author.is_some() {
+            args.adapter = author;
+        }
+        if reviewer.is_some() {
+            args.review_adapter = reviewer;
+        }
+        let mut session = Session::start(workspace, args, self.mode);
+        session.prompt = typed;
+        self.live = Some(session);
     }
 
     /// Runs the plan waiting here, as one run gated and reviewed like any other.

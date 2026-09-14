@@ -25,6 +25,7 @@ use crate::init::{Action, Plan};
 use crate::mode::Mode;
 use crate::remedy::Remedy;
 use crate::tui::command::{Command, Situation};
+use crate::tui::mention::{self, Candidate, Mentionable};
 use crate::tui::pane::{self, Pane};
 use crate::tui::theme;
 use crate::tui::thread::{Thread, Turn};
@@ -198,6 +199,9 @@ pub struct App {
     pub columns: Vec<(usize, Rect)>,
     /// The first pane shown when there are more panes than columns.
     pub first: usize,
+    /// What `@` can name here: this repository's paths and the agents. Read
+    /// when a mention starts, not on every frame.
+    pub mentionable: Mentionable,
 }
 
 impl App {
@@ -240,6 +244,7 @@ impl App {
             prompt_scroll: 0,
             columns: Vec::new(),
             first: 0,
+            mentionable: Mentionable::default(),
         }
     }
 
@@ -531,6 +536,68 @@ impl App {
         self.slash_matches().get(self.pick).copied()
     }
 
+    /// The `@word` being written at the cursor, when there is one.
+    pub fn mentioning(&self) -> Option<String> {
+        if self.focus != Focus::Prompt || self.dialog.is_some() || self.slashing() {
+            return None;
+        }
+        let pane = self.pane();
+        mention::token(&pane.prompt, pane.at()).map(|(_, word)| word.to_string())
+    }
+
+    /// What the `@word` at the cursor could be completed to.
+    pub fn mention_matches(&self) -> Vec<Candidate> {
+        self.mentioning()
+            .map(|word| mention::candidates(&word, &self.mentionable))
+            .unwrap_or_default()
+    }
+
+    pub fn mention_picked(&self) -> Option<Candidate> {
+        let matches = self.mention_matches();
+        let at = self.pick.min(matches.len().saturating_sub(1));
+        matches.get(at).cloned()
+    }
+
+    /// Reads what `@` can name, once for each repository a pane is in.
+    pub fn load_mentionable(&mut self) {
+        let repository = self.repository().map(|r| r.path.clone());
+        if self.mentionable.loaded && self.mentionable.repository == repository {
+            return;
+        }
+        let agents = self
+            .workspace
+            .profiles()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|profile| profile.id)
+            .collect();
+        let paths = repository
+            .as_deref()
+            .map(mention::paths)
+            .unwrap_or_default();
+        self.mentionable = Mentionable {
+            loaded: true,
+            repository,
+            agents,
+            paths,
+        };
+    }
+
+    /// Replaces the `@word` at the cursor with the candidate picked for it.
+    pub fn complete_mention(&mut self) -> bool {
+        let Some(candidate) = self.mention_picked() else {
+            return false;
+        };
+        let pane = self.pane_mut();
+        let Some((prompt, cursor)) = mention::complete(&pane.prompt, pane.at(), &candidate) else {
+            return false;
+        };
+        pane.cursor = (cursor < prompt.len()).then_some(cursor);
+        pane.prompt = prompt;
+        self.pick = 0;
+        true
+    }
+
     /// How many rows the input box wants, border included.
     fn prompt_height(&self) -> u16 {
         // Split rather than `lines`, which drops the empty row a trailing
@@ -612,6 +679,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     render_prompt(frame, app, rows[4]);
     if app.slashing() {
         render_slash(frame, app, rows[4]);
+    } else if !app.mention_matches().is_empty() {
+        render_mention(frame, app, rows[4]);
     }
     let width = rows[5].width.saturating_sub(theme::GUTTER);
     let mut lines = Vec::new();
@@ -1365,6 +1434,57 @@ fn render_slash(frame: &mut Frame, app: &App, box_area: Rect) {
     );
 }
 
+/// What an `@` in the box could name, at the box, the way a slash offers the
+/// commands.
+fn render_mention(frame: &mut Frame, app: &App, box_area: Rect) {
+    const SHOWN: usize = 6;
+    let matches = app.mention_matches();
+    let rows = matches.len().clamp(1, SHOWN);
+    let height = rows as u16 + 2;
+    let width = box_area.width.saturating_sub(theme::GUTTER * 2);
+    if box_area.y < height {
+        return;
+    }
+    let area = Rect {
+        x: box_area.x + theme::GUTTER,
+        y: box_area.y - height,
+        width,
+        height,
+    };
+    // The kind is the last word on the row, and the path has what is left.
+    let room = usize::from(width).saturating_sub(18);
+    let pick = app.pick.min(matches.len().saturating_sub(1));
+    let first = pick.saturating_sub(SHOWN - 1);
+    let lines: Vec<Line<'static>> = matches
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(SHOWN)
+        .map(|(i, candidate)| {
+            let here = i == pick;
+            Line::from(vec![
+                Span::styled(if here { theme::CURSOR } else { " " }, theme::accent()),
+                Span::styled(
+                    format!(" @{:<room$} ", truncate(&candidate.text, room)),
+                    if here {
+                        theme::accent().add_modifier(Modifier::BOLD)
+                    } else {
+                        theme::text()
+                    },
+                ),
+                Span::styled(candidate.kind.word(), theme::muted()),
+            ])
+        })
+        .collect();
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(theme::fit(lines, area.height))
+            .block(theme::panel(true).padding(Padding::horizontal(1))),
+        area,
+    );
+}
+
 /// The repositories this workspace works on.
 fn render_repos(frame: &mut Frame, app: &App, screen: Rect) {
     let width = 78u16.min(screen.width);
@@ -2036,8 +2156,11 @@ fn render_keys(frame: &mut Frame, screen: Rect) {
             "left / right",
             "move through the task; a click puts the cursor",
         ),
-        ("esc", "put the task aside, and take the keys back"),
-        ("n", "take the box back"),
+        (
+            "esc / n",
+            "put the task aside and take the keys; n gives the box back",
+        ),
+        ("@", "a file, a directory or an agent; tab completes it"),
         (label!("t"), "another line of work, open beside this one"),
         (
             concat!(label!("]"), " / ", label!("[")),
@@ -2630,6 +2753,26 @@ mod tests {
             summary: summary.to_string(),
             plan: None,
         }
+    }
+
+    #[test]
+    fn an_at_in_the_box_offers_what_it_could_name() {
+        let mut app = App::new(nowhere(), Vec::new());
+        app.mentionable = Mentionable {
+            loaded: true,
+            repository: None,
+            agents: vec!["codex".into()],
+            paths: vec!["src/".into(), "src/main.rs".into()],
+        };
+        app.pane_mut().prompt = "fix @s".to_string();
+        let out = screen(&mut app, 100, 20);
+        assert!(out.contains("@src/"), "{out}");
+        assert!(out.contains("directory"), "{out}");
+
+        // An address is text, and offers nothing.
+        app.pane_mut().prompt = "mail me@s".to_string();
+        let address = screen(&mut app, 100, 20);
+        assert!(!address.contains("directory"), "{address}");
     }
 
     #[test]

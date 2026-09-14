@@ -733,6 +733,24 @@ A plan runs only once somebody agrees to it. At a terminal the command line asks
 first; anywhere else it prints the plan and runs nothing. The browser holds the
 plan until enter is pressed on an empty box, or until another task replaces it.
 
+**`@` is a name, and the two kinds of name go to different places.** A path is
+part of what is being asked. It stays in the task text, and the agent reads it
+from its own worktree. Nothing is pasted in, because a file's contents in the
+prompt would be a second copy that can disagree with the one in the checkout.
+
+An agent is not part of the task. `tui::mention::agents_named` takes it out of
+the text and makes it the profile for that one run: the first agent named
+writes, and the second reviews. The thread's own choice is left alone, because
+naming somebody for one task is not choosing them for every task after it.
+Routing still refuses a pair that is one profile. What was typed, names
+included, is what the history and the transcript keep, so the record of who
+was asked is on the screen.
+
+Paths come from `git ls-files --cached --others --exclude-standard`, read once
+for each repository a pane is in. Offering what git ignores would put
+`target/` and `node_modules/` in front of every search. A mention starts only at
+the start of a word, so an address in a sentence is not one.
+
 **Nothing waits forever.** `policy.timeout_secs` spent this project's life
 declared, documented as a wall-clock ceiling, and read by nothing — which is
 worse than absent, because someone sets it and believes their fleet is bounded.
