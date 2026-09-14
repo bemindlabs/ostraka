@@ -19,6 +19,22 @@ pub const AUTHOR: &str = "author";
 pub const REVIEWER: &str = "reviewer";
 /// What a run branches from when nobody names anything.
 pub const BASE_REF: &str = "HEAD";
+/// How many attempts a loop gets when nobody says.
+pub const ATTEMPTS: usize = 3;
+
+/// The process, and which run of it. Two runs sharing a task id collide in the
+/// records directory and in every branch name derived from it, and both halves
+/// are needed to rule that out: the process id alone repeats now that a browser
+/// starts several runs without restarting, and the clock alone repeats because
+/// it counts in seconds and two runs fit comfortably inside one. Caught by a
+/// flow test that started two runs and found one record.
+pub fn task_id() -> String {
+    format!(
+        "t{}-{}",
+        std::process::id(),
+        NEXT_RUN.fetch_add(1, Ordering::Relaxed)
+    )
+}
 
 #[derive(Clone)]
 pub struct Args {
@@ -35,6 +51,8 @@ pub struct Args {
     /// commit landed on, and to the repository it was made in.
     pub from: Option<String>,
     pub model: Option<String>,
+    /// How many attempts a refused run gets. One is a run; more is a loop.
+    pub attempts: usize,
 }
 
 impl Args {
@@ -54,6 +72,7 @@ impl Args {
             base_ref: BASE_REF.to_string(),
             from: None,
             model: None,
+            attempts: 1,
         }
     }
 }
@@ -194,18 +213,7 @@ pub fn execute(
     };
 
     let task = TaskSpec {
-        // The process, and which run of it. Two runs sharing a task id collide
-        // in the records directory and in every branch name derived from it,
-        // and both halves are needed to rule that out: the process id alone
-        // repeats now that a browser starts several runs without restarting,
-        // and the clock alone repeats because it counts in seconds and two
-        // runs fit comfortably inside one. Caught by a flow test that started
-        // two runs and found one record.
-        id: format!(
-            "t{}-{}",
-            std::process::id(),
-            NEXT_RUN.fetch_add(1, Ordering::Relaxed)
-        ),
+        id: task_id(),
         prompt: args.prompt.clone(),
         adapter: routing_author_id(&routing),
         author: ActorId::new(&args.author),
@@ -240,8 +248,123 @@ pub fn execute(
     )?)
 }
 
+/// Refusals a loop tries again after: the ones that are about the change.
+///
+/// A failed check, a sent-back change and no change at all are all things a
+/// second attempt can do better. A vendor that could not start, a clock that ran
+/// out, an operator who stopped it and a worktree that could not be prepared are
+/// not about the change, and trying again would spend another attempt on the
+/// same wall. A policy violation is never retried: it means something wrote
+/// where it had no business writing, and a loop that tried again would be
+/// asking it to find another way in.
+pub fn worth_retrying(refusal: &ostraka_runtime::gate::Refusal) -> bool {
+    use ostraka_runtime::gate::Refusal;
+    matches!(
+        refusal,
+        Refusal::ChecksFailed { .. } | Refusal::Rejected { .. } | Refusal::NoChange
+    )
+}
+
+/// How much of a failing check's output the next attempt is shown. The end of
+/// it, which is where test runners and compilers say what went wrong.
+const FEEDBACK_TAIL: usize = 1500;
+
+/// The task a loop's next attempt is given: the task, and why the last attempt
+/// was not kept.
+///
+/// This is the one place an author learns a verdict exists, which the author
+/// prompt otherwise keeps from it on purpose. It is told the reason, never the
+/// marker: the marker is derived after authoring, per run, so nothing written
+/// here can match the next one.
+pub fn feedback(task: &str, refusal: &ostraka_runtime::gate::Refusal) -> String {
+    use ostraka_runtime::gate::Refusal;
+    let mut said = format!("{task}\n\n----- the last attempt at this was not kept -----\n\n");
+    match refusal {
+        Refusal::ChecksFailed { failed, records } => {
+            said.push_str(&format!(
+                "The project's checks failed: {}.\n",
+                failed.join(", ")
+            ));
+            for record in records.iter().filter(|r| !r.passed()) {
+                let output = format!("{}{}", record.stdout, record.stderr);
+                let mut from = output.len().saturating_sub(FEEDBACK_TAIL);
+                while !output.is_char_boundary(from) {
+                    from += 1;
+                }
+                said.push_str(&format!(
+                    "\n`{}` ended with:\n{}\n",
+                    record.cmd,
+                    output[from..].trim_end()
+                ));
+            }
+        }
+        Refusal::Rejected { reason } => {
+            said.push_str(&format!("It was sent back, and this is why: {reason}\n"));
+        }
+        Refusal::NoChange => {
+            said.push_str("It finished without changing any file, so there was nothing to keep.\n");
+        }
+        other => said.push_str(&format!("{}\n", describe(other))),
+    }
+    said.push_str(
+        "\nNothing from that attempt is in this worktree. Start from the task again, \
+         and deal with what went wrong.\n",
+    );
+    said
+}
+
+/// [`execute`], again, while the refusal is one worth another attempt and
+/// attempts remain.
+///
+/// Every attempt is a whole run: its own worktree, its own gate, its own review
+/// and its own record. Nothing is relaxed to get a loop — a refused attempt has
+/// no commit, so the next one branches from where the first did, and the only
+/// thing carried across is the reason. `watcher` is asked for a fresh watcher
+/// per attempt, and `again` is told before each retry which attempt it is and
+/// what the last one was refused for.
+pub fn execute_looping(
+    workspace: &Workspace,
+    args: &Args,
+    mut watcher: impl FnMut() -> Option<Box<dyn Watcher>>,
+    stop: &ostraka_adapter::interrupt::Stop,
+    mut again: impl FnMut(usize, &ostraka_runtime::gate::Refusal),
+) -> Result<RunReport, Box<dyn std::error::Error>> {
+    let mut attempt = args.clone();
+    let mut report = execute(workspace, &attempt, watcher(), stop)?;
+    for n in 2..=args.attempts.max(1) {
+        let Some(refusal) = report.refusal.as_ref().filter(|r| worth_retrying(r)) else {
+            break;
+        };
+        if stop.requested() {
+            break;
+        }
+        again(n, refusal);
+        attempt.prompt = feedback(&args.prompt, refusal);
+        report = execute(workspace, &attempt, watcher(), stop)?;
+    }
+    Ok(report)
+}
+
 pub fn run(workspace: &Workspace, args: &Args, json: bool) -> Outcome {
     run_with(workspace, args, json, |_| {})
+}
+
+/// A run from the command line: as many attempts as it was given, each one
+/// announced on stderr before it starts.
+fn attempted(workspace: &Workspace, args: &Args) -> Result<RunReport, Box<dyn std::error::Error>> {
+    execute_looping(
+        workspace,
+        args,
+        || None,
+        &ostraka_adapter::interrupt::Stop::new(),
+        |n, refusal| {
+            eprintln!(
+                "attempt {n} of {}: the last one was not kept \u{2014} {}",
+                args.attempts,
+                describe(refusal)
+            );
+        },
+    )
 }
 
 /// Everything `run` does, with a look at the report on the way past.
@@ -269,12 +392,7 @@ fn run_with(
     // typing into. Where a run failed for want of a profile and one is
     // installed, the operator is asked; accepting writes it and the run is
     // tried once more, on a workspace that now declares what it uses.
-    let report = match execute(
-        workspace,
-        args,
-        None,
-        &ostraka_adapter::interrupt::Stop::new(),
-    ) {
+    let report = match attempted(workspace, args) {
         Ok(report) => report,
         Err(e) => {
             let Some(problem) = e.downcast_ref::<crate::discover::NoAdapter>() else {
@@ -288,12 +406,7 @@ fn run_with(
                 !json && crate::offer::at_a_terminal(),
             )?;
             match choice {
-                crate::offer::Choice::Wrote => execute(
-                    workspace,
-                    args,
-                    None,
-                    &ostraka_adapter::interrupt::Stop::new(),
-                )?,
+                crate::offer::Choice::Wrote => attempted(workspace, args)?,
                 // Once. A second failure is the answer, not another question.
                 crate::offer::Choice::Declined | crate::offer::Choice::NotAsked => return Err(e),
             }
@@ -387,5 +500,65 @@ pub fn describe(refusal: &ostraka_runtime::gate::Refusal) -> String {
         Refusal::SelfApproval { actor } => {
             format!("{actor} cannot approve a change {actor} wrote")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ostraka_core::gate::CheckRecord;
+    use ostraka_runtime::gate::Refusal;
+
+    #[test]
+    fn only_what_is_about_the_change_is_tried_again() {
+        assert!(worth_retrying(&Refusal::NoChange));
+        assert!(worth_retrying(&Refusal::Rejected {
+            reason: "no tests".into()
+        }));
+        assert!(!worth_retrying(&Refusal::Interrupted));
+        assert!(!worth_retrying(&Refusal::TimedOut { after_secs: 60 }));
+        assert!(!worth_retrying(&Refusal::PolicyViolation {
+            reason: "wrote outside src".into()
+        }));
+        assert!(!worth_retrying(&Refusal::AuthorFailed {
+            code: "1".into(),
+            diagnostics: None
+        }));
+    }
+
+    #[test]
+    fn the_next_attempt_is_told_the_task_and_why_the_last_was_not_kept() {
+        let failing = CheckRecord {
+            name: "test".into(),
+            cmd: "cargo test".into(),
+            exit_code: Some(101),
+            stdout: format!("{}assertion failed: left == right", "x".repeat(4000)),
+            stderr: String::new(),
+            duration_ms: 3,
+        };
+        let said = feedback(
+            "add a flag",
+            &Refusal::ChecksFailed {
+                failed: vec!["test".into()],
+                records: vec![failing],
+            },
+        );
+        assert!(said.starts_with("add a flag"));
+        assert!(said.contains("`cargo test` ended with"));
+        assert!(said.contains("assertion failed: left == right"));
+        assert!(
+            said.len() < 2500,
+            "the whole output was pasted: {}",
+            said.len()
+        );
+
+        let sent_back = feedback(
+            "add a flag",
+            &Refusal::Rejected {
+                reason: "it has no test".into(),
+            },
+        );
+        assert!(sent_back.contains("it has no test"));
+        assert!(!sent_back.contains("VERDICT"));
     }
 }

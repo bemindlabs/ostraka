@@ -22,6 +22,7 @@
 
 use crate::chord::label;
 use crate::init::{Action, Plan};
+use crate::mode::Mode;
 use crate::remedy::Remedy;
 use crate::tui::command::{Command, Situation};
 use crate::tui::pane::{self, Pane};
@@ -1272,10 +1273,12 @@ fn render_prompt(frame: &mut Frame, app: &App, area: Rect) {
                     }
                 }
                 if pane.prompt.is_empty() {
-                    spans.push(Span::styled(
-                        "  say what the agent should do \u{b7} enter runs it",
-                        theme::muted(),
-                    ));
+                    let hint = if pane.thread.pending_plan.is_some() {
+                        "  enter runs the plan above \u{b7} or write another task"
+                    } else {
+                        "  say what the agent should do \u{b7} enter runs it"
+                    };
+                    spans.push(Span::styled(hint, theme::muted()));
                 }
                 Line::from(spans)
             })
@@ -1287,10 +1290,26 @@ fn render_prompt(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         Span::styled("\u{203a}", theme::muted())
     };
+    // What enter will do, on the box enter is pressed in. Muted for the mode
+    // that runs, marked for the three that do something else.
+    let mode = app.thread().mode;
+    let named = Span::styled(
+        format!("{} ", mode.word()),
+        if mode == Mode::Auto {
+            theme::muted()
+        } else {
+            theme::accent()
+        },
+    );
     frame.render_widget(
         Paragraph::new(text)
             .scroll((scroll, 0))
-            .block(block.title(Line::from(vec![Span::raw(" "), mark, Span::raw(" ")]))),
+            .block(block.title(Line::from(vec![
+                Span::raw(" "),
+                mark,
+                Span::raw(" "),
+                named,
+            ]))),
         inner,
     );
 }
@@ -2007,6 +2026,10 @@ fn render_keys(frame: &mut Frame, screen: Rect) {
     let rows: Vec<(&str, &str)> = vec![
         ("type", "the box has the keys; what you type is the task"),
         ("enter", "run it"),
+        (
+            "shift-tab",
+            "ask, plan, loop or auto \u{2014} what enter does",
+        ),
         ("alt-enter", "another line, for a task that needs one"),
         ("up / down", "what you have asked here before"),
         (
@@ -2020,8 +2043,9 @@ fn render_keys(frame: &mut Frame, screen: Rect) {
             concat!(label!("]"), " / ", label!("[")),
             "move between them",
         ),
-        ("< / >", "move this pane left or right"),
-        ("+ / - / =", "wider, narrower, even \u{2014} side by side"),
+        // One row for the five, because they are one idea and the dialog has
+        // to fit an eighty-by-twenty-six terminal with its way out still on it.
+        ("< > + - =", "move, widen, narrow, even out the panes"),
         ("s", "ask a running agent to stop"),
         ("l", "the runs recorded here"),
         ("w", "the repositories, and n starts one"),
@@ -2604,7 +2628,22 @@ mod tests {
             run_id: run_id.to_string(),
             outcome: Some(outcome),
             summary: summary.to_string(),
+            plan: None,
         }
+    }
+
+    #[test]
+    fn the_box_says_what_enter_will_do() {
+        let mut app = App::new(nowhere(), Vec::new());
+        assert!(screen(&mut app, 100, 20).contains("\u{203a} auto"));
+
+        app.thread_mut().mode = Mode::Plan;
+        let out = screen(&mut app, 100, 20);
+        assert!(out.contains("\u{203a} plan"), "{out}");
+
+        app.thread_mut().pending_plan = Some(("a task".into(), "1. a step".into()));
+        let waiting = screen(&mut app, 100, 20);
+        assert!(waiting.contains("enter runs the plan above"), "{waiting}");
     }
 
     /// A turn that is over, put straight into the thread.

@@ -438,6 +438,9 @@ pub fn measure(
             base_ref: run::BASE_REF.to_string(),
             from: None,
             model: cell.model.clone(),
+            // One. A benchmark measures what a profile does with a task, and a
+            // loop would measure what it does with three.
+            attempts: 1,
         };
         let (verdict, run_id, tokens) = match run::execute(
             workspace,

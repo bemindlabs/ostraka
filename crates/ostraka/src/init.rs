@@ -196,8 +196,9 @@ pub fn write_profile(workspace: &crate::workspace::Workspace, id: &str) -> std::
 /// configuration and the adapter profiles live in there too and those are
 /// meant to be committed — a workspace's agreement about how runs are made is
 /// not working evidence.
-const IGNORED: [&str; 5] = [
+const IGNORED: [&str; 6] = [
     "/.ostraka/runs/",
+    "/.ostraka/consulted/",
     "/.ostraka/worktrees/",
     "/.ostraka/cache/",
     "/.ostraka/secrets/",
@@ -829,7 +830,7 @@ mod tests {
     #[test]
     fn a_gitignore_that_already_covers_it_is_left_alone() {
         let dir = scratch();
-        std::fs::write(dir.join(".gitignore"), "/.ostraka/runs/\n/.ostraka/worktrees/\n/.ostraka/cache/\n/.ostraka/secrets/\n/.ostraka/vendor-home/\n").expect("write");
+        std::fs::write(dir.join(".gitignore"), "/.ostraka/runs/\n/.ostraka/consulted/\n/.ostraka/worktrees/\n/.ostraka/cache/\n/.ostraka/secrets/\n/.ostraka/vendor-home/\n").expect("write");
         let plan = plan(&dir);
         let ignore = plan
             .files

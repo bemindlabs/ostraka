@@ -21,6 +21,7 @@ mod view;
 
 use crate::chord::{self, label};
 use crate::init;
+use crate::mode::Mode;
 use crate::workspace::Workspace;
 use command::Command;
 use ostraka_runtime::promote::{self, NotPromoted};
@@ -381,6 +382,19 @@ fn prompt_key(app: &mut App, key: KeyEvent, records_root: &Path) {
         // could not hold one would push the work back out to the shell.
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => app.pane_mut().insert('\n'),
         KeyCode::Char('j') if control => app.pane_mut().insert('\n'),
+        // A mode is not a command, and typing its name is how somebody who
+        // knows it reaches for it. Read before the commands, because "ask" is
+        // inside "write a task" and would otherwise start writing one.
+        KeyCode::Enter if app.slashing() && Mode::named(&app.pane().prompt).is_some() => {
+            let mode = Mode::named(&app.pane().prompt).unwrap_or_default();
+            app.pane_mut().replace(String::new());
+            app.pick = 0;
+            set_mode(app, mode);
+        }
+        KeyCode::BackTab => {
+            let next = app.thread().mode.next();
+            set_mode(app, next);
+        }
         KeyCode::Enter if app.slashing() => {
             let picked = app.slash_picked();
             app.pane_mut().replace(String::new());
@@ -455,6 +469,7 @@ fn command_key(app: &mut App, key: KeyEvent, records_root: &Path) {
         KeyCode::Char('+') => perform(app, Command::WiderPane, records_root),
         KeyCode::Char('-') => perform(app, Command::NarrowerPane, records_root),
         KeyCode::Char('=') => perform(app, Command::EvenPanes, records_root),
+        KeyCode::Char('m') | KeyCode::BackTab => perform(app, Command::Mode, records_root),
         KeyCode::Char('j') | KeyCode::Down => {
             app.move_by(1);
             load_detail(app, records_root);
@@ -596,9 +611,19 @@ fn perform(app: &mut App, command: Command, records_root: &Path) {
             Err(e) => app.status = Some(format!("could not reload: {e}")),
         },
         Command::Setup => initialise(app, records_root),
+        Command::Mode => {
+            let next = app.thread().mode.next();
+            set_mode(app, next);
+        }
         Command::Keys => app.open(Dialog::Keys),
         Command::Quit => leave(app),
     }
+}
+
+/// Changes what enter does in this thread, and says so where it will be read.
+fn set_mode(app: &mut App, mode: Mode) {
+    app.thread_mut().mode = mode;
+    app.status = Some(format!("{} \u{2014} {}", mode.word(), mode.about()));
 }
 
 /// Why a command is not on offer, said as the reason rather than as a refusal.
@@ -1022,7 +1047,9 @@ fn adopt(app: &mut App) -> Option<String> {
 /// or from a keystroke.
 fn start_run(app: &mut App) {
     let prompt = app.pane_mut().prompt.trim().to_string();
-    if prompt.is_empty() {
+    // Enter on an empty box, with a plan waiting, is agreeing to the plan.
+    let planned = prompt.is_empty() && app.thread().pending_plan.is_some();
+    if prompt.is_empty() && !planned {
         // An empty task would be a run whose diff nobody can explain. Say so
         // rather than starting one and refusing it two minutes later.
         app.status = Some("nothing to run \u{2014} write what the agent should do".to_string());
@@ -1053,7 +1080,11 @@ fn start_run(app: &mut App) {
     app.screen = Screen::Work;
     let repository = app.repository().map(|r| r.name.clone());
     let workspace = app.workspace.clone();
-    app.thread_mut().start(workspace, repository, prompt);
+    if planned {
+        app.thread_mut().start_planned(workspace, repository);
+    } else {
+        app.thread_mut().start(workspace, repository, prompt);
+    }
 }
 
 /// Leaving, asked rather than assumed.
@@ -1258,6 +1289,45 @@ mod tests {
         typed(&mut a, "!");
         assert_eq!(a.pane().prompt, "left task!");
         assert_eq!(a.panes[1].prompt, "right task");
+    }
+
+    #[test]
+    fn a_mode_is_chosen_by_name_or_by_shift_tab_and_is_never_run_as_a_task() {
+        let root = Path::new("/p/.ostraka");
+        let mut a = app();
+        assert_eq!(a.thread().mode, Mode::Auto);
+
+        typed(&mut a, "/plan");
+        handle(&mut a, press(KeyCode::Enter), root);
+        assert_eq!(a.thread().mode, Mode::Plan);
+        assert!(a.pane().prompt.is_empty());
+        assert!(
+            a.thread().live.is_none(),
+            "the mode's name was run as a task"
+        );
+
+        // "ask" is inside "write a task", which is exactly the collision.
+        typed(&mut a, "/ask");
+        handle(&mut a, press(KeyCode::Enter), root);
+        assert_eq!(a.thread().mode, Mode::Ask);
+        assert_eq!(a.focus, Focus::Prompt, "the box was not kept");
+
+        handle(&mut a, press(KeyCode::BackTab), root);
+        assert_eq!(a.thread().mode, Mode::Plan);
+        assert!(a.status.as_deref().is_some_and(|s| s.starts_with("plan")));
+    }
+
+    #[test]
+    fn enter_on_an_empty_box_says_so_unless_a_plan_is_waiting() {
+        let root = Path::new("/p/.ostraka");
+        let mut a = app();
+        handle(&mut a, press(KeyCode::Enter), root);
+        assert!(
+            a.status
+                .as_deref()
+                .is_some_and(|s| s.starts_with("nothing to run"))
+        );
+        assert!(a.thread().pending_plan.is_none());
     }
 
     #[test]

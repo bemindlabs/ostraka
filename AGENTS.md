@@ -706,6 +706,33 @@ before this many terminals turned the wheel into arrow keys, where the up arrow
 walks history. Capture is released on the way out and on a panic, as the
 keyboard protocol is.
 
+**Ask, plan, loop and auto are ways into the pipeline, not around it.**
+`mode::Mode` and everything it needs live in the binary crate. The public types
+it could have touched — `Refusal`, `RunRecord`, `Phase`, `Profile` — are not
+`#[non_exhaustive]`, and a variant or field on any of them breaks SemVer.
+
+- **Auto** is the run as it was.
+- **Loop** is `run::execute_looping`. Each attempt is a whole run with its own
+  worktree, gate, review and record, and the only thing carried to the next
+  attempt is the reason, in its task. It retries a failed check, a sent-back
+  change or no change. It never retries a vendor that could not run, a clock
+  that ran out, an operator's stop or a policy violation, because none of those
+  is about the change. This is the one place an author learns a verdict exists,
+  which the author prompt otherwise keeps from it. It is told the reason and
+  never the marker, and the marker is derived per run, after authoring.
+- **Ask and plan** are `consult`: one profile, launched with its review
+  invocation in a worktree of its own, then `git status`. A profile with no
+  `review_args` is refused, not asked through an invocation that can write.
+  Routing only orders reviewers, because the tree check before a commit catches
+  a reviewer that writes. A question has no commit, so nothing would catch it. A
+  clean worktree is removed with its branch. A dirty one is refused and kept.
+  Consultations are recorded in `.ostraka/consulted/`, not among the runs,
+  because the run list is a list of changes.
+
+A plan runs only once somebody agrees to it. At a terminal the command line asks
+first; anywhere else it prints the plan and runs nothing. The browser holds the
+plan until enter is pressed on an empty box, or until another task replaces it.
+
 **Nothing waits forever.** `policy.timeout_secs` spent this project's life
 declared, documented as a wall-clock ceiling, and read by nothing — which is
 worse than absent, because someone sets it and believes their fleet is bounded.
