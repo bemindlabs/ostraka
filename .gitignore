@@ -9,6 +9,10 @@
 /.ostraka/runs/
 /.ostraka/cache/
 
+# What asking and planning recorded. Working evidence, like a run record, and
+# kept apart from the runs because the run list is a list of changes.
+/.ostraka/consulted/
+
 # Benchmark reports. Working evidence like a run record: the suite that
 # produced them is committed, the numbers a particular machine got are not.
 /.ostraka/bench/

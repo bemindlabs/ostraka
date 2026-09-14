@@ -350,6 +350,24 @@ wants a terminal that speaks it, such as kitty, WezTerm or Ghostty, with those
 keys not bound to the terminal's own actions. Terminal.app and iTerm2 keep
 command for themselves. `ctrl-c` stays control everywhere.
 
+**Shift-tab chooses what enter does.** The box shows the mode:
+
+| mode | what enter does | writes | gated and reviewed |
+|---|---|---|---|
+| `auto` | runs the task | yes | yes |
+| `ask` | answers a question from the repository | no | nothing to gate |
+| `plan` | writes a plan; enter on an empty box then runs it | no, until you agree | the run is |
+| `loop` | runs the task, and if it is refused, tries again with the reason, up to three times | yes | every attempt |
+
+`/ask`, `/plan`, `/loop` and `/auto` in the box choose one too, and
+`ostraka run --mode ask|plan|loop|auto` is the same choice at the command line
+(`--attempts` sets a loop's limit). Asking and planning use a profile's
+read-only invocation, and a profile without one is refused. If a worktree
+changes anyway, the result is refused and the worktree is kept. A loop tries
+again after a failed check, a sent-back change or no change at all. It never
+tries again after a vendor error, a timeout, a stop or a policy violation. No
+mode merges anything.
+
 **`a` chooses who writes and who reviews.** Routing picks a pair on its own and
 is usually right — it prefers a reviewer that is a *different binary* from the
 author, which is the property that makes a review worth having. Naming one is a

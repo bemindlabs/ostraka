@@ -5,11 +5,13 @@ mod banner;
 mod bench;
 mod check;
 mod chord;
+mod consult;
 mod discover;
 mod drain;
 mod fix;
 mod init;
 mod init_cmd;
+mod mode;
 mod offer;
 mod promote;
 mod prune;
@@ -154,6 +156,17 @@ enum Commands {
         /// Model hint passed through to the adapter.
         #[arg(long)]
         model: Option<String>,
+
+        /// What the task is for. `ask` and `plan` consult one read-only
+        /// profile and write nothing; `loop` tries a refused run again with
+        /// the reason; `auto` is one run. Every change is gated and reviewed,
+        /// and nothing is merged.
+        #[arg(long, value_enum, default_value_t = mode::Mode::Auto)]
+        mode: mode::Mode,
+
+        /// How many attempts `--mode loop` gets.
+        #[arg(long, default_value_t = run::ATTEMPTS)]
+        attempts: usize,
     },
 
     /// Write a shell completion script to stdout.
@@ -352,6 +365,8 @@ fn main() -> ExitCode {
             base_ref,
             from,
             model,
+            mode,
+            attempts,
         } => {
             let args = run::Args {
                 prompt: prompt.clone().unwrap_or_default(),
@@ -363,11 +378,26 @@ fn main() -> ExitCode {
                 base_ref: base_ref.clone(),
                 from: from.clone(),
                 model: model.clone(),
+                attempts: if *mode == mode::Mode::Loop {
+                    *attempts
+                } else {
+                    1
+                },
             };
-            if *next {
+            if *mode == mode::Mode::Loop && *attempts == 0 {
+                Err("a loop needs at least one attempt".into())
+            } else if mode.consults() && (*next || from.is_some()) {
+                Err(format!(
+                    "--mode {} consults an agent about a task; `--next` and `--from` are for runs",
+                    mode.word()
+                )
+                .into())
+            } else if *next {
                 task_cmd::run_next(&workspace, args, cli.json)
             } else if args.prompt.is_empty() {
                 Err("say what the agent should do, or `--next` to take it from the list".into())
+            } else if mode.consults() {
+                consult::run(&workspace, &args, *mode, cli.json)
             } else {
                 run::run(&workspace, &args, cli.json)
             }

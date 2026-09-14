@@ -9,10 +9,12 @@
 //! Pressing a key and typing a command reach one pipeline, so the gate cannot
 //! be different on one of them.
 
+use crate::consult;
+use crate::mode::Mode;
 use crate::run;
 use crate::workspace::Workspace;
-use ostraka_core::record::Outcome;
-use ostraka_runtime::progress::{Channel, Phase, Step};
+use ostraka_core::record::{Event, Outcome};
+use ostraka_runtime::progress::{Channel, Phase, Step, Watcher};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -22,6 +24,9 @@ pub struct Finished {
     pub run_id: String,
     pub outcome: Option<Outcome>,
     pub summary: String,
+    /// The plan a consultation in plan mode came back with, when it came back
+    /// clean. What enter runs next.
+    pub plan: Option<String>,
 }
 
 pub struct Session {
@@ -48,8 +53,9 @@ pub struct Session {
 }
 
 impl Session {
-    /// Starts a run on a thread and returns something to watch it with.
-    pub fn start(workspace: Workspace, args: run::Args) -> Self {
+    /// Starts a run, or a consultation, on a thread and returns something to
+    /// watch it with.
+    pub fn start(workspace: Workspace, args: run::Args, mode: Mode) -> Self {
         let prompt = args.prompt.clone();
         // Made before the thread and owned by this session, not shared. A stop
         // asked for in the same breath as the run — n, a task, enter, s — lands
@@ -61,23 +67,56 @@ impl Session {
         let (done_out, done_in) = mpsc::channel();
 
         let worker = std::thread::spawn(move || {
-            let result = run::execute(
-                &workspace,
-                &args,
-                Some(Box::new(Channel(steps_out))),
-                &worker_stop,
-            )
-            .map(|report| Finished {
-                run_id: report.record.run_id.clone(),
-                outcome: report.record.outcome,
-                summary: match (&report.token, &report.refusal) {
-                    (Some(_), _) => "approved — nothing merged".to_string(),
-                    (None, Some(refusal)) => {
-                        format!("rejected — {}", run::describe(refusal))
-                    }
-                    (None, None) => "rejected".to_string(),
-                },
-            })
+            let result = if mode.consults() {
+                consult::consult(
+                    &workspace,
+                    &args,
+                    mode,
+                    Some(Box::new(Channel(steps_out))),
+                    &worker_stop,
+                )
+                .map(|consulted| Finished {
+                    run_id: consulted.id.clone(),
+                    outcome: None,
+                    summary: consulted.summary(),
+                    plan: (mode == Mode::Plan && consulted.clean())
+                        .then(|| consulted.answer.clone()),
+                })
+            } else {
+                let attempts = args.attempts;
+                run::execute_looping(
+                    &workspace,
+                    &args,
+                    || Some(Box::new(Channel(steps_out.clone())) as Box<dyn Watcher>),
+                    &worker_stop,
+                    |n, refusal| {
+                        // Said in the transcript, where the attempt it explains
+                        // is about to appear.
+                        let _ = steps_out.send(Step::Said {
+                            phase: Phase::Authoring,
+                            event: Event::Message {
+                                text: format!(
+                                    "attempt {n} of {attempts} \u{2014} the last one was not kept: {}",
+                                    run::describe(refusal)
+                                ),
+                                raw: None,
+                            },
+                        });
+                    },
+                )
+                .map(|report| Finished {
+                    run_id: report.record.run_id.clone(),
+                    outcome: report.record.outcome,
+                    summary: match (&report.token, &report.refusal) {
+                        (Some(_), _) => "approved — nothing merged".to_string(),
+                        (None, Some(refusal)) => {
+                            format!("rejected — {}", run::describe(refusal))
+                        }
+                        (None, None) => "rejected".to_string(),
+                    },
+                    plan: None,
+                })
+            }
             // Flattened to a string here, on the thread that produced it.
             // A boxed error is not `Send`, and the screen has no use for
             // one that a sentence does not serve better.
@@ -238,6 +277,7 @@ mod tests {
                 run_id: "t1-20260907T000300Z".into(),
                 outcome: Some(Outcome::Approved),
                 summary: "approved — nothing merged".into(),
+                plan: None,
             }),
         );
         assert!(!session.live());

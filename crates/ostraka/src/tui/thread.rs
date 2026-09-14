@@ -16,6 +16,7 @@
 //! did. Continuing from a change the gate would not take would be a way of
 //! taking it.
 
+use crate::mode::Mode;
 use crate::run;
 use crate::tui::session::{Finished, Session};
 use crate::workspace::Workspace;
@@ -59,6 +60,11 @@ pub struct Thread {
     /// end up in the commit trailers, so they are worth being able to set.
     pub author: String,
     pub reviewer: String,
+    /// What enter does with the next task.
+    pub mode: Mode,
+    /// A plan that came back clean, and the task it was written for, until
+    /// somebody runs it or writes another task.
+    pub pending_plan: Option<(String, String)>,
 }
 
 impl Default for Thread {
@@ -73,6 +79,8 @@ impl Default for Thread {
             model: None,
             author: run::AUTHOR.to_string(),
             reviewer: run::REVIEWER.to_string(),
+            mode: Mode::default(),
+            pending_plan: None,
         }
     }
 }
@@ -92,9 +100,32 @@ impl Thread {
         self.base_ref != run::BASE_REF
     }
 
-    /// Starts the next run, from wherever the chain has got to.
+    /// Starts the next task in this thread's mode, from wherever the chain has
+    /// got to. A new task drops any plan still waiting: it was agreed to
+    /// nothing, and it was written for a different task.
     pub fn start(&mut self, workspace: Workspace, repository: Option<String>, prompt: String) {
         self.history.push(prompt.clone());
+        self.pending_plan = None;
+        let args = self.args(repository, prompt, self.mode);
+        self.live = Some(Session::start(workspace, args, self.mode));
+    }
+
+    /// Runs the plan waiting here, as one run gated and reviewed like any other.
+    /// Returns false when there is no plan to run.
+    pub fn start_planned(&mut self, workspace: Workspace, repository: Option<String>) -> bool {
+        let Some((task, plan)) = self.pending_plan.take() else {
+            return false;
+        };
+        let args = self.args(repository, Mode::planned(&task, &plan), Mode::Auto);
+        let mut session = Session::start(workspace, args, Mode::Auto);
+        // The transcript says what was asked, not the plan pasted under it: the
+        // plan is already on the screen, in the turn above.
+        session.prompt = format!("{task} \u{2014} following the agreed plan");
+        self.live = Some(session);
+        true
+    }
+
+    fn args(&self, repository: Option<String>, prompt: String, mode: Mode) -> run::Args {
         let mut args = run::Args::for_task(prompt);
         args.repository = repository;
         args.base_ref = self.base_ref.clone();
@@ -103,7 +134,10 @@ impl Thread {
         args.model = self.model.clone();
         args.author = self.author.clone();
         args.reviewer = self.reviewer.clone();
-        self.live = Some(Session::start(workspace, args));
+        if mode == Mode::Loop {
+            args.attempts = run::ATTEMPTS;
+        }
+        args
     }
 
     /// Takes what the run has said, and closes it out when it is over.
@@ -133,6 +167,9 @@ impl Thread {
             failed: session.failed,
         };
         let ended = turn.finished.as_ref().map(|f| f.run_id.clone());
+        if let Some(plan) = turn.finished.as_ref().and_then(|f| f.plan.clone()) {
+            self.pending_plan = Some((turn.prompt.clone(), plan));
+        }
 
         // The chain advances only through the gate. A refused run leaves the
         // next task starting where this one did, because building on a change
@@ -171,7 +208,28 @@ mod tests {
             run_id: run_id.to_string(),
             outcome: Some(outcome),
             summary: format!("{outcome:?}"),
+            plan: None,
         }
+    }
+
+    #[test]
+    fn a_clean_plan_waits_to_be_run_and_does_not_move_the_chain() {
+        let mut thread = Thread::default();
+        ended(
+            &mut thread,
+            "add a flag",
+            Some(Finished {
+                run_id: "plan-t1-1".into(),
+                outcome: None,
+                summary: "planned \u{2014} nothing written".into(),
+                plan: Some("1. edit main.rs".into()),
+            }),
+        );
+        assert_eq!(
+            thread.pending_plan,
+            Some(("add a flag".to_string(), "1. edit main.rs".to_string()))
+        );
+        assert_eq!(thread.base_ref, "HEAD", "a plan moved the chain");
     }
 
     fn ended(thread: &mut Thread, prompt: &str, finished: Option<Finished>) {
