@@ -999,6 +999,27 @@ The tag is published either way; the formula lands when a person merges it, and
 guesses: a missing sidecar or a surviving `0000…` placeholder fails the job
 instead of publishing a formula that installs nothing.
 
+**Every release gets written notes.** The release job creates the release with
+notes GitHub generates from the pull requests since the last tag. That is only
+a floor, so no release goes out with an empty description, which is how v1.4.0
+and v1.5.0 were first published. Cutting a release is not finished until its
+description is replaced with written notes:
+
+```
+gh release edit vX.Y.Z --notes-file notes.md
+```
+
+The notes open with one sentence on what the release is for, then:
+- `## New` and `## Changed`, each line ending with its pull request number
+- `## Upgrading`: the SemVer impact, and whether existing workspaces must copy
+  new profiles from `adapters/`
+- `## Install`: the channels that are actually published
+- a full-changelog compare link
+
+They describe what that version shipped, even where a later release reverses
+it. Read the body back after editing it, because a notes file that failed to
+upload leaves the generated floor looking finished.
+
 **The npm package carries no binary.** `npm/` names a version, downloads the
 release artifact for the running platform, verifies the checksum published
 beside it, and hands off. The launcher is deliberately thin — anything it did
