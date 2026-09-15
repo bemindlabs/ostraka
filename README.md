@@ -347,12 +347,22 @@ command is also on the `ctrl-x` leader and in the `ctrl-k` palette, and the list
 of commands is the authority for all three, so a key cannot do what the palette
 has decided not to offer.
 
-On macOS every chord is held with command instead — `cmd-x`, `cmd-k`, `cmd-t`,
-`cmd-]` — and the screen names whichever this machine uses. Command reaches a
-terminal program only over the kitty keyboard protocol, so on a Mac the browser
-wants a terminal that speaks it, such as kitty, WezTerm or Ghostty, with those
-keys not bound to the terminal's own actions. Terminal.app and iTerm2 keep
-command for themselves. `ctrl-c` stays control everywhere.
+Every chord is held with control, on every platform. On macOS command works as
+well, where the terminal passes it through: kitty, WezTerm and Ghostty can,
+while Terminal.app and iTerm2 keep command-x, command-k and command-t for
+themselves. To use other keys, name them in `~/.config/ostraka/keys.toml`
+(`$XDG_CONFIG_HOME/ostraka/keys.toml` where that is set):
+
+```toml
+leader = "alt-x"             # one binding
+commands = ["f2", "ctrl-p"]  # or several
+new_pane = "ctrl-t"
+next_pane = "ctrl-]"
+previous_pane = "ctrl-["
+```
+
+The screen names whichever key comes first. `ctrl-c` leaves and `ctrl-j` starts
+a new line, and neither can be rebound.
 
 **Shift-tab chooses what enter does.** The box shows the mode:
 
@@ -399,9 +409,8 @@ it printed, what the reviewer said, the diff read from the commit, and `p` to
 promote it. `?` lists every key, and `q` asks before it leaves —
 quitting can discard the task in the box and stop a run that is going.
 
-`ctrl-t` (`cmd-t` on macOS) opens another line of work beside this one — its
-own thread, its own repository, its own half-written task — and `ctrl-]`
-(`cmd-]` on macOS) moves between them. They
+`ctrl-t` opens another line of work beside this one — its
+own thread, its own repository, its own half-written task — and `ctrl-]` and `ctrl-[` move between them. They
 sit side by side from 160 columns, up to three at once, and take turns on
 anything narrower, where two transcripts would be two nobody can read. Each pane
 runs on its own, a pane with something going is marked, and a pane says so by

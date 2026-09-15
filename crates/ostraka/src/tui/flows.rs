@@ -21,7 +21,7 @@
 
 use super::view::{App, Dialog, Focus, Screen};
 use super::{handle, take_stock};
-use crate::chord::{self, label};
+use crate::chord::{Action as Chord, label};
 use crate::workspace::Workspace;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -185,11 +185,11 @@ impl Driver {
         self
     }
 
-    /// A browser chord, held with whatever this platform holds them with.
+    /// A browser chord, held with control, which reaches every chord by default.
     fn chord(&mut self, c: char) -> &mut Self {
         handle(
             &mut self.app,
-            KeyEvent::new(KeyCode::Char(c), chord::MODIFIER),
+            KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL),
             &self.records_root,
         );
         self
@@ -1087,7 +1087,7 @@ fn the_palette_reaches_a_command_by_name_and_the_leader_by_letter() {
     d.chord('k').typed("keys").key(KeyCode::Enter);
     assert_eq!(d.app.dialog, Some(Dialog::Keys));
     d.shows("promote a record");
-    d.shows(label!("x"));
+    d.shows(label(Chord::Leader));
     d.key(KeyCode::Esc);
 
     d.chord('x').key(KeyCode::Char('h'));

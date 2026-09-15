@@ -17,7 +17,7 @@
 //! error. Matching English out of another program is how a fix stops working
 //! when that program rewords itself.
 
-use crate::chord::label;
+use crate::chord::{Action as Chord, label};
 use ostraka_runtime::worktree;
 use std::path::Path;
 use std::process::Command;
@@ -57,12 +57,9 @@ impl Remedy {
             ),
             steps: vec![Step {
                 said: format!(
-                    concat!(
-                        "Clone what you want worked on into {}, or start one: ",
-                        label!("x"),
-                        " w, then n."
-                    ),
-                    repositories.display()
+                    "Clone what you want worked on into {}, or start one: {} w, then n.",
+                    repositories.display(),
+                    label(Chord::Leader)
                 ),
                 warns: Some(
                     "Cloning is yours — nobody here knows which repository you meant. \

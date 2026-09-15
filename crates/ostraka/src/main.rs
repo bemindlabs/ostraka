@@ -262,6 +262,15 @@ enum Commands {
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
+    // Before anything can print a chord. The steps out of a problem name the
+    // leader, and `check --fix` prints them without ever opening the browser,
+    // so a rebinding has to be in place for every command, not only for `tui`.
+    // A file that does not parse is left for the browser to refuse by name;
+    // nothing else here is about keys, and none of it should fail over them.
+    if let Ok(keys) = chord::Keys::load() {
+        chord::install(keys);
+    }
+
     let Some(command) = &cli.command else {
         banner::print();
         return ExitCode::SUCCESS;

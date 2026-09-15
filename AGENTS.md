@@ -697,20 +697,33 @@ keystroke has to be read — an open dialog first, then what is being typed into
 then a half-finished chord, then the browser — because any other order lets `q`
 close the browser out from under someone reading the help.
 
-**On macOS the chords are held with command, and only with command.** The
-leader, the palette and the pane chords are `cmd-` there and `ctrl-` everywhere
-else. `chord` holds the modifier and the label together, so the key handler, the
-screen, the steps out of a problem and the tests cannot name different keys.
-`ctrl-c` stays control on every platform, because it is the interrupt and
-command-c is copy, and so does `ctrl-j`, which is a line feed.
+**Control reaches every chord on every platform, and a person's own keys can
+replace them.** This reverses a decision that held command alone on macOS. It
+was taken with its cost written down, and the cost arrived: Terminal.app and
+iTerm2 keep command-x, command-k and command-t for themselves, so the leader,
+the palette and the panes could not be reached on the terminals most Mac users
+have. So control now reaches every chord everywhere, and on macOS command
+reaches them as well where the terminal passes it through, over the kitty
+keyboard protocol that is still pushed on the way in and popped on the way out.
+The screen names each chord's first binding, which by default is the one that
+works everywhere.
 
-The cost is stated plainly, and the operator chose it anyway. A terminal program
-hears command only over the kitty keyboard protocol, which the browser asks for
-on the way in and gives back on the way out, including on a panic. Terminal.app
-and iTerm2 keep command for themselves: `cmd-x` cuts, `cmd-k` clears and `cmd-t`
-opens a tab. So on those two terminals, the leader, the palette and the panes
-cannot be reached by a chord. The bare keys and `/` in the box still reach every
-command. Accepting control as well on macOS was offered and was declined.
+Which keys a terminal leaves alone is a fact about somebody's terminal, not
+about a workspace, so rebinding is per user: `keys.toml` in `$XDG_CONFIG_HOME/ostraka/`,
+or `~/.config/ostraka/`, names other keys for `leader`, `commands`, `new_pane`,
+`next_pane` and `previous_pane`. Each entry is one binding or a list, and it
+replaces that chord's defaults instead of adding to them. A rebound leader
+usually means the old key does something else in that terminal. The file is
+refused by name when the browser opens, not quietly replaced by defaults, if
+any of these is true of it:
+- it does not parse
+- it names a chord that does not exist
+- a letter holds no modifier, and so would take a key the task box types
+- a binding takes `ctrl-c` (leaving) or `ctrl-j` (a new line)
+- one key is bound to two chords
+
+`chord` holds the bindings and the labels together, so the handler, the screen,
+the steps out of a problem and the tests still cannot name different keys.
 
 **The box has a cursor, and the browser reads the mouse to place it.** Left and
 right move through the task, and a click puts the cursor on the character in the

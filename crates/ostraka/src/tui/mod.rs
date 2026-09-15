@@ -20,7 +20,7 @@ mod theme;
 mod thread;
 mod view;
 
-use crate::chord::{self, label};
+use crate::chord::{self, Action as Chord, label};
 use crate::init;
 use crate::mode::Mode;
 use crate::workspace::Workspace;
@@ -55,6 +55,13 @@ pub fn run(workspace: &Workspace) -> Outcome {
                     prints it for a machine."
             .into());
     }
+
+    // Read before anything is drawn, and refused by name if it does not parse:
+    // a browser that quietly fell back to other keys would be one whose chords
+    // do not do what its owner wrote down.
+    // Loaded again only to refuse a file that does not parse. When it does,
+    // `main` has already installed the same bindings.
+    chord::install(chord::Keys::load()?);
 
     let records_root = workspace.records();
     let mut app = open(workspace, &records_root)?;
@@ -314,27 +321,27 @@ fn handle(app: &mut App, key: KeyEvent, records_root: &Path) {
     // they are the way out of anywhere: a box with the keys must not be able to
     // swallow the key that opens the commands. Then a half-finished chord, then
     // what is open over the screen, then whoever has the keyboard.
-    let control = key.modifiers.contains(KeyModifiers::CONTROL);
-    // Command on macOS, control elsewhere. Leaving stays on control everywhere,
-    // because command-c is copy.
-    let held = chord::held(key.modifiers);
-    match key.code {
-        KeyCode::Char('k') if held => return app.open(Dialog::Commands),
-        KeyCode::Char('x') if held => {
+    // Leaving is control-c everywhere and cannot be rebound, because command-c
+    // is copy and a way out has to be the same way out on every terminal.
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return leave(app);
+    }
+    // The chords, as `keys.toml` or the defaults bind them. Panes are switched
+    // between while the box has the keys, so those are chords, not letters.
+    match chord::action(&key) {
+        Some(Chord::Commands) => return app.open(Dialog::Commands),
+        Some(Chord::Leader) => {
             app.leader = true;
             return;
         }
-        KeyCode::Char('c') if control => return leave(app),
-        // Panes are switched between while the box has the keys, so they are
-        // chords rather than letters.
-        KeyCode::Char('t') if held => return perform(app, Command::NewPane, records_root),
-        KeyCode::Char(']') if held => return perform(app, Command::NextPane, records_root),
-        KeyCode::Char('[') if held => {
+        Some(Chord::NewPane) => return perform(app, Command::NewPane, records_root),
+        Some(Chord::NextPane) => return perform(app, Command::NextPane, records_root),
+        Some(Chord::PreviousPane) => {
             app.next_pane(-1);
             to_work(app);
             return;
         }
-        _ => {}
+        None => {}
     }
 
     // The leader before the dialog, because it was armed after the dialog
@@ -663,12 +670,10 @@ fn set_mode(app: &mut App, mode: Mode) {
 fn unavailable(app: &App, command: Command) -> String {
     let situation = app.situation();
     match command {
-        Command::NewRun if situation.running => concat!(
-            "a run is already going in this pane \u{2014} s asks it to stop, ",
-            label!("t"),
-            " opens another"
-        )
-        .to_string(),
+        Command::NewRun if situation.running => format!(
+            "a run is already going in this pane \u{2014} s asks it to stop, {} opens another",
+            label(Chord::NewPane)
+        ),
         Command::NewRun => {
             "this directory cannot run anything yet \u{2014} i sets it up".to_string()
         }
@@ -1250,9 +1255,9 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
-    /// A browser chord, held with whatever this platform holds them with.
+    /// A browser chord, held with control, which reaches every chord by default.
     fn chord(c: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(c), chord::MODIFIER)
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
     fn click(column: u16, row: u16) -> MouseEvent {
