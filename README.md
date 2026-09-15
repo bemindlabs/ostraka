@@ -410,7 +410,7 @@ promote it. `?` lists every key, and `q` asks before it leaves —
 quitting can discard the task in the box and stop a run that is going.
 
 `ctrl-t` opens another line of work beside this one — its
-own thread, its own repository, its own half-written task — and `ctrl-]` moves between them. They
+own thread, its own repository, its own half-written task — and `ctrl-]` and `ctrl-[` move between them. They
 sit side by side from 160 columns, up to three at once, and take turns on
 anything narrower, where two transcripts would be two nobody can read. Each pane
 runs on its own, a pane with something going is marked, and a pane says so by

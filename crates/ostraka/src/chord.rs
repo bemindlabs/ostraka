@@ -80,8 +80,10 @@ enum Key {
     F(u8),
 }
 
-/// The modifiers a binding may name. Shift is ignored when comparing, because a
-/// terminal reports it for any key typed with it and `]` and `}` share a key.
+/// The modifiers a binding is compared on. Shift is not one of them, because a
+/// terminal reports it for any key typed with it and `]` and `}` share a key, so
+/// a binding drops it when it is read: two bindings that differ only by shift
+/// would match the same keystroke, and the duplicate check has to see that.
 const HELD: [KeyModifiers; 3] = [
     KeyModifiers::CONTROL,
     KeyModifiers::ALT,
@@ -118,6 +120,7 @@ impl Binding {
                 other => return Err(format!("{other:?} is not a modifier in {spec:?}")),
             };
         }
+        modifiers.remove(KeyModifiers::SHIFT);
         let key = if let Some(n) = key
             .strip_prefix('f')
             .and_then(|n| n.parse::<u8>().ok())
@@ -478,6 +481,8 @@ mod tests {
             ("leader = []", "unreachable"),
             ("lead = \"ctrl-x\"", "not a chord"),
             ("leader = \"ctrl-t\"", "bound to both"),
+            // Shift is dropped, so this is ctrl-t again, and caught as one.
+            ("leader = \"ctrl-shift-t\"", "bound to both"),
         ] {
             let refused = Keys::parse(text)
                 .err()
@@ -491,6 +496,11 @@ mod tests {
         let minus = Binding::parse("ctrl--").expect("minus");
         assert_eq!(minus.label(), "ctrl--");
         let keys = Keys::parse("next_pane = \"ctrl-shift-]\"").expect("keys");
+        assert_eq!(
+            keys.label(Action::NextPane),
+            "ctrl-]",
+            "shift was kept in the label"
+        );
         assert_eq!(
             keys.action(&press(KeyModifiers::CONTROL | KeyModifiers::SHIFT, ']')),
             Some(Action::NextPane)

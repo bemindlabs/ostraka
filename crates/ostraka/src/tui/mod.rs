@@ -59,6 +59,8 @@ pub fn run(workspace: &Workspace) -> Outcome {
     // Read before anything is drawn, and refused by name if it does not parse:
     // a browser that quietly fell back to other keys would be one whose chords
     // do not do what its owner wrote down.
+    // Loaded again only to refuse a file that does not parse. When it does,
+    // `main` has already installed the same bindings.
     chord::install(chord::Keys::load()?);
 
     let records_root = workspace.records();
