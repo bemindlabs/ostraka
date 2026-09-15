@@ -1,0 +1,72 @@
+# opencode, pointed at a LiteLLM proxy.
+#
+# Verified headless with opencode 1.18.30: `opencode run '<prompt>'` through a
+# local LiteLLM proxy, on its `local-coder` alias, wrote the file it was asked
+# to write and printed its reply as plain text on stdout. LiteLLM decides what
+# answers. On the machine this was measured on, that was a local model, but it
+# can as easily be a hosted one; the proxy's own configuration says which.
+#
+# Requires opencode 1.18.30 or newer, for the isolation switch below.
+id = "opencode-litellm"
+command = "opencode"
+
+# Author: the default agent writes files and runs tools without asking. The
+# alias must lead to a model that calls tools.
+#
+# The prompt is the last argument with no `--` in front of it, because a model
+# a run names is appended after it. A task whose text begins with `-` is read
+# as a flag and stops with a usage error.
+args = ["run", "{{prompt}}"]
+
+# Reviewer: the plan agent, which is read-only. Asked to create a file, it
+# answered that it could not modify files in plan mode, and nothing was written.
+review_args = ["run", "--agent", "plan", "{{prompt}}"]
+
+# A model a run names, as a LiteLLM model alias. It has to be declared under
+# `models` in the provider below as well, which is where this CLI learns that a
+# model exists.
+model_args = ["--model", "litellm/{{model}}"]
+
+# The proxy's key, read from the launching environment and handed to the
+# provider through `{env:LITELLM_MASTER_KEY}`. Prefer a LiteLLM virtual key with
+# a budget: whatever this variable holds is the key an agent spends with.
+# Without it a run fails loudly, exiting 1 with the proxy's authentication
+# error, unlike the silent failures below.
+inherit_env = ["LITELLM_MASTER_KEY"]
+
+[env]
+# The provider, its aliases, and the default. `baseURL` is where the proxy
+# listens on this machine. Edit it, and the `models` list, to match yours.
+# `small_model` is pinned too, because this CLI titles each session with a
+# second model and every call should reach the one named here.
+OPENCODE_CONFIG_CONTENT = '{"provider":{"litellm":{"npm":"@ai-sdk/openai-compatible","name":"LiteLLM","options":{"baseURL":"http://127.0.0.1:10400/v1","apiKey":"{env:LITELLM_MASTER_KEY}"},"models":{"local-coder":{"name":"local-coder","tools":true},"local-reason":{"name":"local-reason","tools":true}}}},"model":"litellm/local-coder","small_model":"litellm/local-coder"}'
+# Without this, the operator's `~/.claude/CLAUDE.md` reaches the model even with
+# the configuration directory relocated.
+OPENCODE_DISABLE_CLAUDE_CODE = "1"
+OPENCODE_DISABLE_AUTOUPDATE = "1"
+
+# Plain text: the JSON stream nests the reply where a JSON-lines profile cannot
+# read it, so there is no `[usage]` block. LiteLLM keeps its own spend records.
+event_format = "none"
+
+# The operator's configuration is kept out by relocating XDG_CONFIG_HOME, the
+# same measurement as the OpenRouter profile beside this one. Nothing is
+# carried: the key arrives by environment.
+#
+# Limits, named here rather than discovered later.
+#
+# A model or alias this CLI cannot use makes it exit 0 with nothing on stdout,
+# and no probe can see that. A proxy that is not running looks ready to routing.
+#
+# The context window and how many requests are served at once belong to the
+# model behind the alias, not to this profile. This CLI's system prompt alone
+# is around eleven thousand tokens.
+[isolation]
+home_env = "XDG_CONFIG_HOME"
+home_source = ".config"
+credentials = []
+
+[capabilities]
+headless = true
+streams_json = false
+resumable = true

@@ -152,7 +152,7 @@ impl Plan {
 /// Kept here rather than read from disk because the binary is installed on its
 /// own; a profile someone has to fetch separately is a profile they will not
 /// have.
-pub const TEMPLATES: [(&str, &str); 8] = [
+pub const TEMPLATES: [(&str, &str); 10] = [
     ("agy.toml", include_str!("../templates/agy.toml")),
     (
         "claude-code.toml",
@@ -168,6 +168,14 @@ pub const TEMPLATES: [(&str, &str); 8] = [
     (
         "kimi-code.toml",
         include_str!("../templates/kimi-code.toml"),
+    ),
+    (
+        "opencode-litellm.toml",
+        include_str!("../templates/opencode-litellm.toml"),
+    ),
+    (
+        "opencode-ollama.toml",
+        include_str!("../templates/opencode-ollama.toml"),
     ),
     (
         "opencode-openrouter.toml",

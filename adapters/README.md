@@ -17,6 +17,8 @@ them can actually run on this machine; `ostraka check` validates all of them.
 | `kimi-cli` | `kimi-cli` | yes |
 | `kimi-code` | `kimi` | yes |
 | `opencode-openrouter` | `opencode` | yes |
+| `opencode-ollama` | `opencode` | yes |
+| `opencode-litellm` | `opencode` | yes |
 | `agy` | `agy` | yes |
 
 Nothing is shipped that has not been run end to end. A profile for a CLI you have
@@ -345,6 +347,20 @@ across every vendor.
   nothing, and a reviewer that failed that way gives no verdict and is rejected.
   No probe can detect it, because every subcommand that could ask also exits 0.
   Log in with `opencode auth login` before routing to this profile.
+- **A local model is only as able as the server gives it room to be.**
+  `opencode-ollama` and `opencode-litellm` send this CLI's system prompt, which
+  is around eleven thousand tokens, to whatever answers. A server that gives
+  each request a small context window truncates the instructions before the
+  task arrives. The Ollama server this was measured on sets
+  `OLLAMA_CONTEXT_LENGTH=16384`, which works, and Ollama's default is smaller.
+  With `OLLAMA_NUM_PARALLEL=1`, two runs take turns, and each run's ceiling
+  counts the wait. Both profiles name their server's address and models in
+  `OPENCODE_CONFIG_CONTENT`, and those have to be edited to match another
+  machine.
+- **`opencode-litellm` fails loudly without its key, and silently on a bad
+  alias.** Missing `LITELLM_MASTER_KEY` exits 1 with the proxy's authentication
+  error. An alias the proxy does not know behaves like any unusable model
+  through opencode: exit 0, nothing on stdout.
 - **A relocated home accumulates.** Sessions, caches and a vendor's own memory
   store live there across runs. It is isolation from the operator, not a fresh
   sandbox each time.

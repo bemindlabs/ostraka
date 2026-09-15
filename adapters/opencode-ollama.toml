@@ -1,0 +1,75 @@
+# opencode, pointed at a local Ollama server.
+#
+# Verified headless with opencode 1.18.30 and Ollama 0.32.13: `opencode run
+# '<prompt>'` against `qwen3.8:27b` wrote the file it was asked to write and
+# printed its reply as plain text on stdout. Nothing leaves the machine: the
+# provider is Ollama's OpenAI-compatible endpoint, declared below, not a
+# hosted service.
+#
+# Requires opencode 1.18.30 or newer, for the isolation switch below.
+id = "opencode-ollama"
+command = "opencode"
+
+# Author: the default agent writes files and runs tools without asking. It
+# needs a model that calls tools; `qwen3.8:27b` reports the `tools` capability.
+#
+# The prompt is the last argument with no `--` in front of it, because a model
+# a run names is appended after it. A task whose text begins with `-` is read
+# as a flag and stops with a usage error.
+args = ["run", "{{prompt}}"]
+
+# Reviewer: the plan agent, which is read-only. Asked to create a file, it wrote
+# a plan and asked to proceed, and nothing was written.
+review_args = ["run", "--agent", "plan", "{{prompt}}"]
+
+# A model a run names, as an Ollama model name such as `gemma3-tools:27b`. It
+# has to be declared under `models` in the provider below as well, which is
+# where this CLI learns that a model exists.
+model_args = ["--model", "ollama/{{model}}"]
+
+[env]
+# The provider, the models it offers, and the default. `baseURL` is where
+# Ollama listens on this machine. Edit it, and the `models` list, to match
+# yours. `small_model` is pinned too, because this CLI titles each session with
+# a second model and every call should reach the one named here.
+OPENCODE_CONFIG_CONTENT = '{"provider":{"ollama":{"npm":"@ai-sdk/openai-compatible","name":"Ollama","options":{"baseURL":"http://127.0.0.1:11434/v1"},"models":{"qwen3.8:27b":{"name":"qwen3.8:27b","tools":true},"gemma3-tools:27b":{"name":"gemma3-tools:27b","tools":true}}}},"model":"ollama/qwen3.8:27b","small_model":"ollama/qwen3.8:27b"}'
+# Without this, the operator's `~/.claude/CLAUDE.md` reaches the model even with
+# the configuration directory relocated.
+OPENCODE_DISABLE_CLAUDE_CODE = "1"
+OPENCODE_DISABLE_AUTOUPDATE = "1"
+
+# Plain text: the JSON stream nests the reply where a JSON-lines profile cannot
+# read it, and a local server reports no cost, so there is no `[usage]` block.
+event_format = "none"
+
+# The operator's configuration is kept out by relocating XDG_CONFIG_HOME, the
+# same measurement as the OpenRouter profile beside this one. Nothing is
+# carried: a local server needs no login.
+#
+# Limits, named here rather than discovered later.
+#
+# The context window is the server's, not this profile's. This CLI's system
+# prompt alone is around eleven thousand tokens, so a server that gives each
+# request a small window truncates the instructions before the task arrives.
+# The server this was measured on sets OLLAMA_CONTEXT_LENGTH=16384, which works.
+# Ollama's default is smaller.
+#
+# A server with OLLAMA_NUM_PARALLEL=1 answers one request at a time, so two runs
+# through this profile at once take turns, and each one's ceiling counts the
+# wait.
+#
+# The model loads onto whatever GPU the server uses, beside anything else
+# already loaded there.
+#
+# Like the OpenRouter profile, this CLI exits 0 with nothing on stdout when a
+# model cannot be used, and no probe can see it. An Ollama server that is not
+# running looks ready to routing.
+[isolation]
+home_env = "XDG_CONFIG_HOME"
+home_source = ".config"
+credentials = []
+
+[capabilities]
+headless = true
+streams_json = false
+resumable = true
