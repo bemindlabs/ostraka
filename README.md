@@ -390,6 +390,15 @@ belongs to the profile that listed it. A profile lists its models through a
 a CLI that has none. A listing that fails or finds nothing says why under the
 list.
 
+**A vendor that cannot run is offered a way round.** When the author cannot
+run, the reviewer cannot run, or no profile can take the seat, the browser asks
+the other profiles whether they answer. Examples are credit that ran out, a
+login that expired, or a local server that is down. Pick one that did, and the
+task runs again with it in that seat. Esc puts the task back in the box. Only a
+vendor failing is offered this, never a verdict: a rejected change stays
+rejected. Answering is checked the way the agents dialog checks it, so a
+profile that answers can still turn out to be out of credit.
+
 **`@` names a file, a directory or an agent.** Typing `@` offers what it could
 be, and tab completes it. A directory opens one level down; anything else is
 finished with a space. A path such as `@src/main.rs` stays in the task, and the

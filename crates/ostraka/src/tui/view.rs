@@ -111,6 +111,8 @@ pub enum Dialog {
     Prune,
     /// The models each profile lists, to pick the one that writes.
     Models,
+    /// A vendor could not run, and the other profiles that answer.
+    Fallback,
 }
 
 /// One adapter profile, as the agents dialog shows it.
@@ -212,6 +214,10 @@ pub struct App {
     /// screen that froze while one fetched over the network would be a screen
     /// nobody could stop.
     pub models_loading: Option<std::sync::mpsc::Receiver<Vec<crate::models::Catalog>>>,
+    /// The run a vendor could not finish, while another profile is offered.
+    pub fallback: Option<super::session::Fallback>,
+    /// The profiles being asked whether they answer. Probing runs each CLI.
+    pub agents_loading: Option<std::sync::mpsc::Receiver<Vec<Agent>>>,
 }
 
 impl App {
@@ -258,6 +264,8 @@ impl App {
             models: Vec::new(),
             models_notes: Vec::new(),
             models_loading: None,
+            fallback: None,
+            agents_loading: None,
         }
     }
 
@@ -734,6 +742,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Dialog::Repos) => render_repos(frame, app, screen),
         Some(Dialog::Prune) => render_prune(frame, app, screen),
         Some(Dialog::Models) => render_models(frame, app, screen),
+        Some(Dialog::Fallback) => render_fallback(frame, app, screen),
         None => {}
     }
 
@@ -2268,6 +2277,83 @@ fn render_palette(frame: &mut Frame, app: &App, screen: Rect) {
             Span::styled(command.about().to_string(), theme::muted()),
         ]));
     }
+
+    let area = theme::centred(screen, 86, lines.len() as u16 + 2);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(theme::fit(lines, area.height))
+            .block(theme::panel(true).padding(Padding::horizontal(2))),
+        area,
+    );
+}
+
+/// A vendor that could not run, and the profiles that could take its seat.
+fn render_fallback(frame: &mut Frame, app: &App, screen: Rect) {
+    use super::session::Seat;
+    let Some(offer) = &app.fallback else {
+        return;
+    };
+    let (seat, who) = match offer.seat {
+        Seat::Writes => ("write", "the author"),
+        Seat::Reviews => ("review", "the reviewer"),
+    };
+    let who = offer.failed.clone().unwrap_or_else(|| who.to_string());
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("{who} could not run"),
+            theme::on(theme::BAD).add_modifier(Modifier::BOLD),
+        )),
+        dim(truncate(&offer.why, 80)),
+        theme::rule(82),
+        Line::from(Span::styled(
+            format!("run the task again, with another profile to {seat}:"),
+            theme::text(),
+        )),
+    ];
+    if app.agents_loading.is_some() {
+        lines.push(dim(
+            "asking each profile whether it answers\u{2026}".to_string()
+        ));
+    } else if app.agents.is_empty() {
+        lines.push(dim(
+            "no other profile here \u{2014} esc keeps the task".to_string()
+        ));
+    }
+    for (i, agent) in app.agents.iter().enumerate() {
+        let here = i == app.pick;
+        let (mark, colour) = if agent.ready {
+            (theme::PASSED, theme::OK)
+        } else {
+            (theme::FAILED, theme::BAD)
+        };
+        let note = if agent.configured {
+            truncate(&agent.note, 50)
+        } else {
+            truncate(
+                &format!("{} \u{2014} not configured, choosing writes it", agent.note),
+                60,
+            )
+        };
+        lines.push(Line::from(vec![
+            Span::styled(if here { theme::CURSOR } else { " " }, theme::accent()),
+            Span::styled(format!(" {mark}  "), theme::on(colour)),
+            Span::styled(
+                format!("{:<22}", truncate(&agent.id, 21)),
+                if here {
+                    theme::text().add_modifier(Modifier::BOLD)
+                } else {
+                    theme::text()
+                },
+            ),
+            Span::styled(note, theme::muted()),
+        ]));
+    }
+    lines.push(dim(
+        "a profile that answers can still be out of credit \u{2014} the run will say".to_string(),
+    ));
+    lines.push(dim(
+        "enter runs it again \u{b7} esc keeps the task in the box".to_string(),
+    ));
 
     let area = theme::centred(screen, 86, lines.len() as u16 + 2);
     frame.render_widget(Clear, area);
