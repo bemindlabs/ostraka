@@ -458,16 +458,16 @@ impl App {
     /// The commands the palette is currently offering.
     /// The models the picker shows for what has been typed into it.
     pub fn model_rows(&self) -> Vec<crate::models::Model> {
-        let needle = self.query.trim().to_lowercase();
+        let needle = self.query.trim().to_ascii_lowercase();
         self.models
             .iter()
             .filter(|row| {
                 needle.is_empty()
-                    || row.profile.to_lowercase().contains(&needle)
+                    || row.profile.to_ascii_lowercase().contains(&needle)
                     || row
                         .model
                         .as_deref()
-                        .is_some_and(|m| m.to_lowercase().contains(&needle))
+                        .is_some_and(|m| m.to_ascii_lowercase().contains(&needle))
             })
             .cloned()
             .collect()

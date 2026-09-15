@@ -1471,38 +1471,35 @@ mod tests {
         a.open(Dialog::Models);
         a.models = vec![
             Model {
-                profile: "opencode-ollama".into(),
+                profile: "local-profile".into(),
                 model: None,
             },
             Model {
-                profile: "opencode-ollama".into(),
-                model: Some("qwen3.8:27b".into()),
+                profile: "local-profile".into(),
+                model: Some("model-one".into()),
             },
             Model {
-                profile: "opencode-openrouter".into(),
-                model: Some("deepseek/deepseek-v4-pro".into()),
+                profile: "hosted-profile".into(),
+                model: Some("family/model-two".into()),
             },
         ];
-        for c in "v4-pro".chars() {
+        for c in "two".chars() {
             handle(&mut a, press(KeyCode::Char(c)), root);
         }
         assert_eq!(a.model_rows().len(), 1, "the filter did not narrow");
         handle(&mut a, press(KeyCode::Enter), root);
         assert_eq!(a.dialog, None);
-        assert_eq!(a.thread().adapter.as_deref(), Some("opencode-openrouter"));
-        assert_eq!(
-            a.thread().model.as_deref(),
-            Some("deepseek/deepseek-v4-pro")
-        );
+        assert_eq!(a.thread().adapter.as_deref(), Some("hosted-profile"));
+        assert_eq!(a.thread().model.as_deref(), Some("family/model-two"));
 
         // A profile's own default clears a model picked before.
         a.open(Dialog::Models);
         a.models = vec![Model {
-            profile: "opencode-ollama".into(),
+            profile: "local-profile".into(),
             model: None,
         }];
         handle(&mut a, press(KeyCode::Enter), root);
-        assert_eq!(a.thread().adapter.as_deref(), Some("opencode-ollama"));
+        assert_eq!(a.thread().adapter.as_deref(), Some("local-profile"));
         assert_eq!(a.thread().model, None);
     }
 

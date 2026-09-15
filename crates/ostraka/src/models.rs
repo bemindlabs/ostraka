@@ -12,7 +12,7 @@
 //! args = ["models", "openrouter"]  # run as `<command> models openrouter`
 //! prefix = "openrouter/"           # keep lines that start with it, minus it
 //! separator = "\t"                 # or: keep lines holding it, up to it
-//! known = ["opus", "sonnet"]       # or: a fixed list, for a CLI with no command
+//! known = ["alias-a", "alias-b"]   # or: a fixed list, for a CLI with no command
 //! ```
 //!
 //! The listing runs with the profile's own `[env]`, because for some profiles
@@ -170,10 +170,18 @@ fn list(command: &str, args: &[String], env: &BTreeMap<String, String>) -> Resul
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("`{command}` could not be run: {e}"))?;
+    // Read while waiting: a catalog longer than the pipe holds would otherwise
+    // block its writer, which would never exit and always time out.
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stdout, &mut bytes);
+        bytes
+    });
     let started = Instant::now();
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() >= LISTING => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -186,18 +194,16 @@ fn list(command: &str, args: &[String], env: &BTreeMap<String, String>) -> Resul
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
             Err(e) => return Err(e.to_string()),
         }
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("`{command}` could not be read: {e}"))?;
-    if !output.status.success() {
+    };
+    // A child that left descendants holding the pipe is not waited on for them.
+    let bytes = reader.join().unwrap_or_default();
+    if !status.success() {
         return Err(format!(
-            "`{command} {}` exited with {}",
-            args.join(" "),
-            output.status
+            "`{command} {}` exited with {status}",
+            args.join(" ")
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 
 #[cfg(test)]
@@ -206,10 +212,10 @@ mod tests {
 
     #[test]
     fn a_prefix_keeps_the_lines_that_carry_it_and_drops_it() {
-        let listed = "opencode 1.18\nollama/qwen3.8:27b\n\nollama/gemma3-tools:27b\n";
+        let listed = "lister 1.0\nlocal/model-one\n\nlocal/model-two:7b\n";
         assert_eq!(
-            read(listed, Some("ollama/"), None),
-            ["qwen3.8:27b", "gemma3-tools:27b"]
+            read(listed, Some("local/"), None),
+            ["model-one", "model-two:7b"]
         );
     }
 
@@ -223,10 +229,14 @@ mod tests {
     fn a_fixed_list_needs_no_command_and_a_profile_without_a_table_is_left_out() {
         let fixed = catalog(
             "id = \"fixed\"\ncommand = \"nothing-to-run\"\nargs = [\"{{prompt}}\"]\n\
-             [models]\nknown = [\"opus\", \"sonnet\", \"opus\"]\n",
+             [models]\nknown = [\"alias-a\", \"alias-b\", \"alias-a\"]\n",
         )
         .expect("a catalog");
-        assert_eq!(fixed.models, ["opus", "sonnet"], "the duplicate was kept");
+        assert_eq!(
+            fixed.models,
+            ["alias-a", "alias-b"],
+            "the duplicate was kept"
+        );
         assert_eq!(fixed.note, None);
 
         assert_eq!(
@@ -277,5 +287,23 @@ mod tests {
         assert_eq!(rows[0].model, None, "the profile's own default comes first");
         assert_eq!(rows.len(), 3);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_listing_longer_than_a_pipe_holds_comes_back_whole() {
+        let script = "i=0; while [ $i -lt 20000 ]; do echo \"p/model-$i\"; i=$((i+1)); done";
+        let started = Instant::now();
+        let output = list(
+            "sh",
+            &["-c".to_string(), script.to_string()],
+            &BTreeMap::new(),
+        )
+        .expect("the listing");
+        assert_eq!(read(&output, Some("p/"), None).len(), 20000);
+        assert!(
+            started.elapsed() < LISTING,
+            "the writer blocked on a full pipe"
+        );
     }
 }
