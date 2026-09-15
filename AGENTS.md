@@ -789,6 +789,20 @@ for each repository a pane is in. Offering what git ignores would put
 `target/` and `node_modules/` in front of every search. A mention starts only at
 the start of a word, so an address in a sentence is not one.
 
+**A profile says how to list its models; this code never names one.** `/models`
+reads a `[models]` table from each profile file: `args` for the command that
+lists them, `prefix` or `separator` for reading its lines, `known` for a CLI
+with no such command. The binary reads the table itself, so `Profile` gains no
+field. The published parser ignores tables it does not know.
+
+The listing runs with the profile's own `[env]`, because for the opencode
+profiles the environment is where models are declared. `opencode models ollama`
+run that way lists exactly what the profile can run, and a model it lists but
+the profile does not declare would fail silently. Picking sets the profile and
+the model together. The listing runs on a thread, so a CLI fetching its list
+over the network cannot freeze the screen, and one that takes longer than
+twenty seconds is given up on and said to have done so.
+
 **Nothing waits forever.** `policy.timeout_secs` spent this project's life
 declared, documented as a wall-clock ceiling, and read by nothing — which is
 worse than absent, because someone sets it and believes their fleet is bounded.

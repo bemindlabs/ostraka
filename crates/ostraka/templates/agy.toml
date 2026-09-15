@@ -35,6 +35,12 @@ event_format = "none"
 # line rather than a row of zeroes — "does not say" and "spent nothing" are
 # different claims.
 
+# How the model picker lists this profile's models: `agy models` prints an id
+# and a name per line, separated by a tab, after a line saying it is fetching.
+[models]
+args = ["models"]
+separator = "\t"
+
 [capabilities]
 headless = true
 streams_json = false

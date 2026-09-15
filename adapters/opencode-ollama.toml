@@ -69,6 +69,14 @@ home_env = "XDG_CONFIG_HOME"
 home_source = ".config"
 credentials = []
 
+# How the model picker lists this profile's models: the ones declared in
+# OPENCODE_CONFIG_CONTENT above, read from `opencode models ollama` run with
+# that environment. A model the server has and the profile does not declare
+# is not offered, because this profile could not run it.
+[models]
+args = ["models", "ollama"]
+prefix = "ollama/"
+
 [capabilities]
 headless = true
 streams_json = false
