@@ -18,6 +18,10 @@
   <img alt="runtime" src="https://img.shields.io/badge/runtime-none-lightgrey">
 </p>
 
+<p align="center">
+  <img alt="Ostraka: an author agent writes the change in an isolated worktree, your project's own checks run, a different agent reviews it, and only if both pass is a merge token issued — you decide what merges." src="assets/cover.jpg" width="100%">
+</p>
+
 **Contents** · [What it is](#what-it-is) · [The name](#the-name) ·
 [Why](#why) · [Status](#status) · [A workspace](#a-workspace) ·
 [Installing](#installing) · [Staying current](#staying-current) ·
