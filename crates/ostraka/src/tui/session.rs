@@ -63,6 +63,39 @@ pub fn vendor_failure(refusal: &ostraka_runtime::gate::Refusal) -> Option<Seat> 
     }
 }
 
+/// The seat routing could not fill, from what was named and what exists, so
+/// the offer names the right seat without reading routing's wording.
+///
+/// A named profile that is not here is the seat it was named for. A reviewer
+/// named as the author too is the reviewer's seat. An author that was named
+/// and exists means the reviewer is what could not be found. With nothing
+/// named, it is the author's seat.
+pub fn unroutable(args: &run::Args, ids: &[String]) -> (Seat, Option<String>, Option<String>) {
+    let here = |id: &String| ids.contains(id);
+    if let Some(author) = args.adapter.as_ref().filter(|id| !here(id)) {
+        return (
+            Seat::Writes,
+            Some(author.clone()),
+            args.review_adapter.clone(),
+        );
+    }
+    if let Some(reviewer) = args
+        .review_adapter
+        .as_ref()
+        .filter(|id| !here(id) || args.adapter.as_ref() == Some(*id))
+    {
+        return (Seat::Reviews, Some(reviewer.clone()), args.adapter.clone());
+    }
+    if args.adapter.is_some() {
+        return (
+            Seat::Reviews,
+            args.review_adapter.clone(),
+            args.adapter.clone(),
+        );
+    }
+    (Seat::Writes, None, args.review_adapter.clone())
+}
+
 /// How a run ended, said the way the command line says it.
 pub struct Finished {
     pub run_id: String,
@@ -198,10 +231,17 @@ impl Session {
                 // No profile could take the seat at all: a named one that is
                 // not installed, or none that answers.
                 if e.downcast_ref::<crate::discover::NoAdapter>().is_some() {
+                    let ids: Vec<String> = workspace
+                        .profiles()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|profile| profile.id)
+                        .collect();
+                    let (seat, failed, other) = unroutable(&args, &ids);
                     fallback = Some(Fallback {
-                        seat: Seat::Writes,
-                        failed: args.adapter.clone(),
-                        other: None,
+                        seat,
+                        failed,
+                        other,
                         task: String::new(),
                         why: e.to_string().lines().next().unwrap_or_default().to_string(),
                     });
@@ -383,6 +423,35 @@ mod tests {
         assert_eq!(vendor_failure(&Refusal::NoChange), None);
         assert_eq!(vendor_failure(&Refusal::TimedOut { after_secs: 5 }), None);
         assert_eq!(vendor_failure(&Refusal::Interrupted), None);
+    }
+
+    #[test]
+    fn a_seat_routing_could_not_fill_is_read_from_what_was_named() {
+        let ids = vec!["alpha".to_string(), "beta".to_string()];
+        let named = |author: Option<&str>, reviewer: Option<&str>| {
+            let mut args = run::Args::for_task("a task".into());
+            args.adapter = author.map(str::to_string);
+            args.review_adapter = reviewer.map(str::to_string);
+            unroutable(&args, &ids)
+        };
+        assert_eq!(
+            named(Some("gone"), Some("beta")),
+            (Seat::Writes, Some("gone".into()), Some("beta".into()))
+        );
+        assert_eq!(
+            named(Some("alpha"), Some("gone")),
+            (Seat::Reviews, Some("gone".into()), Some("alpha".into()))
+        );
+        assert_eq!(
+            named(Some("alpha"), Some("alpha")),
+            (Seat::Reviews, Some("alpha".into()), Some("alpha".into()))
+        );
+        // The author was found, so the reviewer is what routing could not find.
+        assert_eq!(
+            named(Some("alpha"), None),
+            (Seat::Reviews, None, Some("alpha".into()))
+        );
+        assert_eq!(named(None, None), (Seat::Writes, None, None));
     }
 
     #[test]
