@@ -66,6 +66,9 @@ pub struct Thread {
     /// A plan that came back clean, and the task it was written for, until
     /// somebody runs it or writes another task.
     pub pending_plan: Option<(String, String)>,
+    /// A run that ended because a vendor could not run, until the browser has
+    /// offered another profile for it.
+    pub offer: Option<super::session::Fallback>,
 }
 
 impl Default for Thread {
@@ -82,6 +85,7 @@ impl Default for Thread {
             reviewer: run::REVIEWER.to_string(),
             mode: Mode::default(),
             pending_plan: None,
+            offer: None,
         }
     }
 }
@@ -181,7 +185,11 @@ impl Thread {
 
     /// Moves the finished run into the chain.
     fn close_out(&mut self) -> Option<String> {
-        let session = self.live.take()?;
+        let mut session = self.live.take()?;
+        if let Some(mut fallback) = session.fallback.take() {
+            fallback.task = session.prompt.clone();
+            self.offer = Some(fallback);
+        }
         let turn = Turn {
             prompt: session.prompt.clone(),
             steps: session.steps,

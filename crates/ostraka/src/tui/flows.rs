@@ -892,6 +892,65 @@ fn a_task_whose_agent_runs_out_of_tokens_is_refused_and_says_why() {
 }
 
 #[test]
+fn an_author_out_of_credit_is_offered_a_profile_that_answers_and_the_task_runs_again() {
+    let _guard = exclusive();
+    let scratch = project("fallback", 0);
+    let dir = scratch.path();
+    // A vendor whose account is empty: nothing written, a non-zero exit, and
+    // its reason on stderr.
+    std::fs::write(
+        dir.join("writer.sh"),
+        "#!/bin/sh\n\
+         case \"$1\" in --probe) echo ok; exit 0;; esac\n\
+         echo 'Error: insufficient credit on this account' >&2\n\
+         exit 1\n",
+    )
+    .expect("script");
+    // A third profile that writes like the fixture's own.
+    std::fs::copy(dir.join("reader.sh"), dir.join("spare.sh")).expect("spare");
+    std::fs::write(
+        dir.join(".ostraka/adapters/spare.toml"),
+        format!(
+            "id = \"spare\"\ncommand = \"{}\"\nargs = [\"{{{{prompt}}}}\"]\nprobe_args = [\"--probe\"]\n",
+            dir.join("spare.sh").display()
+        ),
+    )
+    .expect("profile");
+
+    let mut d = Driver::open(dir);
+    d.app.thread_mut().adapter = Some("writer".into());
+    d.app.thread_mut().review_adapter = Some("reader".into());
+    d.task("write a file");
+    assert!(!d.last().approved());
+
+    d.until("the other profiles to answer", |app| {
+        app.dialog == Some(Dialog::Fallback) && app.agents_loading.is_none()
+    });
+    d.shows("writer could not run");
+    d.shows("insufficient credit");
+    // Neither the profile that failed nor the reviewer it would have had.
+    let offered: Vec<String> = d.app.agents.iter().map(|a| a.id.clone()).collect();
+    assert!(!offered.contains(&"writer".to_string()), "{offered:?}");
+    assert!(!offered.contains(&"reader".to_string()), "{offered:?}");
+    let spare = offered
+        .iter()
+        .position(|id| id == "spare")
+        .expect("the spare profile was offered");
+    for _ in 0..spare {
+        d.key(KeyCode::Down);
+    }
+
+    let done = d.app.thread().turns.len() + 1;
+    d.key(KeyCode::Enter);
+    assert_eq!(d.app.thread().adapter.as_deref(), Some("spare"));
+    d.until("the task to run again", move |app| {
+        app.thread().turns.len() == done
+    });
+    assert!(d.last().approved(), "the task did not run again with spare");
+    assert_eq!(d.last().prompt, "write a file");
+}
+
+#[test]
 fn a_run_can_be_stopped_from_the_browser_and_is_not_called_a_verdict() {
     let _guard = exclusive();
     let scratch = project("stop", 30);

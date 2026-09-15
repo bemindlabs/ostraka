@@ -803,6 +803,27 @@ the model together. The listing runs on a thread, so a CLI fetching its list
 over the network cannot freeze the screen, and one that takes longer than
 twenty seconds is given up on and said to have done so.
 
+**A vendor that could not run is offered another profile; a verdict is not.**
+The run ends as it did. When the reason is that a vendor could not run, the
+browser asks the other profiles whether they answer and offers the ones that
+do. Only three reasons count:
+- the author exited without finishing (`AuthorFailed`)
+- the reviewer could not be launched or exited non-zero
+- no profile could take the seat (`NoAdapter`)
+
+Refusals that are about the change are never offered, because running a
+rejected change again elsewhere until something approves it is shopping for a
+verdict. The same goes for a stop, a timeout and an empty change, because a
+vendor that got that far did run.
+
+The reviewer case is a `Rejected` whose reason starts with the orchestrator's
+own "reviewer could not". It is told apart in `session::vendor_failure`, in
+the binary crate, because a variant of its own would break `Refusal` under
+SemVer. The pick stands for the thread, as if made in the agents dialog. The
+task runs again without its `@` names, which would choose the failed profile
+again. Answering is a probe, not a paid call, so the offer says a profile that
+answers may still be out of credit.
+
 **Nothing waits forever.** `policy.timeout_secs` spent this project's life
 declared, documented as a wall-clock ceiling, and read by nothing — which is
 worse than absent, because someone sets it and believes their fleet is bounded.

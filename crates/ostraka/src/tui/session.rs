@@ -19,6 +19,50 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
+/// The seat a vendor that could not run was sitting in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Seat {
+    Writes,
+    Reviews,
+}
+
+/// A run that ended because a vendor could not run, not because of anything
+/// about the change. Credit that ran out, a login that expired and a server
+/// that is down all end here, and they are the case where another profile is
+/// worth offering: the task was never judged, so running it again elsewhere
+/// takes nothing back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fallback {
+    pub seat: Seat,
+    /// The profile that could not run, where it is known.
+    pub failed: Option<String>,
+    /// The profile in the other seat, which a replacement cannot also be.
+    pub other: Option<String>,
+    /// What was typed, to run again.
+    pub task: String,
+    /// The vendor's own account, as the run described it.
+    pub why: String,
+}
+
+/// The seat whose vendor could not run, when that is why a run was refused.
+///
+/// A rejection is a verdict and a failed check is about the change, so
+/// neither is one. A timeout and an empty change are not either: a profile
+/// that ran out of clock or found nothing to do did run.
+pub fn vendor_failure(refusal: &ostraka_runtime::gate::Refusal) -> Option<Seat> {
+    use ostraka_runtime::gate::Refusal;
+    match refusal {
+        Refusal::AuthorFailed { .. } => Some(Seat::Writes),
+        // The orchestrator's own words for a reviewer it could not launch or
+        // that exited non-zero. They are a rejection so that nothing unjudged
+        // is ever approved, and this is where they are told apart from one.
+        Refusal::Rejected { reason } if reason.starts_with("reviewer could not") => {
+            Some(Seat::Reviews)
+        }
+        _ => None,
+    }
+}
+
 /// How a run ended, said the way the command line says it.
 pub struct Finished {
     pub run_id: String,
@@ -28,6 +72,10 @@ pub struct Finished {
     /// clean. What enter runs next.
     pub plan: Option<String>,
 }
+
+/// The worker's last word: how the run ended, and whether a vendor failing
+/// was why.
+type Ended = (Result<Finished, String>, Option<Fallback>);
 
 pub struct Session {
     /// What was asked. Kept because the record does not exist until the end.
@@ -41,6 +89,8 @@ pub struct Session {
     pub finished: Option<Finished>,
     /// The run could not be started, or stopped without saying why.
     pub failed: Option<String>,
+    /// Set when it ended because a vendor could not run.
+    pub fallback: Option<Fallback>,
     /// A stop has been asked for and the vendors have not noticed yet.
     pub stopping: bool,
     /// This run's own stop. Requesting it stops this run and nothing else;
@@ -48,7 +98,7 @@ pub struct Session {
     stop: ostraka_adapter::interrupt::Stop,
     started: Instant,
     steps_in: Option<Receiver<Step>>,
-    done_in: Option<Receiver<Result<Finished, String>>>,
+    done_in: Option<Receiver<Ended>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -67,6 +117,7 @@ impl Session {
         let (done_out, done_in) = mpsc::channel();
 
         let worker = std::thread::spawn(move || {
+            let mut fallback = None;
             let result = if mode.consults() {
                 consult::consult(
                     &workspace,
@@ -104,24 +155,60 @@ impl Session {
                         });
                     },
                 )
-                .map(|report| Finished {
-                    run_id: report.record.run_id.clone(),
-                    outcome: report.record.outcome,
-                    summary: match (&report.token, &report.refusal) {
-                        (Some(_), _) => "approved — nothing merged".to_string(),
-                        (None, Some(refusal)) => {
-                            format!("rejected — {}", run::describe(refusal))
-                        }
-                        (None, None) => "rejected".to_string(),
-                    },
-                    plan: None,
+                .map(|report| {
+                    fallback = report.refusal.as_ref().and_then(|refusal| {
+                        let seat = vendor_failure(refusal)?;
+                        let author = Some(report.record.adapter.clone());
+                        Some(Fallback {
+                            seat,
+                            failed: match seat {
+                                Seat::Writes => author.clone(),
+                                // The record names the author and not the
+                                // reviewer; a reviewer somebody named is known.
+                                Seat::Reviews => args.review_adapter.clone(),
+                            },
+                            other: match seat {
+                                // The reviewer never ran, so only one somebody
+                                // named is known.
+                                Seat::Writes => args.review_adapter.clone(),
+                                Seat::Reviews => author,
+                            },
+                            task: String::new(),
+                            why: run::describe(refusal),
+                        })
+                    });
+                    Finished {
+                        run_id: report.record.run_id.clone(),
+                        outcome: report.record.outcome,
+                        summary: match (&report.token, &report.refusal) {
+                            (Some(_), _) => "approved — nothing merged".to_string(),
+                            (None, Some(refusal)) => {
+                                format!("rejected — {}", run::describe(refusal))
+                            }
+                            (None, None) => "rejected".to_string(),
+                        },
+                        plan: None,
+                    }
                 })
             }
             // Flattened to a string here, on the thread that produced it.
             // A boxed error is not `Send`, and the screen has no use for
             // one that a sentence does not serve better.
-            .map_err(|e| e.to_string());
-            let _ = done_out.send(result);
+            .map_err(|e| {
+                // No profile could take the seat at all: a named one that is
+                // not installed, or none that answers.
+                if e.downcast_ref::<crate::discover::NoAdapter>().is_some() {
+                    fallback = Some(Fallback {
+                        seat: Seat::Writes,
+                        failed: args.adapter.clone(),
+                        other: None,
+                        task: String::new(),
+                        why: e.to_string().lines().next().unwrap_or_default().to_string(),
+                    });
+                }
+                e.to_string()
+            });
+            let _ = done_out.send((result, fallback));
         });
 
         Self {
@@ -132,6 +219,7 @@ impl Session {
             elapsed_secs: 0,
             finished: None,
             failed: None,
+            fallback: None,
             stopping: false,
             started: Instant::now(),
             steps_in: Some(steps_in),
@@ -164,7 +252,10 @@ impl Session {
 
         let ended = match &self.done_in {
             Some(rx) => match rx.try_recv() {
-                Ok(result) => Some(result),
+                Ok((result, fallback)) => {
+                    self.fallback = fallback;
+                    Some(result)
+                }
                 Err(TryRecvError::Empty) => None,
                 // The worker is gone without a word, which means it panicked.
                 // A run that vanished is not a run still going: saying so is
@@ -232,6 +323,7 @@ impl Session {
             elapsed_secs: 41,
             finished,
             failed: None,
+            fallback: None,
             stopping: false,
             started: Instant::now(),
             steps_in: None,
@@ -266,6 +358,31 @@ mod tests {
         );
         assert_eq!(session.phase, Some(Phase::Gating));
         assert!(session.live());
+    }
+
+    #[test]
+    fn a_vendor_that_could_not_run_is_told_apart_from_a_verdict() {
+        use ostraka_runtime::gate::Refusal;
+        let author = Refusal::AuthorFailed {
+            code: "1".into(),
+            diagnostics: Some("insufficient credit".into()),
+        };
+        assert_eq!(vendor_failure(&author), Some(Seat::Writes));
+        let reviewer = Refusal::Rejected {
+            reason: "reviewer could not run (exit 1): quota exceeded".into(),
+        };
+        assert_eq!(vendor_failure(&reviewer), Some(Seat::Reviews));
+        let verdict = Refusal::Rejected {
+            reason: "the parser now accepts an empty id".into(),
+        };
+        assert_eq!(
+            vendor_failure(&verdict),
+            None,
+            "a verdict was offered a retry"
+        );
+        assert_eq!(vendor_failure(&Refusal::NoChange), None);
+        assert_eq!(vendor_failure(&Refusal::TimedOut { after_secs: 5 }), None);
+        assert_eq!(vendor_failure(&Refusal::Interrupted), None);
     }
 
     #[test]

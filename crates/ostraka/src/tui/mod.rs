@@ -272,6 +272,21 @@ fn take_stock(app: &mut App, records_root: &Path) {
     if let Some((at, run_id)) = ended {
         finished_run(app, records_root, at, Some(run_id));
     }
+    // A vendor that could not run, in the pane in front, offered another
+    // profile. Never over a dialog somebody has open: the offer waits on the
+    // thread until the screen is free, or until that pane is in front.
+    if app.dialog.is_none() {
+        if let Some(offer) = app.pane_mut().thread.offer.take() {
+            offer_fallback(app, offer);
+        }
+    }
+    if let Some(rx) = app.agents_loading.take() {
+        match rx.try_recv() {
+            Ok(found) => app.agents = found,
+            Err(std::sync::mpsc::TryRecvError::Empty) => app.agents_loading = Some(rx),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+        }
+    }
     // The model listing, once every profile has answered.
     if let Some(rx) = app.models_loading.take() {
         match rx.try_recv() {
@@ -773,6 +788,7 @@ fn dialog_key(app: &mut App, key: KeyEvent, records_root: &Path) {
         },
         Some(Dialog::Agents) => agents_key(app, key.code),
         Some(Dialog::Models) => models_key(app, key.code),
+        Some(Dialog::Fallback) => fallback_key(app, key.code),
         Some(Dialog::Fix) => fix_key(app, key.code),
         Some(Dialog::Settings) => settings_key(app, key.code),
         Some(Dialog::Repos) => repos_key(app, key.code, records_root),
@@ -1071,6 +1087,96 @@ fn agents_key(app: &mut App, code: KeyCode) {
         KeyCode::Char('x') => {
             app.thread_mut().adapter = None;
             app.thread_mut().review_adapter = None;
+        }
+        _ => {}
+    }
+}
+
+/// Opens the offer, and asks the other profiles whether they answer.
+///
+/// On a thread, because asking runs every CLI and one that hangs must not
+/// freeze the screen. The profile that failed and the one in the other seat are
+/// left out: the first just said it cannot, and routing refuses the second.
+fn offer_fallback(app: &mut App, offer: session::Fallback) {
+    let skip = [offer.failed.clone(), offer.other.clone()];
+    let workspace = app.workspace.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let found: Vec<Agent> = agents(&workspace)
+            .into_iter()
+            .filter(|agent| !skip.contains(&Some(agent.id.clone())))
+            .collect();
+        let _ = tx.send(found);
+    });
+    app.open(Dialog::Fallback);
+    app.agents.clear();
+    app.agents_loading = Some(rx);
+    app.fallback = Some(offer);
+}
+
+/// Keys while another profile is offered for a vendor that could not run.
+fn fallback_key(app: &mut App, code: KeyCode) {
+    let count = app.agents.len();
+    match code {
+        KeyCode::Esc => {
+            if let Some(offer) = app.fallback.take() {
+                if app.pane().prompt.trim().is_empty() {
+                    app.pane_mut().replace(offer.task);
+                }
+                app.status =
+                    Some("the task is back in the box \u{2014} nothing ran again".to_string());
+            }
+            app.agents_loading = None;
+            app.close();
+        }
+        KeyCode::Down => app.pick = (app.pick + 1).min(count.saturating_sub(1)),
+        KeyCode::Up => app.pick = app.pick.saturating_sub(1),
+        KeyCode::Enter => {
+            let Some(agent) = app.agents.get(app.pick) else {
+                return;
+            };
+            // Verified, not assumed: one that did not answer would fail the
+            // same way, and a second failure is not a way out of the first.
+            if !agent.ready {
+                app.status = Some(format!(
+                    "{} did not answer either \u{2014} pick one marked ready",
+                    agent.id
+                ));
+                return;
+            }
+            if !app.pane().prompt.trim().is_empty() {
+                app.status = Some(
+                    "the box holds another task \u{2014} clear it to run this one again"
+                        .to_string(),
+                );
+                return;
+            }
+            let Some(id) = adopt(app) else {
+                return;
+            };
+            let Some(offer) = app.fallback.take() else {
+                return;
+            };
+            app.agents_loading = None;
+            app.close();
+            // For the thread from here on, as if it had been picked in the
+            // agents dialog: the profile that failed is likely to fail again.
+            match offer.seat {
+                session::Seat::Writes => app.thread_mut().adapter = Some(id),
+                session::Seat::Reviews => app.thread_mut().review_adapter = Some(id),
+            }
+            // Without the `@` names, which would choose the failed profile
+            // again over the one just picked.
+            let names: Vec<String> = app
+                .workspace
+                .profiles()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|profile| profile.id)
+                .collect();
+            let (task, _, _) = mention::agents_named(&offer.task, &names);
+            app.pane_mut().replace(task);
+            start_run(app);
         }
         _ => {}
     }
@@ -1461,6 +1567,75 @@ mod tests {
                 .is_some_and(|s| s.starts_with("nothing to run"))
         );
         assert!(a.thread().live.is_none());
+    }
+
+    #[test]
+    fn a_vendor_that_could_not_run_is_offered_another_profile_that_answers() {
+        use session::{Fallback, Seat};
+        let root = Path::new("/p/.ostraka");
+        let mut a = app();
+        a.thread_mut().offer = Some(Fallback {
+            seat: Seat::Writes,
+            failed: Some("spent".into()),
+            other: None,
+            task: "add a flag".into(),
+            why: "the author could not run (exit 1): insufficient credit".into(),
+        });
+        take_stock(&mut a, root);
+        assert_eq!(a.dialog, Some(Dialog::Fallback));
+        assert!(a.thread().offer.is_none(), "the offer was made twice");
+
+        // What the probe found, set here rather than read off this machine.
+        a.agents_loading = None;
+        a.agents = vec![
+            Agent {
+                id: "down".into(),
+                ready: false,
+                note: "not installed".into(),
+                configured: true,
+            },
+            Agent {
+                id: "spare".into(),
+                ready: true,
+                note: "1.0".into(),
+                configured: true,
+            },
+        ];
+        handle(&mut a, press(KeyCode::Enter), root);
+        assert_eq!(
+            a.thread().adapter,
+            None,
+            "a profile that did not answer was taken"
+        );
+        assert_eq!(a.dialog, Some(Dialog::Fallback));
+
+        handle(&mut a, press(KeyCode::Down), root);
+        handle(&mut a, press(KeyCode::Enter), root);
+        assert_eq!(a.thread().adapter.as_deref(), Some("spare"));
+        assert!(a.fallback.is_none());
+        // Nothing can run in `/p`, so the task waits in the box rather than
+        // being lost with the run that failed.
+        assert_eq!(a.pane().prompt, "add a flag");
+    }
+
+    #[test]
+    fn declining_the_offer_keeps_the_task_and_the_profile() {
+        use session::{Fallback, Seat};
+        let root = Path::new("/p/.ostraka");
+        let mut a = app();
+        a.thread_mut().offer = Some(Fallback {
+            seat: Seat::Reviews,
+            failed: None,
+            other: Some("writer".into()),
+            task: "add a flag".into(),
+            why: "reviewer could not run (exit 1): quota exceeded".into(),
+        });
+        take_stock(&mut a, root);
+        a.agents_loading = None;
+        handle(&mut a, press(KeyCode::Esc), root);
+        assert_eq!(a.dialog, None);
+        assert_eq!(a.pane().prompt, "add a flag");
+        assert_eq!(a.thread().review_adapter, None);
     }
 
     #[test]
