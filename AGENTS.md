@@ -999,11 +999,14 @@ The tag is published either way; the formula lands when a person merges it, and
 guesses: a missing sidecar or a surviving `0000…` placeholder fails the job
 instead of publishing a formula that installs nothing.
 
-**Every release gets written notes.** The release job creates the release with
-notes GitHub generates from the pull requests since the last tag. That is only
-a floor, so no release goes out with an empty description, which is how v1.4.0
-and v1.5.0 were first published. Cutting a release is not finished until its
-description is replaced with written notes:
+**Every release gets written notes.** Once every artifact is uploaded, the
+release workflow's `notes` job fills an empty description with the notes GitHub
+generates from the pull requests since the last tag. It runs once, not on the
+upload steps, because those run once per target and each would overwrite notes
+already being written. It leaves a written description alone. The generated
+list is only a floor, so no release goes out with an empty description, which
+is how v1.4.0 and v1.5.0 were first published. Cutting a release is not
+finished until that floor is replaced with written notes:
 
 ```
 gh release edit vX.Y.Z --notes-file notes.md
