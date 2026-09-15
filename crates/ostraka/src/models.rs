@@ -173,10 +173,11 @@ fn list(command: &str, args: &[String], env: &BTreeMap<String, String>) -> Resul
     // Read while waiting: a catalog longer than the pipe holds would otherwise
     // block its writer, which would never exit and always time out.
     let mut stdout = child.stdout.take().expect("stdout is piped");
-    let reader = std::thread::spawn(move || {
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut bytes = Vec::new();
         let _ = std::io::Read::read_to_end(&mut stdout, &mut bytes);
-        bytes
+        let _ = sent.send(bytes);
     });
     let started = Instant::now();
     let status = loop {
@@ -195,8 +196,11 @@ fn list(command: &str, args: &[String], env: &BTreeMap<String, String>) -> Resul
             Err(e) => return Err(e.to_string()),
         }
     };
-    // A child that left descendants holding the pipe is not waited on for them.
-    let bytes = reader.join().unwrap_or_default();
+    // A child that left descendants holding the pipe open gets a short grace,
+    // not a wait on processes the listing never needed.
+    let bytes = received
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|_| format!("`{command} {}` left its output open", args.join(" ")))?;
     if !status.success() {
         return Err(format!(
             "`{command} {}` exited with {status}",
