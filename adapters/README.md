@@ -89,6 +89,14 @@ home_env = "EXAMPLE_HOME"
 home_source = ".example"
 credentials = ["auth.json"]
 
+# How the model picker lists this profile's models. Optional. `args` runs
+# `<command> <args>` with this profile's [env]. `prefix` keeps lines starting
+# with it and drops it; `separator` keeps lines holding it and takes what comes
+# before it. `known` is a fixed list, for a CLI with no command that lists them.
+[models]
+args = ["models"]
+prefix = "example/"
+
 [capabilities]
 headless = true
 streams_json = false

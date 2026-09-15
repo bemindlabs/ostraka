@@ -382,6 +382,14 @@ again after a failed check, a sent-back change or no change at all. It never
 tries again after a vendor error, a timeout, a stop or a policy violation. No
 mode merges anything.
 
+**`/models` picks who writes, and on what.** It lists every profile that says how
+to list its models, each profile's own default first, and filters as you type.
+Enter sets the profile and the model for the thread together, because a model
+belongs to the profile that listed it. A profile lists its models through a
+`[models]` table in its TOML: the command that prints them, or a fixed list for
+a CLI that has none. A listing that fails or finds nothing says why under the
+list.
+
 **`@` names a file, a directory or an agent.** Typing `@` offers what it could
 be, and tab completes it. A directory opens one level down; anything else is
 finished with a space. A path such as `@src/main.rs` stays in the task, and the

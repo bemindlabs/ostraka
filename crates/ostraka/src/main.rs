@@ -12,6 +12,7 @@ mod fix;
 mod init;
 mod init_cmd;
 mod mode;
+mod models;
 mod offer;
 mod promote;
 mod prune;

@@ -109,6 +109,8 @@ pub enum Dialog {
     Repos,
     /// What finished runs left, and whether to clear it.
     Prune,
+    /// The models each profile lists, to pick the one that writes.
+    Models,
 }
 
 /// One adapter profile, as the agents dialog shows it.
@@ -202,6 +204,14 @@ pub struct App {
     /// What `@` can name here: this repository's paths and the agents. Read
     /// when a mention starts, not on every frame.
     pub mentionable: Mentionable,
+    /// The picker's rows: each profile that lists its models, then its models.
+    pub models: Vec<crate::models::Model>,
+    /// Why a profile listed less than it might have.
+    pub models_notes: Vec<String>,
+    /// The listing still running. Each profile's CLI is asked in turn, and a
+    /// screen that froze while one fetched over the network would be a screen
+    /// nobody could stop.
+    pub models_loading: Option<std::sync::mpsc::Receiver<Vec<crate::models::Catalog>>>,
 }
 
 impl App {
@@ -245,6 +255,9 @@ impl App {
             columns: Vec::new(),
             first: 0,
             mentionable: Mentionable::default(),
+            models: Vec::new(),
+            models_notes: Vec::new(),
+            models_loading: None,
         }
     }
 
@@ -443,6 +456,23 @@ impl App {
     }
 
     /// The commands the palette is currently offering.
+    /// The models the picker shows for what has been typed into it.
+    pub fn model_rows(&self) -> Vec<crate::models::Model> {
+        let needle = self.query.trim().to_ascii_lowercase();
+        self.models
+            .iter()
+            .filter(|row| {
+                needle.is_empty()
+                    || row.profile.to_ascii_lowercase().contains(&needle)
+                    || row
+                        .model
+                        .as_deref()
+                        .is_some_and(|m| m.to_ascii_lowercase().contains(&needle))
+            })
+            .cloned()
+            .collect()
+    }
+
     pub fn commands(&self) -> Vec<Command> {
         Command::matching(&self.query, self.situation())
     }
@@ -703,6 +733,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Dialog::Settings) => render_settings(frame, app, screen),
         Some(Dialog::Repos) => render_repos(frame, app, screen),
         Some(Dialog::Prune) => render_prune(frame, app, screen),
+        Some(Dialog::Models) => render_models(frame, app, screen),
         None => {}
     }
 
@@ -2237,6 +2268,80 @@ fn render_palette(frame: &mut Frame, app: &App, screen: Rect) {
             Span::styled(command.about().to_string(), theme::muted()),
         ]));
     }
+
+    let area = theme::centred(screen, 86, lines.len() as u16 + 2);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(theme::fit(lines, area.height))
+            .block(theme::panel(true).padding(Padding::horizontal(2))),
+        area,
+    );
+}
+
+/// The models each profile lists, filtered by what has been typed.
+fn render_models(frame: &mut Frame, app: &App, screen: Rect) {
+    const SHOWN: usize = 14;
+    let rows = app.model_rows();
+    let chosen = format!(
+        "writes   {}   model   {}",
+        app.thread().adapter.as_deref().unwrap_or("automatic"),
+        app.thread().model.as_deref().unwrap_or("its own default")
+    );
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("> ", theme::accent()),
+            Span::styled(app.query.clone(), theme::text()),
+            Span::styled(theme::CURSOR, theme::accent()),
+        ]),
+        Line::from(Span::styled(chosen, theme::muted())),
+        theme::rule(82),
+    ];
+    if app.models_loading.is_some() {
+        lines.push(dim("asking each profile what it has\u{2026}".to_string()));
+    } else if app.models.is_empty() {
+        lines.push(dim(
+            "no profile here says how to list its models \u{2014} a [models] table in its profile does"
+                .to_string(),
+        ));
+    } else if rows.is_empty() {
+        lines.push(dim("no model matches that".to_string()));
+    }
+    let first = app.pick.saturating_sub(SHOWN - 1);
+    for (i, row) in rows.iter().enumerate().skip(first).take(SHOWN) {
+        let here = i == app.pick;
+        let (model, style) = match &row.model {
+            Some(model) => (model.clone(), theme::text()),
+            None => ("its own default".to_string(), theme::muted()),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(if here { theme::CURSOR } else { " " }, theme::accent()),
+            Span::styled(
+                format!(" {:<22}", truncate(&row.profile, 21)),
+                theme::accent(),
+            ),
+            Span::styled(
+                truncate(&model, 56),
+                if here {
+                    style.add_modifier(Modifier::BOLD)
+                } else {
+                    style
+                },
+            ),
+        ]));
+    }
+    if rows.len() > SHOWN {
+        lines.push(dim(format!(
+            "{} models \u{2014} type to narrow them",
+            rows.len()
+        )));
+    }
+    for note in &app.models_notes {
+        lines.push(Line::from(Span::styled(
+            truncate(note, 80),
+            theme::on(theme::WARN),
+        )));
+    }
+    lines.push(dim("enter picks \u{b7} esc closes".to_string()));
 
     let area = theme::centred(screen, 86, lines.len() as u16 + 2);
     frame.render_widget(Clear, area);

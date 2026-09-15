@@ -66,6 +66,13 @@ home_env = "XDG_CONFIG_HOME"
 home_source = ".config"
 credentials = []
 
+# How the model picker lists this profile's models: the aliases declared in
+# OPENCODE_CONFIG_CONTENT above, read from `opencode models litellm` run with
+# that environment.
+[models]
+args = ["models", "litellm"]
+prefix = "litellm/"
+
 [capabilities]
 headless = true
 streams_json = false

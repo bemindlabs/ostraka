@@ -68,6 +68,12 @@ input = [
 ]
 output = "/usage/output_tokens"
 
+# How the model picker lists this profile's models. This CLI has no command
+# that lists them, so these are the aliases its help names, each meaning the
+# latest model of that line.
+[models]
+known = ["opus", "sonnet", "fable"]
+
 [capabilities]
 headless = true
 streams_json = true

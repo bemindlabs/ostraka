@@ -80,6 +80,12 @@ home_env = "XDG_CONFIG_HOME"
 home_source = ".config"
 credentials = []
 
+# How the model picker lists this profile's models: every model OpenRouter
+# serves, read from `opencode models openrouter` without its `openrouter/`.
+[models]
+args = ["models", "openrouter"]
+prefix = "openrouter/"
+
 [capabilities]
 headless = true
 streams_json = false

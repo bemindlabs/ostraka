@@ -40,6 +40,7 @@ pub enum Command {
     Agents,
     Settings,
     Mode,
+    Models,
     Fresh,
     NewPane,
     NextPane,
@@ -61,7 +62,7 @@ pub enum Command {
 impl Command {
     /// In the order the palette offers them: what someone reaches for most,
     /// first.
-    pub const ALL: [Command; 24] = [
+    pub const ALL: [Command; 25] = [
         Command::NewRun,
         Command::Stop,
         Command::Fix,
@@ -70,6 +71,7 @@ impl Command {
         Command::Agents,
         Command::Settings,
         Command::Mode,
+        Command::Models,
         Command::Fresh,
         Command::NewPane,
         Command::NextPane,
@@ -98,6 +100,7 @@ impl Command {
             Command::Agents => "agents",
             Command::Settings => "settings",
             Command::Mode => "switch mode",
+            Command::Models => "models",
             Command::Fresh => "start a fresh thread",
             Command::NewPane => "new pane",
             Command::NextPane => "next pane",
@@ -128,6 +131,7 @@ impl Command {
             Command::Agents => "a",
             Command::Settings => ",",
             Command::Mode => "m",
+            Command::Models => "o",
             Command::Fresh => "f",
             Command::NewPane => "t",
             Command::NextPane => "]",
@@ -162,6 +166,7 @@ impl Command {
             Command::Agents => 'a',
             Command::Settings => ',',
             Command::Mode => 'm',
+            Command::Models => 'o',
             Command::Fresh => 'f',
             Command::NewPane => 't',
             Command::NextPane => ']',
@@ -195,6 +200,9 @@ impl Command {
             Command::Agents => "choose who writes and who reviews",
             Command::Settings => "what this thread and this project are set to",
             Command::Mode => "ask, plan, loop or auto \u{2014} what enter does next",
+            Command::Models => {
+                "pick the profile and model that write, from what each profile lists"
+            }
             Command::Fresh => "forget the chain; start again from HEAD",
             Command::NewPane => "another line of work, open beside this one",
             Command::NextPane => "move to the next line of work",
@@ -233,6 +241,7 @@ impl Command {
             Command::Agents => "agents",
             Command::Settings => "settings",
             Command::Mode => "mode",
+            Command::Models => "models",
             Command::Fresh => "fresh",
             Command::NewPane => "pane",
             Command::NextPane => "next",
@@ -298,6 +307,8 @@ impl Command {
                 // A width is a share of a screen the panes are sharing. Switched
                 // between, each one has all of it.
                 Command::WiderPane | Command::NarrowerPane | Command::EvenPanes => situation.split,
+                // Listing models needs profiles to list them from.
+                Command::Models => !situation.unconfigured,
                 _ => true,
             })
             .collect()

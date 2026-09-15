@@ -272,6 +272,22 @@ fn take_stock(app: &mut App, records_root: &Path) {
     if let Some((at, run_id)) = ended {
         finished_run(app, records_root, at, Some(run_id));
     }
+    // The model listing, once every profile has answered.
+    if let Some(rx) = app.models_loading.take() {
+        match rx.try_recv() {
+            Ok(catalogs) => {
+                app.models_notes = catalogs
+                    .iter()
+                    .filter_map(|c| c.note.as_ref().map(|n| format!("{}: {n}", c.profile)))
+                    .collect();
+                app.models = crate::models::rows(&catalogs);
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => app.models_loading = Some(rx),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                app.models_notes = vec!["the model listing stopped without an answer".to_string()];
+            }
+        }
+    }
     // Asked to leave while something was running: the browser stays up until
     // the run it started has actually stopped, so the last thing on screen is
     // what happened rather than a terminal that froze on its way out.
@@ -510,6 +526,7 @@ fn command_key(app: &mut App, key: KeyEvent, records_root: &Path) {
         KeyCode::Char('-') => perform(app, Command::NarrowerPane, records_root),
         KeyCode::Char('=') => perform(app, Command::EvenPanes, records_root),
         KeyCode::Char('m') | KeyCode::BackTab => perform(app, Command::Mode, records_root),
+        KeyCode::Char('o') => perform(app, Command::Models, records_root),
         KeyCode::Char('j') | KeyCode::Down => {
             app.move_by(1);
             load_detail(app, records_root);
@@ -655,6 +672,17 @@ fn perform(app: &mut App, command: Command, records_root: &Path) {
             let next = app.thread().mode.next();
             set_mode(app, next);
         }
+        Command::Models => {
+            app.open(Dialog::Models);
+            app.models.clear();
+            app.models_notes.clear();
+            let adapters = app.workspace.adapters();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::models::catalogs(&adapters));
+            });
+            app.models_loading = Some(rx);
+        }
         Command::Keys => app.open(Dialog::Keys),
         Command::Quit => leave(app),
     }
@@ -744,6 +772,7 @@ fn dialog_key(app: &mut App, key: KeyEvent, records_root: &Path) {
             _ => {}
         },
         Some(Dialog::Agents) => agents_key(app, key.code),
+        Some(Dialog::Models) => models_key(app, key.code),
         Some(Dialog::Fix) => fix_key(app, key.code),
         Some(Dialog::Settings) => settings_key(app, key.code),
         Some(Dialog::Repos) => repos_key(app, key.code, records_root),
@@ -1042,6 +1071,40 @@ fn agents_key(app: &mut App, code: KeyCode) {
         KeyCode::Char('x') => {
             app.thread_mut().adapter = None;
             app.thread_mut().review_adapter = None;
+        }
+        _ => {}
+    }
+}
+
+/// Keys while the model picker is open.
+fn models_key(app: &mut App, code: KeyCode) {
+    let count = app.model_rows().len();
+    match code {
+        KeyCode::Esc => app.close(),
+        // The profile and the model together: a model belongs to the profile
+        // that listed it, and naming one without the other would hand a model
+        // to whichever profile routing chose.
+        KeyCode::Enter => {
+            if let Some(row) = app.model_rows().get(app.pick).cloned() {
+                app.thread_mut().adapter = Some(row.profile.clone());
+                app.thread_mut().model = row.model.clone();
+                app.status = Some(format!(
+                    "{} writes, on {}",
+                    row.profile,
+                    row.model.as_deref().unwrap_or("its own default model")
+                ));
+                app.close();
+            }
+        }
+        KeyCode::Down => app.pick = (app.pick + 1).min(count.saturating_sub(1)),
+        KeyCode::Up => app.pick = app.pick.saturating_sub(1),
+        KeyCode::Backspace => {
+            app.query.pop();
+            app.pick = 0;
+        }
+        KeyCode::Char(c) => {
+            app.query.push(c);
+            app.pick = 0;
         }
         _ => {}
     }
@@ -1398,6 +1461,46 @@ mod tests {
                 .is_some_and(|s| s.starts_with("nothing to run"))
         );
         assert!(a.thread().live.is_none());
+    }
+
+    #[test]
+    fn a_model_is_picked_with_the_profile_that_listed_it() {
+        use crate::models::Model;
+        let root = Path::new("/p/.ostraka");
+        let mut a = app();
+        a.open(Dialog::Models);
+        a.models = vec![
+            Model {
+                profile: "local-profile".into(),
+                model: None,
+            },
+            Model {
+                profile: "local-profile".into(),
+                model: Some("model-one".into()),
+            },
+            Model {
+                profile: "hosted-profile".into(),
+                model: Some("family/model-two".into()),
+            },
+        ];
+        for c in "two".chars() {
+            handle(&mut a, press(KeyCode::Char(c)), root);
+        }
+        assert_eq!(a.model_rows().len(), 1, "the filter did not narrow");
+        handle(&mut a, press(KeyCode::Enter), root);
+        assert_eq!(a.dialog, None);
+        assert_eq!(a.thread().adapter.as_deref(), Some("hosted-profile"));
+        assert_eq!(a.thread().model.as_deref(), Some("family/model-two"));
+
+        // A profile's own default clears a model picked before.
+        a.open(Dialog::Models);
+        a.models = vec![Model {
+            profile: "local-profile".into(),
+            model: None,
+        }];
+        handle(&mut a, press(KeyCode::Enter), root);
+        assert_eq!(a.thread().adapter.as_deref(), Some("local-profile"));
+        assert_eq!(a.thread().model, None);
     }
 
     #[test]
