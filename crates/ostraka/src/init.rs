@@ -390,7 +390,7 @@ fn with_layout(mut config: String, repositories: Option<&str>) -> String {
     config
 }
 
-fn config_for(kind: Kind) -> String {
+pub(crate) fn config_for(kind: Kind) -> String {
     let checks = match kind {
         Kind::Rust => vec![
             ("format", "cargo fmt --all -- --check"),
@@ -783,7 +783,7 @@ mod tests {
 
         // And asked for on the command line, it is refused by name before
         // anything is written.
-        let err = crate::init_cmd::run(&dir, Some(&dir), false, true)
+        let err = crate::init_cmd::run(&dir, Some(&dir), false, false, true)
             .expect_err("must refuse")
             .to_string();
         assert!(err.contains("workspace itself"), "{err}");
