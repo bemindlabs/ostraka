@@ -167,6 +167,32 @@ jobs:
   # branch is exactly that — a release does not get an exemption for being
   # automated. The release is already published when this runs; the formula
   # lands when a person merges it.
+  # A release is never left with an empty description. Once, after every
+  # artifact is uploaded, rather than on the upload steps: those run once per
+  # target, and each run would regenerate the body over notes somebody had
+  # already started writing. It fills only an empty body, so written notes are
+  # never replaced. The generated list is a floor; the written notes, required
+  # by AGENTS.md, replace it.
+  notes:
+    needs: [build, app]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: fill an empty description
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          body=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json body --jq .body)
+          if [ -n "$body" ]; then
+            echo "$GITHUB_REF_NAME already has a description; leaving it"
+            exit 0
+          fi
+          generated=$(gh api --method POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f tag_name="$GITHUB_REF_NAME" --jq .body)
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --notes "$generated"
+
   formula:
     needs: [build, app]
     runs-on: ubuntu-latest
