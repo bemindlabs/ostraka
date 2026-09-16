@@ -8,6 +8,7 @@ mod chord;
 mod consult;
 mod discover;
 mod drain;
+mod drift;
 mod fix;
 mod init;
 mod init_cmd;
@@ -101,6 +102,17 @@ enum Commands {
         /// somebody's, and a setup command should not be how they lose it.
         #[arg(long)]
         force: bool,
+
+        /// Append the tables this version writes that a kept file has not.
+        ///
+        /// For a workspace set up under an earlier version. Only whole tables
+        /// are added, and only to the end of the file — nothing already there
+        /// is read back, reordered or rewritten. A missing key inside a table
+        /// that exists, and a value that disagrees with the stock one, are
+        /// reported and left alone: that is the shape a deliberate local
+        /// change takes as well as the shape a correction upstream takes.
+        #[arg(long, conflicts_with = "force")]
+        upgrade: bool,
     },
 
     /// List adapter profiles and whether each one can run here.
@@ -324,9 +336,13 @@ fn main() -> ExitCode {
 
     let result = match command {
         Commands::Check { fix } => check::run(&workspace, *fix, cli.json),
-        Commands::Init { force } => {
-            init_cmd::run(&here, cli.repositories.as_deref(), *force, cli.json)
-        }
+        Commands::Init { force, upgrade } => init_cmd::run(
+            &here,
+            cli.repositories.as_deref(),
+            *force,
+            *upgrade,
+            cli.json,
+        ),
         Commands::Adapters => adapters::run(&workspace, cli.json),
         Commands::Bench { dry_run } => bench::run(&workspace, *dry_run, cli.json),
         Commands::Replay { run_id } => replay::run(&workspace, run_id, cli.json),

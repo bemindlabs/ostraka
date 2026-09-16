@@ -159,6 +159,7 @@ reviews, and the result is a replayable record.
 
 ```console
 ostraka init       # write the workspace layout. Overwrites nothing
+ostraka init --upgrade  # append tables a kept file is missing after an upgrade
 ostraka check      # validate the workspace, its profiles and its repositories
 ostraka check --fix  # and walk the steps out of what it found, asking first
 ostraka adapters   # list adapter profiles and whether each can run here
@@ -208,6 +209,35 @@ directory somebody chose that isn't there is an error that names it and says
 where it was set, rather than a workspace that silently looks empty. Ostraka
 never writes into a repository, so where the repositories are is entirely your
 call — worktrees and records stay in `.ostraka/` either way.
+
+### After an upgrade
+
+`init` overwrites nothing, which is the right default and has a cost: a
+workspace set up under an earlier version keeps files that are missing keys the
+current version ships, and nothing used to say so. `check` and `init` now name
+them — for example, on 1.5.0:
+
+```console
+$ ostraka check
+ok — 10 adapter profile(s), 1 repository
+
+drift — 3 kept file(s) differ from what ostraka 1.5.0 would write
+  .ostraka/ostraka.toml
+    missing [routing]
+  .ostraka/adapters/claude-code.toml
+    missing [models]
+  .ostraka/adapters/codex.toml
+    capabilities.streams_json is true, stock says false
+```
+
+Drift is a report, never a verdict: it does not fail a check or block a run.
+`ostraka init --upgrade` appends the missing tables, with the comments that
+explain them, and reads nothing else in the file back. A missing key inside a
+table that exists, a value that disagrees, and a stale comment are reported and
+left alone — that is the shape a deliberate local change takes as well as the
+shape a correction upstream takes, and nothing here can tell those apart.
+`ostraka.toml` is compared by its keys only, because it is generated from what
+was detected and a hand-written gate is the normal state.
 
 `notes/` and `skills/` are linked into every worktree and are the two
 directions of the same idea. Notes are what runs worked out and wrote down;

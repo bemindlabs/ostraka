@@ -77,6 +77,12 @@ pub fn run(workspace: &Workspace, fix: bool, json: bool) -> Outcome {
         }));
     }
 
+    // Not a problem, and deliberately not counted as one. A kept file that
+    // differs from stock is usually a file somebody edited on purpose; what
+    // was missing was any way to find out that it also differs in ways nobody
+    // chose. Reported after the verdict so it never changes what `ok` means.
+    let drifts = crate::drift::survey(workspace);
+
     if json {
         let report = serde_json::json!({
             "workspace": workspace.root.display().to_string(),
@@ -86,6 +92,7 @@ pub fn run(workspace: &Workspace, fix: bool, json: bool) -> Outcome {
             "profiles": profiles,
             "repositories": rows,
             "problems": problems,
+            "drift": crate::drift::as_json(&drifts),
             "ok": problems.is_empty(),
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -111,6 +118,10 @@ pub fn run(workspace: &Workspace, fix: bool, json: bool) -> Outcome {
         for p in &problems {
             println!("problem: {p}");
         }
+    }
+
+    if !json && !drifts.is_empty() {
+        print!("{}", crate::drift::report(&drifts));
     }
 
     // `--fix` walks the same steps the browser takes, from the same module.

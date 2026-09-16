@@ -425,6 +425,33 @@ repository beside it. They are copies of `adapters/*.toml`, and
 `check-hygiene.sh` fails if the two drift — the same treatment as the gate
 written out in both `ci.yml` and `ostraka.toml`.
 
+**What `init` kept is reported, and only whole tables are ever added.** Not
+overwriting has a cost, and it was paid quietly: a workspace set up under an
+earlier version keeps files missing the keys the current one ships, `check`
+called that `ok`, and the only way anybody found to learn it was to `init` into
+a scratch directory and diff every file by hand. `drift::survey` compares what
+is on disk with what this version would write, after the plan has been carried
+out, and `check` and `init` both print it. It is a report and never a verdict:
+it fails nothing and blocks nothing, because a file that differs is usually a
+file somebody edited on purpose.
+
+The two kinds of file are not compared the same way. An adapter profile is
+shipped verbatim, so a value that disagrees is worth reporting — `codex`'s
+`streams_json` was corrected to `false` and a workspace set up before that went
+on declaring `true`. `ostraka.toml` is *generated* from what was detected, so
+its values are nobody's stock and only its keys are compared; reporting a
+hand-written gate as drift on every run is how a report gets skipped.
+
+`init --upgrade` appends the missing tables and nothing else. That is the one
+change that can be made without reading back a line of what is there — the
+stock text of a table the file has no header for, with the comments that
+explain it, added at the end. A missing key inside a table that exists, a
+differing value and a stale comment are reported and left: that is the shape a
+deliberate local change takes as well as the shape a correction upstream takes,
+and nothing can tell those apart. `--force` is not the fallback for them, which
+is why the two flags conflict — the workspace that needs this most is the one
+with a hand-written gate and a hand-measured profile in it.
+
 **Onboarding says what setting up will not fix.** Reviewed by opening the
 browser in an empty directory and reading what it promised. It offered to set
 the place up and said nothing about the two things that would still be wrong
