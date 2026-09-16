@@ -215,7 +215,7 @@ call — worktrees and records stay in `.ostraka/` either way.
 `init` overwrites nothing, which is the right default and has a cost: a
 workspace set up under an earlier version keeps files that are missing keys the
 current version ships, and nothing used to say so. `check` and `init` now name
-them:
+them — for example, on 1.5.0:
 
 ```console
 $ ostraka check

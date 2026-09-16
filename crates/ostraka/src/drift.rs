@@ -207,8 +207,8 @@ fn compare(found: &str, stock: &str, values: Values) -> Vec<Finding> {
                 if values == Values::Shipped && found_value != stock_value {
                     findings.push(Finding::Differs {
                         key: key.clone(),
-                        found: found_value.clone(),
-                        stock: stock_value.clone(),
+                        found: render(found_value),
+                        stock: render(stock_value),
                     });
                 }
             }
@@ -238,13 +238,19 @@ fn compare(found: &str, stock: &str, values: Values) -> Vec<Finding> {
     findings
 }
 
-/// Every key in a document, dotted, with its value rendered for a person.
+/// Every key in a document, dotted, against its value.
 ///
 /// Arrays are leaves. `gate.checks` is the whole gate as one value, which is
 /// the level somebody reasons about it at — a report naming
 /// `gate.checks[2].cmd` describes a diff rather than a project.
-fn flatten(document: &toml::Value) -> BTreeMap<String, String> {
-    fn walk(value: &toml::Value, prefix: &str, out: &mut BTreeMap<String, String>) {
+///
+/// The values are kept whole rather than rendered. Comparing what a report
+/// would *print* is how an array that changed contents without changing length
+/// compares equal to the stock one: `args` rewritten flag for flag is exactly
+/// the drift somebody most needs told about, and it is the shape that would
+/// have slipped through. Raised in review.
+fn flatten(document: &toml::Value) -> BTreeMap<String, toml::Value> {
+    fn walk(value: &toml::Value, prefix: &str, out: &mut BTreeMap<String, toml::Value>) {
         match value {
             toml::Value::Table(table) => {
                 for (key, value) in table {
@@ -257,7 +263,7 @@ fn flatten(document: &toml::Value) -> BTreeMap<String, String> {
                 }
             }
             other => {
-                out.insert(prefix.to_string(), render(other));
+                out.insert(prefix.to_string(), other.clone());
             }
         }
     }
@@ -267,10 +273,14 @@ fn flatten(document: &toml::Value) -> BTreeMap<String, String> {
 }
 
 /// A value as it is worth putting in a one-line report.
+///
+/// For display only — never for deciding whether two values agree. An array is
+/// summarised because the alternative is a report line carrying a whole gate,
+/// and the file itself is where somebody reads what changed.
 fn render(value: &toml::Value) -> String {
     match value {
         toml::Value::String(text) => format!("{text:?}"),
-        toml::Value::Array(items) => format!("{} item(s)", items.len()),
+        toml::Value::Array(items) => format!("{} item(s), and not the same ones", items.len()),
         other => other.to_string(),
     }
 }
@@ -297,7 +307,7 @@ fn tables(text: &str) -> Vec<String> {
 fn missing_table(
     key: &str,
     headers: &[String],
-    found: &BTreeMap<String, String>,
+    found: &BTreeMap<String, toml::Value>,
 ) -> Option<String> {
     headers
         .iter()
@@ -465,6 +475,20 @@ args = [\"models\"]
         assert_eq!(
             compare(&found, STOCK, Values::Shipped),
             vec![Finding::Prose]
+        );
+    }
+
+    /// Raised in review: the report summarises an array, and comparing the
+    /// summary makes an array rewritten to the same length compare equal.
+    #[test]
+    fn an_array_rewritten_to_the_same_length_is_still_drift() {
+        let stock = "id = \"x\"\n\n[models]\nknown = [\"opus\", \"sonnet\"]\n";
+        let found = "id = \"x\"\n\n[models]\nknown = [\"opus\", \"haiku\"]\n";
+        let findings = compare(found, stock, Values::Shipped);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            matches!(&findings[0], Finding::Differs { key, .. } if key == "models.known"),
+            "{findings:?}"
         );
     }
 
