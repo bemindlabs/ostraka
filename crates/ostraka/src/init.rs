@@ -90,7 +90,10 @@ fn has_python_at_root(project: &Path) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Create,
-    /// Only the lines that are missing, added to what is already there.
+    /// The file is already there and is being edited in place. `contents` is
+    /// the whole file as it will stand, not the part being added, because the
+    /// lines that are missing do not always belong at the end — see
+    /// `gitignore`, which puts them in the block that already introduces them.
     Append,
     AlreadyThere,
 }
@@ -212,7 +215,6 @@ pub fn write_profile(workspace: &crate::workspace::Workspace, id: &str) -> std::
 }
 
 /// Lines that keep a run's working evidence out of history.
-/// Lines that keep a run's working evidence out of history.
 ///
 /// The subdirectories rather than `/.ostraka/` itself, because the
 /// configuration and the adapter profiles live in there too and those are
@@ -226,6 +228,12 @@ const IGNORED: [&str; 6] = [
     "/.ostraka/secrets/",
     "/.ostraka/vendor-home/",
 ];
+
+/// The sentence that introduces those lines, and how the block is recognised
+/// again on a later run. A version that adds a path has to find the block it
+/// wrote last time, so the first line is matched exactly rather than reworded.
+const HEADER: &str = "# Ostraka: worktrees an agent works in, and the record of each run.";
+const HEADER_NOTE: &str = "# The audit trail that has to survive is in the commits, not here.";
 
 pub fn plan(project: &Path) -> Plan {
     plan_with(project, None)
@@ -334,10 +342,23 @@ fn planned(project: &Path, relative: &str, contents: String, role: Role) -> Plan
 
 /// The ignore entries, added to whatever is already in the file.
 ///
-/// Appended rather than written: a project's `.gitignore` is its own, and
-/// replacing it to add two lines would be a rude way to set up a tool.
+/// Edited rather than replaced: a project's `.gitignore` is its own, and
+/// rewriting it to add two lines would be a rude way to set up a tool. So
+/// `contents` is always the file as it will stand — the existing text with
+/// whatever is missing put where it belongs — and never a fragment. A file
+/// with nothing missing carries its own bytes unchanged, which is what makes
+/// `--force` safe here: forcing rewrites it with what it already said, instead
+/// of writing the empty fragment there was nothing to append.
+///
+/// Where the missing lines go is the whole of issue #69. A version that adds a
+/// path to `IGNORED` used to append a second copy of the header sentence, so a
+/// workspace set up before `/.ostraka/consulted/` existed ended up saying twice
+/// that this is where a run's working evidence goes — the second time
+/// introducing a single path that belonged in the first block. The block this
+/// tool wrote before is found and the paths are added to it.
 fn gitignore(project: &Path) -> Planned {
     let path = project.join(".gitignore");
+    let existed = path.exists();
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let missing: Vec<&str> = IGNORED
         .iter()
@@ -345,30 +366,84 @@ fn gitignore(project: &Path) -> Planned {
         .filter(|line| !existing.lines().any(|l| l.trim() == *line))
         .collect();
 
-    if missing.is_empty() && path.exists() {
+    if missing.is_empty() && existed {
         return Planned {
             path,
-            contents: String::new(),
+            contents: existing,
             action: Action::AlreadyThere,
             role: Role::Ignore,
         };
     }
 
-    let block = format!(
-        "\n# Ostraka: worktrees an agent works in, and the record of each run.\n\
-         # The audit trail that has to survive is in the commits, not here.\n{}\n",
-        missing.join("\n")
-    );
+    let contents = match block_end(&existing) {
+        Some(at) => {
+            let mut lines: Vec<&str> = existing.lines().collect();
+            for (offset, line) in missing.iter().enumerate() {
+                lines.insert(at + 1 + offset, line);
+            }
+            let mut text = lines.join("\n");
+            if existing.ends_with('\n') {
+                text.push('\n');
+            }
+            text
+        }
+        // No block of ours to grow: either a file somebody else wrote, or no
+        // file at all. A blank line separates it from what was already there.
+        None => {
+            let mut text = existing.clone();
+            if !text.is_empty() {
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push('\n');
+            }
+            text.push_str(&format!(
+                "{HEADER}\n{HEADER_NOTE}\n{}\n",
+                missing.join("\n")
+            ));
+            text
+        }
+    };
+
     Planned {
         path,
-        contents: block,
-        action: if existing.is_empty() {
-            Action::Create
-        } else {
+        contents,
+        action: if existed {
             Action::Append
+        } else {
+            Action::Create
         },
         role: Role::Ignore,
     }
+}
+
+/// The line the missing entries go under, in the block a previous `init` wrote.
+///
+/// `None` when there is no such block. Otherwise the last ignore entry in the
+/// contiguous run of comments and entries below the header — the last entry
+/// rather than the last line of the run, because a comment under the final
+/// entry introduces whatever comes next, not this block.
+fn block_end(existing: &str) -> Option<usize> {
+    let lines: Vec<&str> = existing.lines().collect();
+    let start = lines.iter().position(|line| line.trim() == HEADER)?;
+    let mut header_end = start;
+    let mut last_entry = None;
+    let mut at = start;
+    while let Some(next) = lines.get(at + 1) {
+        let line = next.trim();
+        let entry = IGNORED.contains(&line);
+        if !entry && !line.starts_with('#') {
+            break;
+        }
+        at += 1;
+        if entry {
+            last_entry = Some(at);
+        } else if last_entry.is_none() {
+            header_end = at;
+        }
+    }
+    // A header with no entries under it yet: below the sentence, not inside it.
+    Some(last_entry.unwrap_or(header_end))
 }
 
 /// The gate for a detected project.
@@ -491,8 +566,11 @@ fn link_for(kind: Kind) -> &'static str {
     }
 }
 
-/// Writes the missing part of a plan. Returns what it wrote.
-pub fn apply(plan: &Plan, force: bool) -> std::io::Result<Vec<PathBuf>> {
+/// Writes the missing part of a plan. Returns what it wrote, and what it did
+/// to each one — a file edited in place and a file created are different
+/// things to have happened to somebody's directory, and reporting both as
+/// "wrote" leaves an operator unable to tell which their `.gitignore` was.
+pub fn apply(plan: &Plan, force: bool) -> std::io::Result<Vec<(PathBuf, Action)>> {
     let mut written = Vec::new();
     for file in &plan.files {
         let doing = if force && file.action == Action::AlreadyThere {
@@ -513,13 +591,14 @@ pub fn apply(plan: &Plan, force: bool) -> std::io::Result<Vec<PathBuf>> {
                 }
                 std::fs::write(&file.path, &file.contents)?;
             }
+            // `contents` is the whole file, not the part being added, so this
+            // is a write like any other. What it buys is the missing lines
+            // landing where they belong rather than only at the end.
             Action::Append => {
-                use std::io::Write;
-                let mut handle = std::fs::OpenOptions::new().append(true).open(&file.path)?;
-                handle.write_all(file.contents.as_bytes())?;
+                std::fs::write(&file.path, &file.contents)?;
             }
         }
-        written.push(file.path.clone());
+        written.push((file.path.clone(), doing));
     }
     Ok(written)
 }
@@ -835,7 +914,7 @@ mod tests {
         std::fs::create_dir_all(dir.join(".ostraka")).expect("ostraka");
         std::fs::write(dir.join(".ostraka/ostraka.toml"), "# mine\n").expect("write");
         let written = apply(&plan(&dir), false).expect("applies");
-        assert!(!written.iter().any(|p| p.ends_with("ostraka.toml")));
+        assert!(!written.iter().any(|(p, _)| p.ends_with("ostraka.toml")));
         assert_eq!(
             std::fs::read_to_string(dir.join(".ostraka/ostraka.toml")).expect("reads"),
             "# mine\n"
@@ -901,6 +980,115 @@ mod tests {
             .find(|f| f.path.ends_with(".gitignore"))
             .expect("planned");
         assert_eq!(ignore.action, Action::AlreadyThere);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #69, in the shape it was reported: a `.gitignore` an earlier
+    /// version wrote, and one path added to `IGNORED` since.
+    #[test]
+    fn a_path_added_since_joins_the_block_that_is_already_there() {
+        let dir = scratch();
+        let before = format!(
+            "{HEADER}\n{HEADER_NOTE}\n\
+             /.ostraka/runs/\n/.ostraka/worktrees/\n/.ostraka/cache/\n\
+             /.ostraka/secrets/\n/.ostraka/vendor-home/\n"
+        );
+        std::fs::write(dir.join(".gitignore"), &before).expect("write");
+        apply(&plan(&dir), false).expect("applies");
+
+        let text = std::fs::read_to_string(dir.join(".gitignore")).expect("reads");
+        assert_eq!(
+            text.lines().filter(|l| l.trim() == HEADER).count(),
+            1,
+            "the header sentence stands twice:\n{text}"
+        );
+        assert!(text.contains("/.ostraka/consulted/"), "{text}");
+        // Every path under one sentence, so the block still reads as one thing.
+        let header = text
+            .lines()
+            .position(|l| l.trim() == HEADER)
+            .expect("header");
+        let last = text
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| IGNORED.contains(&l.trim()))
+            .map(|(i, _)| i)
+            .last()
+            .expect("entries");
+        assert_eq!(
+            last - header,
+            IGNORED.len() + 1,
+            "the block has a gap:\n{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file somebody else wrote gets a block of its own, below their lines.
+    #[test]
+    fn a_gitignore_with_no_block_of_ours_keeps_what_it_says() {
+        let dir = scratch();
+        std::fs::write(dir.join(".gitignore"), "/target\n").expect("write");
+        apply(&plan(&dir), false).expect("applies");
+        let text = std::fs::read_to_string(dir.join(".gitignore")).expect("reads");
+        assert!(text.starts_with("/target\n\n"), "{text}");
+        assert_eq!(text.lines().filter(|l| l.trim() == HEADER).count(), 1);
+        for line in IGNORED {
+            assert!(
+                text.lines().any(|l| l.trim() == line),
+                "{line} missing:\n{text}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A comment under the block introduces what comes after it, so the paths
+    /// go above it rather than under a sentence about somebody else's files.
+    #[test]
+    fn a_comment_under_the_block_is_not_taken_for_part_of_it() {
+        let dir = scratch();
+        let before = format!("{HEADER}\n{HEADER_NOTE}\n/.ostraka/runs/\n# Build output\n/target\n");
+        std::fs::write(dir.join(".gitignore"), &before).expect("write");
+        apply(&plan(&dir), false).expect("applies");
+        let text = std::fs::read_to_string(dir.join(".gitignore")).expect("reads");
+        let comment = text
+            .lines()
+            .position(|l| l == "# Build output")
+            .expect("comment");
+        let consulted = text
+            .lines()
+            .position(|l| l.trim() == "/.ostraka/consulted/")
+            .expect("consulted");
+        assert!(consulted < comment, "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--force` rewrites every file with what this version would write. The
+    /// `.gitignore` is the one file whose stock contents are the ones already
+    /// there, and it used to plan an empty fragment when nothing was missing —
+    /// which forcing turned into a write, emptying somebody's file.
+    #[test]
+    fn forcing_does_not_empty_a_gitignore_that_needed_nothing() {
+        let dir = scratch();
+        apply(&plan(&dir), false).expect("applies");
+        let before = std::fs::read_to_string(dir.join(".gitignore")).expect("reads");
+        assert!(!before.is_empty());
+        apply(&plan(&dir), true).expect("forces");
+        let after = std::fs::read_to_string(dir.join(".gitignore")).expect("reads");
+        assert_eq!(before, after);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file that was edited in place is reported as edited, not as written.
+    #[test]
+    fn editing_a_file_in_place_is_reported_as_its_own_action() {
+        let dir = scratch();
+        std::fs::write(dir.join(".gitignore"), "/target\n").expect("write");
+        let written = apply(&plan(&dir), false).expect("applies");
+        let (_, action) = written
+            .iter()
+            .find(|(p, _)| p.ends_with(".gitignore"))
+            .expect("the gitignore was touched");
+        assert_eq!(*action, Action::Append);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -77,9 +77,18 @@ pub fn run(
 
         if !json {
             println!("detected {}", plan.kind.describe());
-            for path in &written {
+            // "wrote" for a file that already existed and was edited in place
+            // put an operator in the position of not knowing their own
+            // `.gitignore` had been touched — every other pre-existing file in
+            // the same run is listed as `kept`. The three verbs are the three
+            // things that happen.
+            for (path, action) in &written {
                 let name = path.strip_prefix(project).unwrap_or(path);
-                println!("  wrote  {}", name.display());
+                let verb = match action {
+                    Action::Append => "updated",
+                    _ => "wrote  ",
+                };
+                println!("  {verb} {}", name.display());
             }
             for file in plan
                 .files
