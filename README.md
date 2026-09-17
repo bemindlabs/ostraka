@@ -215,13 +215,15 @@ call — worktrees and records stay in `.ostraka/` either way.
 `init` overwrites nothing, which is the right default and has a cost: a
 workspace set up under an earlier version keeps files that are missing keys the
 current version ships, and nothing used to say so. `check` and `init` now name
-them — for example, on 1.5.0:
+them. The version in that line is whichever one you are running — what a kept
+file is being compared against, which is the thing worth knowing when the same
+workspace is opened from two machines:
 
 ```console
 $ ostraka check
 ok — 10 adapter profile(s), 1 repository
 
-drift — 3 kept file(s) differ from what ostraka 1.5.0 would write
+drift — 3 kept file(s) differ from what ostraka 1.6.0 would write
   .ostraka/ostraka.toml
     missing [routing]
   .ostraka/adapters/claude-code.toml
