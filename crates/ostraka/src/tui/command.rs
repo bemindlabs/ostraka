@@ -30,12 +30,15 @@ pub struct Situation {
     /// Text is selected in a pane. Copying it is the one command that needs
     /// something to have been done with the mouse first.
     pub selected: bool,
+    /// A question has been answered here, and can be run without retyping it.
+    pub ready: bool,
 }
 
 /// Everything the browser does, named the way a person would ask for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     NewRun,
+    Go,
     Stop,
     Fix,
     Runs,
@@ -66,8 +69,9 @@ pub enum Command {
 impl Command {
     /// In the order the palette offers them: what someone reaches for most,
     /// first.
-    pub const ALL: [Command; 26] = [
+    pub const ALL: [Command; 27] = [
         Command::NewRun,
+        Command::Go,
         Command::Stop,
         Command::Fix,
         Command::Runs,
@@ -98,6 +102,7 @@ impl Command {
     pub fn name(self) -> &'static str {
         match self {
             Command::NewRun => "write a task",
+            Command::Go => "do what was just asked",
             Command::Stop => "stop the run",
             Command::Fix => "fix what is in the way",
             Command::Runs => "runs",
@@ -130,6 +135,7 @@ impl Command {
     pub fn key(self) -> &'static str {
         match self {
             Command::NewRun => "n",
+            Command::Go => "e",
             Command::Stop => "s",
             Command::Fix => "x",
             Command::Runs => "l",
@@ -166,6 +172,10 @@ impl Command {
     pub fn leader(self) -> char {
         match self {
             Command::NewRun => 'n',
+            // Not `g`, which is the top of the runs list, and not `d`, which
+            // is the leader for the next section. `e` for execute: free as a
+            // bare key and as a leader, so the two agree.
+            Command::Go => 'e',
             Command::Stop => 's',
             Command::Fix => 'x',
             Command::Runs => 'l',
@@ -203,6 +213,9 @@ impl Command {
     pub fn about(self) -> &'static str {
         match self {
             Command::NewRun => "say what the agent should do next",
+            Command::Go => {
+                "run the question just answered as a change: written, gated and reviewed"
+            }
             Command::Stop => "ask the running agent to stop",
             Command::Fix => "walk through what is stopping a run from working",
             Command::Runs => "look up a run recorded here",
@@ -247,6 +260,7 @@ impl Command {
     pub fn slug(self) -> &'static str {
         match self {
             Command::NewRun => "new",
+            Command::Go => "go",
             Command::Stop => "stop",
             Command::Fix => "fix",
             Command::Runs => "runs",
@@ -327,6 +341,10 @@ impl Command {
                 // it is, so the palette is where somebody finds out this is
                 // possible at all.
                 Command::Copy => situation.selected,
+                // Only once there is an answer to act on, and not while a run is
+                // going. Offered while there is, so somebody who asked a
+                // question is told, there and then, that they can have it done.
+                Command::Go => situation.ready && !situation.running && !situation.unconfigured,
                 _ => true,
             })
             .collect()
@@ -357,7 +375,24 @@ mod tests {
         panes: 1,
         split: false,
         selected: false,
+        ready: false,
     };
+
+    #[test]
+    fn going_is_offered_only_once_there_is_an_answer_to_act_on() {
+        let ready = Situation {
+            ready: true,
+            ..IDLE
+        };
+        assert!(Command::offered(ready).contains(&Command::Go));
+        assert!(!Command::offered(IDLE).contains(&Command::Go));
+        // Not while a run is going: there is one thread, and it is busy.
+        let busy = Situation {
+            running: true,
+            ..ready
+        };
+        assert!(!Command::offered(busy).contains(&Command::Go));
+    }
 
     #[test]
     fn setup_is_offered_only_where_there_is_something_to_set_up() {
@@ -416,7 +451,7 @@ mod tests {
         // directory that is already set up, fixing what is not broken,
         // moving between, closing or moving panes there is only one of, and
         // sizing panes that are not side by side.
-        assert_eq!(Command::matching("", IDLE).len(), Command::ALL.len() - 11);
+        assert_eq!(Command::matching("", IDLE).len(), Command::ALL.len() - 12);
     }
 
     #[test]
@@ -520,6 +555,7 @@ mod copy_tests {
         panes: 1,
         split: false,
         selected: false,
+        ready: false,
     };
 
     #[test]

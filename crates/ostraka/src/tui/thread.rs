@@ -66,6 +66,13 @@ pub struct Thread {
     /// A plan that came back clean, and the task it was written for, until
     /// somebody runs it or writes another task.
     pub pending_plan: Option<(String, String)>,
+    /// The task of the last question, until it is run or another is written.
+    ///
+    /// What "go" acts on. Asking and then wanting it done is the ordinary
+    /// shape of this, and before it existed that meant switching mode and
+    /// typing the whole task again — so the cheap path was to stay in auto and
+    /// never ask, which is the habit that made every message a gated run.
+    pub ready: Option<String>,
     /// A run that ended because a vendor could not run, until the browser has
     /// offered another profile for it.
     pub offer: Option<super::session::Fallback>,
@@ -83,8 +90,16 @@ impl Default for Thread {
             model: None,
             author: run::AUTHOR.to_string(),
             reviewer: run::REVIEWER.to_string(),
-            mode: Mode::default(),
+            // A thread opens in ask, and `Mode::default()` stays auto for the
+            // command line. They are different acts: `ostraka run "..."` is
+            // somebody asking for a run, and typing into a box is somebody
+            // starting a conversation. Opening in auto made every first
+            // message a gated run, so a workspace whose gate `init` could not
+            // infer — the check that fails on purpose — answered every
+            // question with a refusal, having paid a vendor to get there.
+            mode: Mode::Ask,
             pending_plan: None,
+            ready: None,
             offer: None,
         }
     }
@@ -124,6 +139,7 @@ impl Thread {
         let (task, author, reviewer) = mention::agents_named(&typed, agents);
         self.history.push(typed.clone());
         self.pending_plan = None;
+        self.ready = None;
         let mut args = self.args(repository, task, self.mode);
         if author.is_some() {
             args.adapter = author;
@@ -147,6 +163,22 @@ impl Thread {
         // The transcript says what was asked, not the plan pasted under it: the
         // plan is already on the screen, in the turn above.
         session.prompt = format!("{task} \u{2014} following the agreed plan");
+        self.live = Some(session);
+        true
+    }
+
+    /// Runs what was last asked, as a run: gated and reviewed like any other.
+    ///
+    /// The same words, unchanged. It is the task somebody already wrote and
+    /// already saw an answer to, so rewording it here would run something they
+    /// did not ask for.
+    pub fn start_ready(&mut self, workspace: Workspace, repository: Option<String>) -> bool {
+        let Some(task) = self.ready.take() else {
+            return false;
+        };
+        let args = self.args(repository, task.clone(), Mode::Auto);
+        let mut session = Session::start(workspace, args, Mode::Auto);
+        session.prompt = task;
         self.live = Some(session);
         true
     }
@@ -199,6 +231,17 @@ impl Thread {
         let ended = turn.finished.as_ref().map(|f| f.run_id.clone());
         if let Some(plan) = turn.finished.as_ref().and_then(|f| f.plan.clone()) {
             self.pending_plan = Some((turn.prompt.clone(), plan));
+        }
+        // A consultation has no outcome, because there was no change to judge.
+        // That is what tells a question from a run here, rather than the mode
+        // the thread happens to be in now — which somebody may have changed
+        // while this one was running.
+        if turn
+            .finished
+            .as_ref()
+            .is_some_and(|f| f.outcome.is_none() && f.plan.is_none())
+        {
+            self.ready = Some(turn.prompt.clone());
         }
 
         // The chain advances only through the gate. A refused run leaves the

@@ -487,6 +487,7 @@ impl App {
             panes: self.panes.len(),
             split: self.columns.len() > 1,
             selected: self.selection.is_some(),
+            ready: self.thread().ready.is_some(),
         }
     }
 
@@ -1131,18 +1132,26 @@ fn opening(app: &App, width: u16, height: u16) -> Vec<Line<'static>> {
         lines.push(Line::from(""));
     }
 
+    // What can be done here, rather than how the machinery works. A first
+    // screen that opens with "isolated, gated and reviewed" describes a
+    // pipeline to somebody who has not yet asked it anything, and a thread
+    // opens in ask, where none of those three happens.
     lines.push(Line::from(vec![
-        Span::styled("Write a task below and press ", theme::muted()),
+        Span::styled("Ask anything about this repository. ", theme::muted()),
         Span::styled("enter", theme::accent()),
-        Span::styled(".", theme::muted()),
+        Span::styled(" answers; nothing is changed.", theme::muted()),
     ]));
-    for part in wrap(
-        "Each one is isolated, gated and reviewed by a different agent than the \
-         one that wrote it.",
-        width as usize,
-    ) {
-        lines.push(dim(part));
-    }
+    lines.push(Line::from(vec![
+        Span::styled("e", theme::accent()),
+        Span::styled(
+            " runs what you asked: gated, reviewed by a different agent.",
+            theme::muted(),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("shift-tab", theme::accent()),
+        Span::styled(" switches what enter does.", theme::muted()),
+    ]));
     // A chain says where the next one will start, which is the other half of
     // "where did I get to".
     if app.thread().continuing() {
@@ -1432,8 +1441,16 @@ fn render_prompt(frame: &mut Frame, app: &App, area: Rect) {
                     }
                 }
                 if pane.prompt.is_empty() {
+                    // What enter will do here, which is not the same sentence
+                    // in every mode. "enter runs it" under a box that answers
+                    // questions is the wrong promise, and the modes that do
+                    // run are the ones worth saying so about.
                     let hint = if pane.thread.pending_plan.is_some() {
                         "  enter runs the plan above \u{b7} or write another task"
+                    } else if pane.thread.ready.is_some() {
+                        "  ask again \u{b7} or e to have it done"
+                    } else if pane.thread.mode.consults() {
+                        "  ask anything about this repository \u{b7} nothing is changed"
                     } else {
                         "  say what the agent should do \u{b7} enter runs it"
                     };
@@ -3022,7 +3039,7 @@ mod tests {
     #[test]
     fn the_box_says_what_enter_will_do() {
         let mut app = App::new(nowhere(), Vec::new());
-        assert!(screen(&mut app, 100, 20).contains("\u{203a} auto"));
+        assert!(screen(&mut app, 100, 20).contains("\u{203a} ask"));
 
         app.thread_mut().mode = Mode::Plan;
         let out = screen(&mut app, 100, 20);
@@ -3304,7 +3321,7 @@ mod tests {
     fn an_empty_thread_says_what_to_do_rather_than_showing_nothing() {
         let mut app = App::new(nowhere(), Vec::new());
         let out = screen(&mut app, 100, 18);
-        assert!(out.contains("Write a task below"), "{out}");
+        assert!(out.contains("Ask anything about this repository"), "{out}");
         assert!(out.contains("reviewed by a different agent"), "{out}");
         // Nothing to summarise in a directory nothing has run in.
         assert!(!out.contains("Last asked here"), "{out}");
@@ -3344,7 +3361,7 @@ mod tests {
         assert!(out.contains("8 runs"), "{out}");
         assert!(out.contains("looks any of them up"), "{out}");
         // And what to do next is still said.
-        assert!(out.contains("Write a task below"), "{out}");
+        assert!(out.contains("Ask anything about this repository"), "{out}");
 
         app.thread_mut().base_ref = "ostraka/t1-20260908T000100Z".into();
         assert!(screen(&mut app, 100, 26).contains("The next one starts from"));
@@ -3590,7 +3607,7 @@ mod tests {
         // say what they want.
         let writing = screen(&mut app, 100, 18);
         assert!(
-            writing.contains("say what the agent should do"),
+            writing.contains("ask anything about this repository"),
             "{writing}"
         );
 
@@ -4284,7 +4301,7 @@ mod tests {
         assert!(out.contains("Nothing has been cloned"), "{out}");
         assert!(out.contains("walks through it"), "{out}");
         // And what to do next is still said under it.
-        assert!(out.contains("Write a task below"), "{out}");
+        assert!(out.contains("Ask anything about this repository"), "{out}");
     }
 
     #[test]
@@ -4435,7 +4452,7 @@ mod tests {
             // The one sentence somebody needs on first opening is on every
             // one of them, whole rather than cut in half by the frame.
             assert!(
-                out.contains("Write a task below"),
+                out.contains("Ask anything about this repository"),
                 "at {width}x{height}:\n{out}"
             );
         }
@@ -4479,7 +4496,10 @@ mod tests {
             short.matches("line ").count() <= 2,
             "the box took the screen:\n{short}"
         );
-        assert!(short.contains("Write a task below"), "{short}");
+        assert!(
+            short.contains("Ask anything about this repository"),
+            "{short}"
+        );
     }
 
     #[test]

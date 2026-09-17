@@ -662,6 +662,7 @@ fn command_key(app: &mut App, key: KeyEvent, records_root: &Path) {
             }
         }
         KeyCode::Char('n') | KeyCode::Enter => perform(app, Command::NewRun, records_root),
+        KeyCode::Char('e') => perform(app, Command::Go, records_root),
         KeyCode::Char('s') => perform(app, Command::Stop, records_root),
         KeyCode::Char('l') => perform(app, Command::Runs, records_root),
         KeyCode::Char('w') => perform(app, Command::Repos, records_root),
@@ -740,6 +741,7 @@ fn perform(app: &mut App, command: Command, records_root: &Path) {
             app.status = Some("asked the agent to stop".to_string());
         }
         Command::Copy => copy_selection(app),
+        Command::Go => go(app),
         Command::Fix => open_fix(app),
         Command::Settings => {
             app.project_facts = project_facts(app);
@@ -1388,6 +1390,63 @@ fn adopt(app: &mut App) -> Option<String> {
     }
 }
 
+/// Runs what was last asked, without it having to be typed again.
+///
+/// The same words, as a run: written, gated and reviewed. Everything that
+/// refuses to start a run refuses this one too, which is why it goes through
+/// the same checks rather than round them.
+fn go(app: &mut App) {
+    if app.thread().ready.is_none() {
+        app.status = Some("nothing has been asked here yet".to_string());
+        return;
+    }
+    if let Some(why) = cannot_run(app) {
+        app.status = Some(why);
+        return;
+    }
+    if let Some(remedy) = blocking(app) {
+        app.blocked = Some(remedy.problem.clone());
+        app.remedy = Some(remedy);
+        app.open(Dialog::Fix);
+        return;
+    }
+    app.status = None;
+    app.pane_mut().follow = true;
+    app.screen = Screen::Work;
+    let repository = app.repository().map(|r| r.name.clone());
+    let workspace = app.workspace.clone();
+    app.thread_mut().start_ready(workspace, repository);
+}
+
+/// Why a run that would be gated cannot start here.
+///
+/// `init` writes a check that fails on purpose where it could not tell how a
+/// project is verified, which is the right thing to write and the wrong thing
+/// to discover from a refusal: the run is authored, a vendor is paid, the gate
+/// then fails by design, and nothing on the way there said the gate was a
+/// placeholder. Asking is unaffected — a question is not gated, so a workspace
+/// with no gate yet is still one somebody can use.
+fn cannot_run(app: &App) -> Option<String> {
+    let repo = app.repository()?;
+    let config = app.workspace.config_for(repo).ok()?;
+    if !config
+        .gate
+        .checks
+        .iter()
+        .any(|check| check.name == crate::init::PLACEHOLDER_CHECK)
+    {
+        return None;
+    }
+    let source = app.workspace.config_source(repo);
+    let named = source.strip_prefix(&app.workspace.root).unwrap_or(&source);
+    Some(format!(
+        "the gate here is still the placeholder `{}`, which fails on purpose \u{2014} say how \
+         this project is verified in {}, or ask instead: a question is not gated",
+        crate::init::PLACEHOLDER_CHECK,
+        named.display()
+    ))
+}
+
 /// Starts the run that has been written into the box.
 ///
 /// Through `run::execute`, which is what `ostraka run` calls: the gate, the
@@ -1419,6 +1478,16 @@ fn start_run(app: &mut App) {
     }
     if app.setup.is_some() {
         app.status = Some(unavailable(app, Command::NewRun));
+        return;
+    }
+    // Only for the modes that produce a change. Asking and planning are
+    // read-only and never reach the gate, so a placeholder gate is no reason
+    // to refuse them — and refusing them would leave nothing usable at all.
+    if !app.thread().mode.consults()
+        && !planned
+        && let Some(why) = cannot_run(app)
+    {
+        app.status = Some(why);
         return;
     }
     // Checked here rather than found out from inside the run. The run would
@@ -1823,7 +1892,7 @@ mod tests {
     fn a_mode_is_chosen_by_name_or_by_shift_tab_and_is_never_run_as_a_task() {
         let root = Path::new("/p/.ostraka");
         let mut a = app();
-        assert_eq!(a.thread().mode, Mode::Auto);
+        assert_eq!(a.thread().mode, Mode::Ask, "a thread opens in ask");
 
         typed(&mut a, "/plan");
         handle(&mut a, press(KeyCode::Enter), root);

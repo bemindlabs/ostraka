@@ -821,6 +821,29 @@ is that it needs nothing does not take a dependency for it. The whole feature
 costs 15 KB, 3.33 MB to 3.34 MB, measured before it was accepted as every
 dependency here is.
 
+**A thread opens in ask, and `Mode::default()` stays auto.** They are different
+acts: `ostraka run "..."` is somebody asking for a run, and typing into a box is
+somebody starting a conversation. Opening in auto made the first message a gated
+run, so a workspace whose gate `init` could not infer — the check that fails on
+purpose — answered every question with a refusal, having paid a vendor to get
+there. That was reported as "everything is rejected", and it was the product
+working exactly as built. A run being refused is the point; a question being
+refused is not a question.
+
+Escalating is `Thread::ready`: the task of the last consultation, held until it
+is run or another is written, and run by `Command::Go` as the same words
+unchanged. Rewording it would run something nobody asked for. A consultation is
+told from a run by its record having no outcome — there was no change to judge —
+rather than by the mode the thread is in now, which somebody may have changed
+while it was running.
+
+And a run whose gate is still `init`'s placeholder is refused before it starts,
+by name, with the task left in the box. `init` writing a check that fails on
+purpose is right and is documented above; discovering it from a refusal means
+the run was authored and a vendor was paid first. Asking is untouched, because
+a question is not gated — so a workspace with no gate yet is still usable, which
+is what makes refusing the run affordable.
+
 **Ask, plan, loop and auto are ways into the pipeline, not around it.**
 `mode::Mode` and everything it needs live in the binary crate. The public types
 it could have touched — `Refusal`, `RunRecord`, `Phase`, `Profile` — are not

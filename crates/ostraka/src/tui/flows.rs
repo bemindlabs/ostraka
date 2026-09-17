@@ -96,14 +96,24 @@ fn project(name: &str, pause: u32) -> Scratch {
 
     // One script, two profiles. It answers a review by reading the marker out
     // of the prompt it was handed — which is the mechanism, not a shortcut —
-    // and otherwise writes a file.
+    // answers read-only when it is invoked read-only, and otherwise writes a
+    // file.
+    //
+    // The read-only invocation is not decoration. A profile without one cannot
+    // be consulted at all — a question would have to go through the invocation
+    // that can write, and is refused instead — so a fixture without it cannot
+    // be asked anything, which is most of what this browser now does.
     let body = format!(
         "#!/bin/sh\n\
          case \"$1\" in --probe) echo ok; exit 0;; esac\n\
+         review=no\n\
+         case \"$1\" in --review) review=yes; shift;; esac\n\
          marker=$(printf '%s' \"$1\" | grep -o 'VERDICT-[0-9a-f]*:' | head -1)\n\
          if [ -n \"$marker\" ]; then\n\
          \x20 echo \"the change does what the task asked\"\n\
          \x20 echo \"$marker APPROVE\"\n\
+         elif [ \"$review\" = yes ]; then\n\
+         \x20 echo 'this repository holds a seed file and nothing else'\n\
          else\n\
          \x20 echo 'reading the repository'\n\
          \x20 sleep {pause}\n\
@@ -123,7 +133,8 @@ fn project(name: &str, pause: u32) -> Scratch {
         std::fs::write(
             dir.join(format!(".ostraka/adapters/{id}.toml")),
             format!(
-                "id = \"{id}\"\ncommand = \"{}\"\nargs = [\"{{{{prompt}}}}\"]\nprobe_args = [\"--probe\"]\n",
+                "id = \"{id}\"\ncommand = \"{}\"\nargs = [\"{{{{prompt}}}}\"]\n\
+                 review_args = [\"--review\", \"{{{{prompt}}}}\"]\nprobe_args = [\"--probe\"]\n",
                 script.display()
             ),
         )
@@ -212,6 +223,16 @@ impl Driver {
     }
 
     /// One turn of the event loop, minus the keyboard.
+    /// Puts this thread in the mode that runs.
+    ///
+    /// A thread opens in ask. A journey about starting, stopping or leaving a
+    /// run says so here, the way an operator would with shift-tab, rather than
+    /// relying on whichever mode happens to be the default.
+    fn auto(&mut self) -> &mut Self {
+        self.app.thread_mut().mode = crate::mode::Mode::Auto;
+        self
+    }
+
     fn tick(&mut self) -> &mut Self {
         self.app.tick = self.app.tick.wrapping_add(1);
         take_stock(&mut self.app, &self.records_root);
@@ -235,7 +256,12 @@ impl Driver {
     }
 
     /// Types a task, runs it, and waits for it to be over.
+    ///
+    /// Said rather than assumed: a thread opens in ask, where enter answers a
+    /// question and changes nothing. These journeys are about runs, so they
+    /// put the thread in the mode that runs, the way an operator would.
     fn task(&mut self, text: &str) -> &mut Self {
+        self.app.thread_mut().mode = crate::mode::Mode::Auto;
         let done = self.app.thread().turns.len() + 1;
         self.typed(text).key(KeyCode::Enter);
         self.until("the run to finish", move |app| {
@@ -321,7 +347,7 @@ fn setting_up_a_directory_leaves_a_browser_that_can_run_something() {
 
     d.chord('x').key(KeyCode::Char('i'));
     d.hides("not an Ostraka project yet");
-    d.shows("Write a task below");
+    d.shows("Ask anything about this repository");
     assert!(
         scratch
             .path()
@@ -458,7 +484,7 @@ fn a_task_typed_into_the_box_runs_and_is_recorded() {
     let _guard = exclusive();
     let scratch = project("run", 0);
     let mut d = Driver::open(scratch.path());
-    d.shows("Write a task below");
+    d.shows("Ask anything about this repository");
     // Nothing to summarise yet, which is the honest version of that sentence.
     d.hides("Last asked here");
 
@@ -956,7 +982,9 @@ fn a_run_can_be_stopped_from_the_browser_and_is_not_called_a_verdict() {
     let scratch = project("stop", 30);
     let mut d = Driver::open(scratch.path());
 
-    d.typed("a task nobody wants finished").key(KeyCode::Enter);
+    d.auto()
+        .typed("a task nobody wants finished")
+        .key(KeyCode::Enter);
     // In the same breath as starting it, which is the ordering that used to
     // lose the request to the run clearing the flag behind it.
     d.chord('x').key(KeyCode::Char('s'));
@@ -976,11 +1004,12 @@ fn two_panes_run_at_once_and_stopping_one_leaves_the_other_going() {
     let scratch = project("two-panes", 30);
     let mut d = Driver::open(scratch.path());
 
-    d.typed("the first task").key(KeyCode::Enter);
+    d.auto().typed("the first task").key(KeyCode::Enter);
     assert!(d.app.thread().running(), "the first run did not start");
 
+    // A new pane is a new thread, and a new thread opens in ask.
     d.chord('t');
-    d.typed("the second task").key(KeyCode::Enter);
+    d.auto().typed("the second task").key(KeyCode::Enter);
     assert!(
         d.app.thread().running(),
         "a second pane could not start a run beside the first: {:?}",
@@ -1027,7 +1056,9 @@ fn quitting_during_a_run_waits_for_it_rather_than_walking_away() {
     let scratch = project("quit", 30);
     let mut d = Driver::open(scratch.path());
 
-    d.typed("a task interrupted by leaving").key(KeyCode::Enter);
+    d.auto()
+        .typed("a task interrupted by leaving")
+        .key(KeyCode::Enter);
     d.ctrl('c');
     // Asked first. It says what leaving costs before it costs it.
     assert_eq!(d.app.dialog, Some(Dialog::Leaving));
@@ -1127,7 +1158,7 @@ fn a_fresh_thread_goes_back_to_head() {
     assert_eq!(d.app.thread().base_ref, "HEAD");
     assert!(d.app.thread().turns.is_empty());
     // The thread is empty; the directory is not, and the screen says which.
-    d.shows("Write a task below");
+    d.shows("Ask anything about this repository");
     d.shows("Last asked here");
     d.shows("write a file");
 }
@@ -1372,5 +1403,125 @@ mod selecting {
             text,
             "the selection came to cover different text"
         );
+    }
+}
+
+/// Conversation first: a thread opens in ask, and running is an act somebody
+/// takes on an answer they already have.
+///
+/// The habit this replaces cost real money. Opening in auto made the first
+/// message a gated run, so a workspace whose gate `init` could not infer — the
+/// check that fails on purpose — answered every question with a refusal, after
+/// paying a vendor to get there.
+mod conversation {
+    use super::*;
+    use crate::mode::Mode;
+    use crate::tui::command::Command;
+
+    #[test]
+    fn a_thread_opens_in_ask_and_enter_changes_nothing() {
+        let _guard = exclusive();
+        let scratch = project("conversation", 0);
+        let mut d = Driver::open(scratch.path());
+        assert_eq!(
+            d.app.thread().mode,
+            Mode::Ask,
+            "a thread opened in {:?}",
+            d.app.thread().mode
+        );
+        d.shows("Ask anything about this repository");
+
+        let done = d.app.thread().turns.len() + 1;
+        d.typed("what does this repository do").key(KeyCode::Enter);
+        d.until("the question to be answered", move |app| {
+            app.thread().turns.len() == done
+        });
+
+        // A consultation has no outcome, because there was no change to judge.
+        let turn = d.last();
+        assert!(
+            turn.finished.as_ref().is_some_and(|f| f.outcome.is_none()),
+            "asking produced a verdict"
+        );
+        // And nothing was committed, so the next run still starts from HEAD.
+        assert_eq!(d.app.thread().base_ref, "HEAD");
+    }
+
+    #[test]
+    fn what_was_asked_can_be_run_without_being_typed_again() {
+        let _guard = exclusive();
+        let scratch = project("escalate", 0);
+        let mut d = Driver::open(scratch.path());
+
+        let asked = "write the file this task is about";
+        let done = d.app.thread().turns.len() + 1;
+        d.typed(asked).key(KeyCode::Enter);
+        d.until("the question to be answered", move |app| {
+            app.thread().turns.len() == done
+        });
+
+        assert_eq!(d.app.thread().ready.as_deref(), Some(asked));
+        assert!(
+            Command::offered(d.app.situation()).contains(&Command::Go),
+            "going was not offered after a question"
+        );
+        d.shows("or e to have it done");
+
+        // The same words, as a run. Not retyped, and not reworded.
+        let done = d.app.thread().turns.len() + 1;
+        d.chord('x').key(KeyCode::Char('e'));
+        d.until("the run to finish", move |app| {
+            app.thread().turns.len() == done
+        });
+        assert_eq!(d.last().prompt, asked);
+        assert!(
+            d.last()
+                .finished
+                .as_ref()
+                .is_some_and(|f| f.outcome.is_some()),
+            "going did not produce a run"
+        );
+        // Taken, so it is not offered again.
+        assert!(d.app.thread().ready.is_none());
+        assert!(!Command::offered(d.app.situation()).contains(&Command::Go));
+    }
+
+    /// `init` writes a gate that fails on purpose where it could not tell how a
+    /// project is verified. Finding that out from a refusal means the run was
+    /// authored and a vendor was paid first.
+    #[test]
+    fn a_placeholder_gate_stops_a_run_before_it_costs_anything() {
+        let _guard = exclusive();
+        let scratch = project("placeholder-gate", 0);
+        std::fs::write(
+            scratch.path().join(".ostraka/ostraka.toml"),
+            "[gate]\nchecks = [{ name = \"declare-your-checks\", \
+             cmd = \"echo no >&2; exit 1\", required = true }]\n",
+        )
+        .expect("config");
+
+        let mut d = Driver::open(scratch.path());
+
+        // Asking still works. A question is not gated, so a workspace with no
+        // gate yet is still one somebody can use.
+        let done = d.app.thread().turns.len() + 1;
+        d.typed("what is here").key(KeyCode::Enter);
+        d.until("the question to be answered", move |app| {
+            app.thread().turns.len() == done
+        });
+
+        // Running does not, and says so without starting anything.
+        let before = d.app.thread().turns.len();
+        d.auto().typed("change something").key(KeyCode::Enter);
+        assert!(
+            !d.app.thread().running(),
+            "a run started against a gate that cannot pass"
+        );
+        assert_eq!(d.app.thread().turns.len(), before);
+        let said = d.app.status.clone().unwrap_or_default();
+        assert!(said.contains("declare-your-checks"), "{said}");
+        assert!(said.contains("ask instead"), "{said}");
+        // The task is still in the box, not thrown away.
+        assert_eq!(d.app.pane().prompt, "change something");
     }
 }

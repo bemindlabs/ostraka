@@ -220,6 +220,14 @@ pub fn write_profile(workspace: &crate::workspace::Workspace, id: &str) -> std::
 /// configuration and the adapter profiles live in there too and those are
 /// meant to be committed — a workspace's agreement about how runs are made is
 /// not working evidence.
+/// The check `init` writes where it cannot tell how a project is verified.
+///
+/// It fails on purpose, and a gate that passed everything would be worse. What
+/// it is not is a gate anybody meant to run against, so the browser recognises
+/// it by name and says so before a run is started rather than after one is
+/// refused. Named here because this is where it is written.
+pub(crate) const PLACEHOLDER_CHECK: &str = "declare-your-checks";
+
 const IGNORED: [&str; 6] = [
     "/.ostraka/runs/",
     "/.ostraka/consulted/",
