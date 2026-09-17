@@ -27,6 +27,9 @@ pub struct Situation {
     /// Something outside the project's own configuration is in the way, and
     /// the browser knows the steps out of it.
     pub blocked: bool,
+    /// Text is selected in a pane. Copying it is the one command that needs
+    /// something to have been done with the mouse first.
+    pub selected: bool,
 }
 
 /// Everything the browser does, named the way a person would ask for it.
@@ -51,6 +54,7 @@ pub enum Command {
     NarrowerPane,
     EvenPanes,
     NextDetail,
+    Copy,
     Promote,
     Prune,
     Reload,
@@ -62,7 +66,7 @@ pub enum Command {
 impl Command {
     /// In the order the palette offers them: what someone reaches for most,
     /// first.
-    pub const ALL: [Command; 25] = [
+    pub const ALL: [Command; 26] = [
         Command::NewRun,
         Command::Stop,
         Command::Fix,
@@ -82,6 +86,7 @@ impl Command {
         Command::NarrowerPane,
         Command::EvenPanes,
         Command::NextDetail,
+        Command::Copy,
         Command::Promote,
         Command::Prune,
         Command::Reload,
@@ -111,6 +116,7 @@ impl Command {
             Command::NarrowerPane => "narrow this pane",
             Command::EvenPanes => "even out the panes",
             Command::NextDetail => "next section",
+            Command::Copy => "copy what is selected",
             Command::Promote => "promote run",
             Command::Prune => "prune worktrees",
             Command::Reload => "reload runs",
@@ -142,6 +148,7 @@ impl Command {
             Command::NarrowerPane => "-",
             Command::EvenPanes => "=",
             Command::NextDetail => "tab",
+            Command::Copy => "y",
             Command::Promote => "p",
             Command::Prune => "u",
             Command::Reload => "r",
@@ -179,6 +186,9 @@ impl Command {
             Command::NarrowerPane => '-',
             Command::EvenPanes => '=',
             Command::NextDetail => 'd',
+            // What every editor since vi has called yanking, and `c` is the
+            // letter that closes a pane.
+            Command::Copy => 'y',
             Command::Promote => 'p',
             // `p` is taken and prune is the second thing on this row; `u` is
             // in the word and free.
@@ -213,6 +223,9 @@ impl Command {
             Command::NarrowerPane => "give this pane less of the width",
             Command::EvenPanes => "give every pane the same width",
             Command::NextDetail => "checks, then events, then the diff",
+            Command::Copy => {
+                "put the text selected in this pane on the clipboard, terminal permitting"
+            }
             Command::Promote => "give an approved run a branch; merges nothing",
             // No mention of branches here. The dialog says what is kept, at the
             // moment it matters; saying it in a one-line description makes
@@ -252,6 +265,7 @@ impl Command {
             Command::NarrowerPane => "narrower",
             Command::EvenPanes => "even",
             Command::NextDetail => "detail",
+            Command::Copy => "copy",
             Command::Promote => "promote",
             Command::Prune => "prune",
             Command::Reload => "reload",
@@ -309,6 +323,10 @@ impl Command {
                 Command::WiderPane | Command::NarrowerPane | Command::EvenPanes => situation.split,
                 // Listing models needs profiles to list them from.
                 Command::Models => !situation.unconfigured,
+                // Nothing to copy until something is selected. Offered while
+                // it is, so the palette is where somebody finds out this is
+                // possible at all.
+                Command::Copy => situation.selected,
                 _ => true,
             })
             .collect()
@@ -338,6 +356,7 @@ mod tests {
         blocked: false,
         panes: 1,
         split: false,
+        selected: false,
     };
 
     #[test]
@@ -397,7 +416,7 @@ mod tests {
         // directory that is already set up, fixing what is not broken,
         // moving between, closing or moving panes there is only one of, and
         // sizing panes that are not side by side.
-        assert_eq!(Command::matching("", IDLE).len(), Command::ALL.len() - 10);
+        assert_eq!(Command::matching("", IDLE).len(), Command::ALL.len() - 11);
     }
 
     #[test]
@@ -487,5 +506,29 @@ mod tests {
             };
             assert_eq!(unique, count, "two commands share a {what}");
         }
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+
+    const IDLE: Situation = Situation {
+        unconfigured: false,
+        running: false,
+        blocked: false,
+        panes: 1,
+        split: false,
+        selected: false,
+    };
+
+    #[test]
+    fn copying_is_offered_only_while_something_is_selected() {
+        let selected = Situation {
+            selected: true,
+            ..IDLE
+        };
+        assert!(Command::offered(selected).contains(&Command::Copy));
+        assert!(!Command::offered(IDLE).contains(&Command::Copy));
     }
 }
