@@ -194,11 +194,15 @@ fn reverse(line: Line<'static>, from: u16, to: u16) -> Line<'static> {
     line
 }
 
-/// How much text is worth asking a terminal to take.
+/// How much text is worth asking a terminal to take, in bytes.
 ///
 /// Terminals cap what they accept over OSC 52 and most of them cap it without
 /// saying so, which fails as a clipboard holding half a transcript. Refusing
 /// out loud is the better half of that trade.
+///
+/// Bytes rather than characters because that is what the cap is about: the
+/// sequence carries base64 of the bytes, and a line of Thai is three times the
+/// payload of a line of English the same length on screen.
 const MOST: usize = 100_000;
 
 /// Asks the terminal to put this on the clipboard.
@@ -215,7 +219,7 @@ const MOST: usize = 100_000;
 pub fn to_clipboard(text: &str) -> Result<(), String> {
     if text.len() > MOST {
         return Err(format!(
-            "{} characters is more than a terminal will take on the clipboard; \
+            "{} bytes is more than a terminal will take on the clipboard; \
              select less of it",
             text.len()
         ));
@@ -369,9 +373,21 @@ mod tests {
         assert_eq!(base64(&[0xff, 0xef, 0xbe]), "/+++");
     }
 
+    /// The cap is on the payload, and the payload is bytes. Raised in review:
+    /// the message used to call them characters, which for anything but ASCII
+    /// names a threshold nobody can check against what they selected.
     #[test]
     fn more_than_a_terminal_will_take_is_refused_rather_than_half_sent() {
         let long = "x".repeat(MOST + 1);
-        assert!(to_clipboard(&long).is_err());
+        let refused = to_clipboard(&long).expect_err("too long");
+        assert!(refused.contains("bytes"), "{refused}");
+
+        // Well under the cap in characters, over it in bytes.
+        let thai = "\u{0e01}".repeat(MOST / 3 + 1);
+        assert!(thai.chars().count() < MOST);
+        assert!(
+            to_clipboard(&thai).is_err(),
+            "counted characters, not bytes"
+        );
     }
 }

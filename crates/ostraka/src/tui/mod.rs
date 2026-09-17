@@ -259,10 +259,19 @@ fn mouse(app: &mut App, event: MouseEvent) {
             };
             // Dragging past the top or bottom edge scrolls, so a selection can
             // reach what is not on the screen without letting go of it.
+            //
+            // The scroll this is read against moves with it. Reading the head
+            // against the scroll captured before scrolling left the selection
+            // a line behind the edge it was being dragged past, so it never
+            // reached the line that had just been revealed — which is the only
+            // line that drag was for. Raised in review.
+            let mut scroll = scroll;
             if event.row < area.y {
                 app.scroll_pane(index, -1);
-            } else if event.row >= area.y + area.height {
+                scroll = scroll.saturating_sub(1);
+            } else if event.row >= area.y.saturating_add(area.height) {
                 app.scroll_pane(index, 1);
+                scroll = scroll.saturating_add(1);
             }
             selection.head = spot(app, index, area, scroll, event);
             app.selection = Some(selection);
@@ -327,7 +336,13 @@ fn spot(
     scroll: u16,
     event: MouseEvent,
 ) -> select::Spot {
-    let at = usize::from(event.row.saturating_sub(area.y)) + usize::from(scroll);
+    // Held to the rows the transcript was drawn on. A drag goes where the
+    // pointer goes, including off the top and bottom of it, and a row outside
+    // the area is a row that was never part of this transcript — the line it
+    // wants is the first or last one that is.
+    let last = area.y.saturating_add(area.height.saturating_sub(1));
+    let row = event.row.clamp(area.y, last.max(area.y));
+    let at = usize::from(row - area.y) + usize::from(scroll);
     let lines = view::transcript_of(app, index);
     let line = at.min(lines.len().saturating_sub(1));
     select::Spot {

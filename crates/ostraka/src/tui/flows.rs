@@ -1297,6 +1297,51 @@ mod selecting {
         assert!(driver.reversed().is_empty());
     }
 
+    /// Raised in review: dragging past the top edge scrolls, and the head was
+    /// read against the scroll captured before it — so the selection stayed a
+    /// line behind the edge and never reached the line that had just been
+    /// revealed, which is the only line that drag was for.
+    #[test]
+    fn dragging_past_the_top_edge_reaches_the_line_it_revealed() {
+        let _guard = exclusive();
+        let scratch = project("select-edge", 0);
+        let mut driver = Driver::open(scratch.path());
+        driver.task("write the file");
+        driver.task("write it again");
+        driver.task("and once more");
+
+        let body = driver.body();
+        // Somewhere in the middle, then dragged off the top of the transcript.
+        driver.mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x,
+            body.y + body.height / 2,
+        );
+        let scroll_before = driver.app.scroll;
+        assert!(
+            scroll_before > 0,
+            "the transcript did not overflow the pane"
+        );
+
+        driver.mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            body.x,
+            body.y.saturating_sub(1),
+        );
+        let selection = driver.app.selection.expect("a selection");
+        assert_eq!(
+            driver.app.scroll,
+            scroll_before - 1,
+            "dragging past the edge did not scroll"
+        );
+        let (from, _) = selection.range();
+        assert_eq!(
+            from.line,
+            usize::from(driver.app.scroll),
+            "the head stopped short of the line that was revealed"
+        );
+    }
+
     /// The selection lives in the transcript's own coordinates, so scrolling
     /// moves it with the text. Held in screen cells it would stay on the rows
     /// it was drawn over and come to cover something else entirely.
