@@ -420,6 +420,23 @@ Terminal.app and iTerm2) is still the terminal's own way there. With tmux's
 `set-clipboard` set to `off`, the text reaches the tmux buffer and goes no
 further — the browser reads that setting and says so.
 
+**A thread opens in `ask`, and running is something you ask for.** Type and
+press enter, and you get an answer: nothing is written, nothing is gated, and
+there is no verdict to be refused by. When you want it done, `e` runs what you
+just asked — the same words, unchanged — as a run: written in a worktree of its
+own, gated, and reviewed by a different agent.
+
+That is a reversal. The browser used to open in `auto`, so the first thing
+anybody typed became a gated run — and in a workspace whose gate `init` could
+not infer, which writes a check that fails on purpose, every question came back
+as a refusal with a vendor already paid for it. A run being refused is the
+product working; a question being refused is not a question.
+
+For the same reason, a run is refused *before it starts* where the gate is
+still that placeholder. The task stays in the box and the message says which
+file to declare the checks in. Asking is untouched — a workspace with no gate
+yet is still one you can use.
+
 **Shift-tab chooses what enter does.** The box shows the mode:
 
 | mode | what enter does | writes | gated and reviewed |
