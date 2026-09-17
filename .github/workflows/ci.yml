@@ -24,12 +24,17 @@ jobs:
 
       # The desktop application is part of the workspace, so the gate compiles
       # it — and a window needs libraries a headless runner does not ship.
+      #
+      # tmux is here for one test, and it is here because that test skips
+      # without it: copying goes through `tmux load-buffer` under tmux, and the
+      # round trip is asserted against a server the test starts itself. A skip
+      # nobody notices is how that stopped being checked once already.
       - name: install the desktop build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
-            libxrandr-dev libxi-dev libgl1-mesa-dev
+            libxrandr-dev libxi-dev libgl1-mesa-dev tmux
 
       - uses: dtolnay/rust-toolchain@stable
         with:
