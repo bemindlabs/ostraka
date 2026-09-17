@@ -205,7 +205,33 @@ fn reverse(line: Line<'static>, from: u16, to: u16) -> Line<'static> {
 /// payload of a line of English the same length on screen.
 const MOST: usize = 100_000;
 
-/// Asks the terminal to put this on the clipboard.
+/// How the text reached a clipboard, for the sentence that reports it.
+///
+/// Which route was taken is worth saying, because the two can be trusted to
+/// different depths: tmux answers, and a bare terminal does not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Route {
+    /// Handed to tmux, which forwards it. `warning` is what will stop it
+    /// reaching the system clipboard anyway, where that is knowable.
+    Tmux { warning: Option<String> },
+    /// Written straight at the terminal.
+    Osc52,
+}
+
+impl Route {
+    /// What the status line says. Never more than was actually established.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Tmux { warning: None } => {
+                "copied to the tmux buffer; tmux asked the terminal for the clipboard".to_string()
+            }
+            Self::Tmux { warning: Some(why) } => format!("copied to the tmux buffer, but {why}"),
+            Self::Osc52 => "asked the terminal for the clipboard".to_string(),
+        }
+    }
+}
+
+/// Puts this on the clipboard, by whichever route can reach one.
 ///
 /// OSC 52 rather than a clipboard crate, and the reason is the case this is
 /// most needed in: over ssh there is no clipboard on the machine the browser
@@ -213,10 +239,21 @@ const MOST: usize = 100_000;
 /// one. The terminal is the only thing in the room that can reach the right
 /// clipboard, so the terminal is asked.
 ///
-/// tmux is not special-cased. Its default `set-clipboard external` forwards
-/// this to the outer terminal already, and wrapping it in a passthrough
-/// sequence is what would break that.
-pub fn to_clipboard(text: &str) -> Result<(), String> {
+/// **tmux has to be asked through tmux.** This shipped saying the opposite —
+/// that tmux's default `set-clipboard external` forwards an application's
+/// OSC 52 already — and that is not what `external` means. tmux's own manual:
+/// "If set to `external`, tmux will attempt to set the terminal clipboard but
+/// ignore attempts by applications to set tmux buffers." So the sequence was
+/// swallowed and nothing reached the clipboard, which on a machine reached
+/// over ssh inside tmux is every copy anybody makes. Wrapping it in a DCS
+/// passthrough is not the fix either: `allow-passthrough` is off by default in
+/// tmux 3.3 and later, so that is swallowed too.
+///
+/// `tmux load-buffer -w -` is the one route `external` permits, because the
+/// clipboard request then comes from tmux rather than from an application
+/// inside it. It also reports: unlike the escape sequence, it exits non-zero
+/// when it did not work.
+pub fn to_clipboard(text: &str) -> Result<Route, String> {
     if text.len() > MOST {
         return Err(format!(
             "{} bytes is more than a terminal will take on the clipboard; \
@@ -224,6 +261,60 @@ pub fn to_clipboard(text: &str) -> Result<(), String> {
             text.len()
         ));
     }
+    if std::env::var_os("TMUX").is_some() {
+        return through_tmux(text).map(|warning| Route::Tmux { warning });
+    }
+    osc52(text).map(|()| Route::Osc52)
+}
+
+/// Hands the text to tmux, and says what will still stop it if anything will.
+fn through_tmux(text: &str) -> Result<Option<String>, String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("tmux")
+        .args(["load-buffer", "-w", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("tmux could not be run: {e}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or("tmux took no stdin")?
+        .write_all(text.as_bytes())
+        .map_err(|e| format!("tmux would not take the text: {e}"))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("tmux did not finish: {e}"))?;
+    if !out.status.success() {
+        let said = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("tmux refused it: {}", said.trim()));
+    }
+    Ok(tmux_will_not_forward())
+}
+
+/// Why tmux will keep this to itself, when it will.
+///
+/// `set-clipboard off` means the buffer is set and the terminal is never
+/// asked, so the text is in tmux and nowhere else. That is a real outcome and
+/// an invisible one — the copy looks like it worked — so it is named.
+fn tmux_will_not_forward() -> Option<String> {
+    let out = std::process::Command::new("tmux")
+        .args(["show", "-gv", "set-clipboard"])
+        .output()
+        .ok()?;
+    let setting = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (setting == "off").then(|| {
+        "tmux `set-clipboard` is off, so it will not pass it on \u{2014} \
+         `tmux set -g set-clipboard on`, or paste with tmux's own paste-buffer"
+            .to_string()
+    })
+}
+
+/// The escape sequence, written straight at the terminal.
+fn osc52(text: &str) -> Result<(), String> {
     use std::io::Write;
     let mut out = std::io::stdout();
     write!(out, "\x1b]52;c;{}\x07", base64(text.as_bytes())).map_err(|e| e.to_string())?;
@@ -361,6 +452,55 @@ mod tests {
             dragging: false,
         };
         assert_eq!(text(&wide, &selection), "\u{4e16}");
+    }
+
+    /// End to end, against the tmux this is running under.
+    ///
+    /// The unit tests above prove the text that comes out of a selection; this
+    /// proves it arrives somewhere a person can paste from, which is the thing
+    /// that was broken. Nothing is stubbed: `to_clipboard` runs the real
+    /// `tmux load-buffer -w -`, and the buffer is read back with
+    /// `tmux show-buffer`.
+    ///
+    /// One test rather than two, because the buffer they would read back is
+    /// one buffer: written as a pair they overwrote each other whenever the
+    /// harness ran them at the same time, which is a race in the test and not
+    /// in what it is about.
+    ///
+    /// Outside tmux there is no clipboard to read back — a terminal never
+    /// answers OSC 52 — so it says so rather than passing on nothing.
+    #[test]
+    fn under_tmux_the_text_lands_in_a_buffer_that_can_be_read_back() {
+        if std::env::var_os("TMUX").is_none() {
+            eprintln!(
+                "not under tmux: the clipboard round trip is not asserted here. \
+                 The OSC 52 route cannot be: a terminal never answers it."
+            );
+            return;
+        }
+
+        fn buffer() -> String {
+            let out = std::process::Command::new("tmux")
+                .arg("show-buffer")
+                .output()
+                .expect("tmux show-buffer runs");
+            assert!(out.status.success());
+            String::from_utf8_lossy(&out.stdout).trim_end().to_string()
+        }
+
+        let id = std::process::id();
+
+        let one = format!("ostraka clipboard {id}");
+        let route = to_clipboard(&one).expect("tmux took it");
+        assert!(matches!(route, Route::Tmux { .. }), "{route:?}");
+        assert_eq!(buffer(), one, "the buffer does not hold what was copied");
+
+        // Several lines survive as several lines. A buffer holding one
+        // run-together line would paste as one, which is not what was on the
+        // screen.
+        let many = format!("first {id}\nsecond {id}");
+        to_clipboard(&many).expect("tmux took it");
+        assert_eq!(buffer(), many, "the lines did not survive the round trip");
     }
 
     #[test]

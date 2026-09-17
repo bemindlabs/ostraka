@@ -2022,7 +2022,7 @@ dependencies = [
 
 [[package]]
 name = "ostraka"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "clap",
  "clap_complete",
@@ -2041,7 +2041,7 @@ dependencies = [
 
 [[package]]
 name = "ostraka-adapter"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "libc",
  "ostraka-core",
@@ -2053,7 +2053,7 @@ dependencies = [
 
 [[package]]
 name = "ostraka-app"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "eframe",
  "egui",
@@ -2064,7 +2064,7 @@ dependencies = [
 
 [[package]]
 name = "ostraka-core"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2074,7 +2074,7 @@ dependencies = [
 
 [[package]]
 name = "ostraka-runtime"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "libc",
  "ostraka-adapter",
