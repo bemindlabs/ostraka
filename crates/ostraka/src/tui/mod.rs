@@ -1415,7 +1415,14 @@ fn go(app: &mut App) {
     app.screen = Screen::Work;
     let repository = app.repository().map(|r| r.name.clone());
     let workspace = app.workspace.clone();
-    app.thread_mut().start_ready(workspace, repository);
+    let agents: Vec<String> = app
+        .workspace
+        .profiles()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|profile| profile.id)
+        .collect();
+    app.thread_mut().start_ready(workspace, repository, &agents);
 }
 
 /// Why a run that would be gated cannot start here.

@@ -172,13 +172,32 @@ impl Thread {
     /// The same words, unchanged. It is the task somebody already wrote and
     /// already saw an answer to, so rewording it here would run something they
     /// did not ask for.
-    pub fn start_ready(&mut self, workspace: Workspace, repository: Option<String>) -> bool {
-        let Some(task) = self.ready.take() else {
+    ///
+    /// Read the same way `start_naming` reads it, names included. What is held
+    /// is what was typed, and a typed task can name agents with `@` — passed
+    /// through whole, those names reach the agent as part of the task and the
+    /// profiles they chose are lost, so the escalation runs something other
+    /// than what was asked. Raised in review.
+    pub fn start_ready(
+        &mut self,
+        workspace: Workspace,
+        repository: Option<String>,
+        agents: &[String],
+    ) -> bool {
+        let Some(typed) = self.ready.take() else {
             return false;
         };
-        let args = self.args(repository, task.clone(), Mode::Auto);
+        let (task, author, reviewer) = mention::agents_named(&typed, agents);
+        let mut args = self.args(repository, task, Mode::Auto);
+        if author.is_some() {
+            args.adapter = author;
+        }
+        if reviewer.is_some() {
+            args.review_adapter = reviewer;
+        }
         let mut session = Session::start(workspace, args, Mode::Auto);
-        session.prompt = task;
+        // What was typed, names and all, is what the transcript keeps.
+        session.prompt = typed;
         self.live = Some(session);
         true
     }

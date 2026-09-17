@@ -1486,6 +1486,55 @@ mod conversation {
         assert!(!Command::offered(d.app.situation()).contains(&Command::Go));
     }
 
+    /// Raised in review: the held task is what was typed, and a typed task can
+    /// name agents with `@`. Passed through whole, those names reach the agent
+    /// as part of the task and the profiles they chose are lost — so the
+    /// escalation runs something other than what was asked.
+    #[test]
+    fn going_reads_the_agents_a_question_named_rather_than_passing_them_on() {
+        let _guard = exclusive();
+        let scratch = project("escalate-mentions", 0);
+        let mut d = Driver::open(scratch.path());
+
+        let done = d.app.thread().turns.len() + 1;
+        d.typed("@writer why is this file here").key(KeyCode::Enter);
+        d.until("the question to be answered", move |app| {
+            app.thread().turns.len() == done
+        });
+        assert_eq!(
+            d.app.thread().ready.as_deref(),
+            Some("@writer why is this file here")
+        );
+
+        let done = d.app.thread().turns.len() + 1;
+        d.chord('x').key(KeyCode::Char('e'));
+        d.until("the run to finish", move |app| {
+            app.thread().turns.len() == done
+        });
+
+        // The transcript keeps what was typed, names and all.
+        assert_eq!(d.last().prompt, "@writer why is this file here");
+        // The run itself was given the task without them, and the profile the
+        // name chose did the writing.
+        let record = d
+            .last()
+            .finished
+            .as_ref()
+            .map(|f| f.run_id.clone())
+            .expect("a finished run");
+        let text = std::fs::read_to_string(
+            scratch
+                .path()
+                .join(format!(".ostraka/runs/{record}/record.json")),
+        )
+        .expect("the record");
+        assert!(
+            text.contains("\"why is this file here\""),
+            "the name was passed through as part of the task: {text}"
+        );
+        assert!(text.contains("\"writer\""), "{text}");
+    }
+
     /// `init` writes a gate that fails on purpose where it could not tell how a
     /// project is verified. Finding that out from a refusal means the run was
     /// authored and a vendor was paid first.
