@@ -788,8 +788,29 @@ only thing in the room that can reach the right one. The sequence has no reply:
 Terminal.app and VTE ignore it. So the status line says the terminal was asked
 rather than that the text was copied — claiming a success nobody can observe is
 how somebody pastes what they copied ten minutes ago and cannot work out why.
-tmux is not special-cased; its default `set-clipboard external` already forwards
-this, and wrapping it in a passthrough sequence is what would break it.
+**tmux has to be asked through tmux, and this shipped saying the opposite.**
+1.6.0 claimed that tmux's default `set-clipboard external` already forwards an
+application's OSC 52. It does not, and tmux's own manual is explicit: "If set
+to `external`, tmux will attempt to set the terminal clipboard but ignore
+attempts by applications to set tmux buffers." So the sequence was swallowed
+and nothing reached the clipboard — which, on a machine reached over ssh inside
+tmux, is every copy anybody makes. The claim was written from memory and
+nothing checked it; the man page is four lines long and settles it. A DCS
+passthrough is not the fix either: `allow-passthrough` is off by default from
+tmux 3.3 on, so that is swallowed too.
+
+`tmux load-buffer -w -` is the one route `external` permits, because the
+clipboard request then comes from tmux rather than from an application inside
+it, and it exits non-zero when it did not work — so under tmux the browser can
+say the buffer was set rather than only that something was asked. What it still
+cannot see is the far end, and `set-clipboard off` is the case where the buffer
+is set and the terminal is never asked; that is read and named rather than left
+to look like a copy that worked.
+
+The round trip is asserted end to end against the tmux the tests are running
+under: `to_clipboard` runs the real command and `tmux show-buffer` reads it
+back. Outside tmux there is nothing to assert against — a terminal never
+answers OSC 52 — and the test says so rather than passing on nothing.
 
 A display column is not a character. `unicode-width` is a direct dependency for
 that and adds no crate to the tree — ratatui already draws with it — and without

@@ -353,11 +353,13 @@ fn spot(
 
 /// Puts what is selected in a pane on the clipboard.
 ///
-/// What is said afterwards is deliberately "asked the terminal" rather than
-/// "copied". OSC 52 has no reply: a terminal that does not do it says nothing,
-/// and Terminal.app and VTE are two that do not. Claiming success we cannot
-/// observe is how somebody pastes the thing they copied ten minutes ago and
-/// does not know why.
+/// What is said afterwards is whatever was actually established, which is not
+/// the same sentence by both routes. OSC 52 has no reply — a terminal that
+/// does not do it says nothing, and Terminal.app and VTE are two that do not —
+/// so that one says the terminal was asked. tmux exits non-zero when it did
+/// not work, so that one says the buffer was set. Claiming a success nobody
+/// can observe is how somebody pastes what they copied ten minutes ago and
+/// cannot work out why.
 fn copy_selection(app: &mut App) {
     let Some(selection) = app.selection else {
         app.status = Some("nothing is selected \u{2014} drag over a transcript first".to_string());
@@ -370,8 +372,9 @@ fn copy_selection(app: &mut App) {
         return;
     }
     app.status = Some(match select::to_clipboard(&text) {
-        Ok(()) => format!(
-            "asked the terminal for the clipboard \u{2014} {} line(s), {} character(s)",
+        Ok(route) => format!(
+            "{} \u{2014} {} line(s), {} character(s)",
+            route.describe(),
             text.lines().count(),
             text.chars().count()
         ),

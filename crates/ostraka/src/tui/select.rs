@@ -22,6 +22,7 @@
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use std::path::Path;
 use unicode_width::UnicodeWidthChar;
 
 /// Where in a transcript one end of a selection sits.
@@ -205,7 +206,33 @@ fn reverse(line: Line<'static>, from: u16, to: u16) -> Line<'static> {
 /// payload of a line of English the same length on screen.
 const MOST: usize = 100_000;
 
-/// Asks the terminal to put this on the clipboard.
+/// How the text reached a clipboard, for the sentence that reports it.
+///
+/// Which route was taken is worth saying, because the two can be trusted to
+/// different depths: tmux answers, and a bare terminal does not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Route {
+    /// Handed to tmux, which forwards it. `warning` is what will stop it
+    /// reaching the system clipboard anyway, where that is knowable.
+    Tmux { warning: Option<String> },
+    /// Written straight at the terminal.
+    Osc52,
+}
+
+impl Route {
+    /// What the status line says. Never more than was actually established.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Tmux { warning: None } => {
+                "copied to the tmux buffer; tmux asked the terminal for the clipboard".to_string()
+            }
+            Self::Tmux { warning: Some(why) } => format!("copied to the tmux buffer, but {why}"),
+            Self::Osc52 => "asked the terminal for the clipboard".to_string(),
+        }
+    }
+}
+
+/// Puts this on the clipboard, by whichever route can reach one.
 ///
 /// OSC 52 rather than a clipboard crate, and the reason is the case this is
 /// most needed in: over ssh there is no clipboard on the machine the browser
@@ -213,10 +240,21 @@ const MOST: usize = 100_000;
 /// one. The terminal is the only thing in the room that can reach the right
 /// clipboard, so the terminal is asked.
 ///
-/// tmux is not special-cased. Its default `set-clipboard external` forwards
-/// this to the outer terminal already, and wrapping it in a passthrough
-/// sequence is what would break that.
-pub fn to_clipboard(text: &str) -> Result<(), String> {
+/// **tmux has to be asked through tmux.** This shipped saying the opposite —
+/// that tmux's default `set-clipboard external` forwards an application's
+/// OSC 52 already — and that is not what `external` means. tmux's own manual:
+/// "If set to `external`, tmux will attempt to set the terminal clipboard but
+/// ignore attempts by applications to set tmux buffers." So the sequence was
+/// swallowed and nothing reached the clipboard, which on a machine reached
+/// over ssh inside tmux is every copy anybody makes. Wrapping it in a DCS
+/// passthrough is not the fix either: `allow-passthrough` is off by default in
+/// tmux 3.3 and later, so that is swallowed too.
+///
+/// `tmux load-buffer -w -` is the one route `external` permits, because the
+/// clipboard request then comes from tmux rather than from an application
+/// inside it. It also reports: unlike the escape sequence, it exits non-zero
+/// when it did not work.
+pub fn to_clipboard(text: &str) -> Result<Route, String> {
     if text.len() > MOST {
         return Err(format!(
             "{} bytes is more than a terminal will take on the clipboard; \
@@ -224,6 +262,79 @@ pub fn to_clipboard(text: &str) -> Result<(), String> {
             text.len()
         ));
     }
+    if std::env::var_os("TMUX").is_some() {
+        return through_tmux(text).map(|warning| Route::Tmux { warning });
+    }
+    osc52(text).map(|()| Route::Osc52)
+}
+
+/// Hands the text to tmux, and says what will still stop it if anything will.
+fn through_tmux(text: &str) -> Result<Option<String>, String> {
+    load_buffer(None, text)?;
+    Ok(tmux_will_not_forward())
+}
+
+/// `tmux load-buffer -w -`, against the server this is running under or a
+/// named one.
+///
+/// `socket` exists for the test, and it is the whole reason the round trip can
+/// be asserted anywhere rather than only where somebody happens to have
+/// started tmux: the test brings up a server of its own at a path it chose. It
+/// also keeps the suite off the operator's own buffer, which a test writing to
+/// the ambient server would overwrite every time it ran. A path rather than a
+/// name, because `-L` resolves against a directory tmux picks from the
+/// environment and `-S` is the whole answer in one argument.
+fn load_buffer(socket: Option<&Path>, text: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut command = Command::new("tmux");
+    if let Some(path) = socket {
+        command.arg("-S").arg(path);
+    }
+    let mut child = command
+        .args(["load-buffer", "-w", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("tmux could not be run: {e}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or("tmux took no stdin")?
+        .write_all(text.as_bytes())
+        .map_err(|e| format!("tmux would not take the text: {e}"))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("tmux did not finish: {e}"))?;
+    if !out.status.success() {
+        let said = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("tmux refused it: {}", said.trim()));
+    }
+    Ok(())
+}
+
+/// Why tmux will keep this to itself, when it will.
+///
+/// `set-clipboard off` means the buffer is set and the terminal is never
+/// asked, so the text is in tmux and nowhere else. That is a real outcome and
+/// an invisible one — the copy looks like it worked — so it is named.
+fn tmux_will_not_forward() -> Option<String> {
+    let out = std::process::Command::new("tmux")
+        .args(["show", "-gv", "set-clipboard"])
+        .output()
+        .ok()?;
+    let setting = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (setting == "off").then(|| {
+        "tmux `set-clipboard` is off, so it will not pass it on \u{2014} \
+         `tmux set -g set-clipboard on`, or paste with tmux's own paste-buffer"
+            .to_string()
+    })
+}
+
+/// The escape sequence, written straight at the terminal.
+fn osc52(text: &str) -> Result<(), String> {
     use std::io::Write;
     let mut out = std::io::stdout();
     write!(out, "\x1b]52;c;{}\x07", base64(text.as_bytes())).map_err(|e| e.to_string())?;
@@ -361,6 +472,101 @@ mod tests {
             dragging: false,
         };
         assert_eq!(text(&wide, &selection), "\u{4e16}");
+    }
+
+    /// End to end, against a tmux server the test starts itself.
+    ///
+    /// The unit tests above prove the text that comes out of a selection; this
+    /// proves it arrives somewhere a person can paste from, which is the thing
+    /// that was broken. Nothing is stubbed: the real `tmux load-buffer -w -`
+    /// runs and `tmux show-buffer` reads it back.
+    ///
+    /// Its own server, on a private socket, for two reasons. It runs wherever
+    /// tmux is installed rather than only where somebody happened to start it,
+    /// so CI checks this rather than skipping it — raised in review. And the
+    /// operator's own buffer is left alone; a test writing to the ambient
+    /// server would overwrite whatever they had copied, every time the suite
+    /// ran.
+    ///
+    /// Skipped, loudly, only where tmux is not installed at all. The OSC 52
+    /// route cannot be asserted anywhere: a terminal never answers it.
+    #[test]
+    fn the_text_lands_in_a_tmux_buffer_that_can_be_read_back() {
+        let Some(server) = PrivateTmux::start() else {
+            eprintln!("tmux is not installed: the clipboard round trip is not asserted here");
+            return;
+        };
+
+        let one = "ostraka clipboard".to_string();
+        load_buffer(Some(server.socket()), &one).expect("tmux took it");
+        assert_eq!(
+            server.buffer(),
+            one,
+            "the buffer does not hold what was copied"
+        );
+
+        // Several lines survive as several lines. A buffer holding one
+        // run-together line would paste as one, which is not what was on the
+        // screen.
+        let many = "first line\nsecond line".to_string();
+        load_buffer(Some(server.socket()), &many).expect("tmux took it");
+        assert_eq!(server.buffer(), many, "the lines did not survive the trip");
+    }
+
+    /// A tmux server of this test's own, killed however the test ends.
+    struct PrivateTmux(std::path::PathBuf);
+
+    impl Drop for PrivateTmux {
+        fn drop(&mut self) {
+            std::process::Command::new("tmux")
+                .arg("-S")
+                .arg(&self.0)
+                .arg("kill-server")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .ok();
+            // tmux leaves the socket behind after the server is gone, and a
+            // file per test run is a directory nobody tidies.
+            std::fs::remove_file(&self.0).ok();
+        }
+    }
+
+    impl PrivateTmux {
+        fn start() -> Option<Self> {
+            let socket = std::env::temp_dir().join(format!("ostraka-tmux-{}", std::process::id()));
+            std::fs::remove_file(&socket).ok();
+
+            // A detached session running the default shell. A server with no
+            // session does not stay up, and buffers belong to the server — but
+            // nothing has to be attached to it: `load-buffer -w` sets the
+            // buffer and exits zero with no client, which is what makes this
+            // assertable without a terminal.
+            let started = std::process::Command::new("tmux")
+                .arg("-S")
+                .arg(&socket)
+                .args(["new-session", "-d"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .ok()?;
+            started.success().then(|| Self(socket))
+        }
+
+        fn socket(&self) -> &std::path::Path {
+            &self.0
+        }
+
+        fn buffer(&self) -> String {
+            let out = std::process::Command::new("tmux")
+                .arg("-S")
+                .arg(&self.0)
+                .arg("show-buffer")
+                .output()
+                .expect("tmux show-buffer runs");
+            assert!(out.status.success(), "tmux show-buffer failed");
+            String::from_utf8_lossy(&out.stdout).trim_end().to_string()
+        }
     }
 
     #[test]

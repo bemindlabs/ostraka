@@ -406,11 +406,19 @@ panes side by side, a terminal dragging across a row takes the neighbouring
 pane's text and the rule between them, and hands you lines belonging to two
 different runs.
 
-Copying asks the terminal for the clipboard, over OSC 52 — the only thing that
-reaches the right clipboard when the browser is running over ssh. It is an ask
-with no reply, so the status line says what was asked rather than claiming it
-was done; Terminal.app and VTE terminals do not answer it, and shift-drag
-(option in Terminal.app and iTerm2) is still the terminal's own way there.
+Copying reaches the clipboard by whichever route can. Under tmux it goes
+through `tmux load-buffer -w`, which is the one route tmux's default
+`set-clipboard external` permits — an application's own OSC 52 is ignored
+there, and that is worth knowing if you work over ssh inside tmux. Everywhere
+else it is OSC 52 straight at the terminal, which is what reaches the right
+clipboard when the browser is running remotely.
+
+The status line says what was actually established: tmux answers, so it says
+the buffer was set; a terminal never answers, so it says the terminal was
+asked. Terminal.app and VTE terminals ignore OSC 52, and shift-drag (option in
+Terminal.app and iTerm2) is still the terminal's own way there. With tmux's
+`set-clipboard` set to `off`, the text reaches the tmux buffer and goes no
+further — the browser reads that setting and says so.
 
 **Shift-tab chooses what enter does.** The box shows the mode:
 
