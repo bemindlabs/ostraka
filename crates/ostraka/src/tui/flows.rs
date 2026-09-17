@@ -1154,3 +1154,223 @@ fn the_palette_reaches_a_command_by_name_and_the_leader_by_letter() {
     d.key(KeyCode::Esc);
     assert_eq!(d.app.dialog, None);
 }
+
+/// Dragging over a transcript selects it, and the selection can be copied.
+///
+/// The mouse is captured, so the terminal's own selection is not available —
+/// and would be the wrong selection anyway once panes sit side by side. This
+/// drives the real mouse handler and asserts against the drawn buffer, which
+/// is where a selection either shows or does not.
+mod selecting {
+    use super::*;
+    use crate::tui::select;
+    use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::style::Modifier;
+
+    impl Driver {
+        fn mouse(&mut self, kind: MouseEventKind, column: u16, row: u16) -> &mut Self {
+            // Drawn first: a drag is read against where the transcript was
+            // last put on the screen, which is a thing only drawing knows.
+            self.screen();
+            super::super::mouse(
+                &mut self.app,
+                MouseEvent {
+                    kind,
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                },
+            );
+            self
+        }
+
+        /// A press, a drag and a release across one row of a transcript.
+        fn drag(&mut self, row: u16, from: u16, to: u16) -> &mut Self {
+            self.mouse(MouseEventKind::Down(MouseButton::Left), from, row)
+                .mouse(MouseEventKind::Drag(MouseButton::Left), to, row)
+                .mouse(MouseEventKind::Up(MouseButton::Left), to, row)
+        }
+
+        /// Where the transcript of the pane in front was drawn.
+        fn body(&mut self) -> ratatui::layout::Rect {
+            self.screen();
+            let at = self.app.at;
+            self.app
+                .transcripts
+                .iter()
+                .find(|(index, _, _)| *index == at)
+                .map(|(_, area, _)| *area)
+                .expect("the transcript was drawn")
+        }
+
+        /// Every cell the last draw reversed, read off the buffer.
+        fn reversed(&mut self) -> String {
+            let mut terminal =
+                Terminal::new(TestBackend::new(self.width, self.height)).expect("test terminal");
+            let app = &mut self.app;
+            terminal
+                .draw(|frame| super::super::view::draw(frame, app))
+                .expect("draws");
+            let buffer = terminal.backend().buffer().clone();
+            let mut out = String::new();
+            for y in 0..buffer.area.height {
+                for x in 0..buffer.area.width {
+                    let cell = &buffer[(x, y)];
+                    if cell.modifier.contains(Modifier::REVERSED) {
+                        out.push_str(cell.symbol());
+                    }
+                }
+            }
+            out
+        }
+    }
+
+    #[test]
+    fn dragging_over_a_transcript_selects_what_it_covered_and_copying_takes_it() {
+        let _guard = exclusive();
+        let scratch = project("select", 0);
+        let mut driver = Driver::open(scratch.path());
+        driver.task("write the file");
+
+        // The first row of the transcript is the task, written back as it was
+        // asked. Somewhere to drag over that is the same every run.
+        let body = driver.body();
+        let top = body.y;
+        driver.drag(top, body.x, body.x + 5);
+
+        let selection = driver.app.selection.expect("a selection was made");
+        assert!(!selection.dragging, "the button was released");
+        assert_eq!(selection.pane, driver.app.at);
+
+        // What is on the screen, not what the state says about it.
+        let reversed = driver.reversed();
+        assert!(
+            !reversed.is_empty(),
+            "nothing was drawn as selected:\n{}",
+            driver.screen()
+        );
+        let lines = super::super::view::transcript_of(&driver.app, driver.app.at);
+        assert_eq!(select::text(&lines, &selection), reversed.trim_end());
+
+        // And it is offered: a command nobody can find is a feature nobody has.
+        driver.chord('k');
+        driver.shows("copy what is selected");
+        driver.key(KeyCode::Esc);
+
+        // Copying says what it did. It cannot say the terminal took it —
+        // OSC 52 has no reply — so it says what was asked.
+        driver.ctrl('x').key(KeyCode::Char('y'));
+        let said = driver.app.status.clone().unwrap_or_default();
+        assert!(said.contains("clipboard"), "{said}");
+    }
+
+    #[test]
+    fn a_click_that_selects_nothing_focuses_the_pane_and_leaves_no_highlight() {
+        let _guard = exclusive();
+        let scratch = project("select-click", 0);
+        let mut driver = Driver::open(scratch.path());
+        driver.task("write the file");
+
+        let body = driver.body();
+        driver
+            .mouse(MouseEventKind::Down(MouseButton::Left), body.x + 2, body.y)
+            .mouse(MouseEventKind::Up(MouseButton::Left), body.x + 2, body.y);
+        assert!(driver.app.selection.is_none(), "a click selected something");
+        assert!(driver.reversed().is_empty());
+        assert_eq!(driver.app.focus, Focus::Prompt);
+    }
+
+    #[test]
+    fn escape_drops_the_selection_rather_than_leaving_the_browser() {
+        let _guard = exclusive();
+        let scratch = project("select-escape", 0);
+        let mut driver = Driver::open(scratch.path());
+        driver.task("write the file");
+
+        let body = driver.body();
+        driver.drag(body.y, body.x, body.x + 5);
+        assert!(driver.app.selection.is_some());
+
+        driver.key(KeyCode::Esc);
+        assert!(driver.app.selection.is_none(), "escape kept the selection");
+        assert!(!driver.app.quit, "escape left the browser");
+        assert!(driver.reversed().is_empty());
+    }
+
+    /// Raised in review: dragging past the top edge scrolls, and the head was
+    /// read against the scroll captured before it — so the selection stayed a
+    /// line behind the edge and never reached the line that had just been
+    /// revealed, which is the only line that drag was for.
+    #[test]
+    fn dragging_past_the_top_edge_reaches_the_line_it_revealed() {
+        let _guard = exclusive();
+        let scratch = project("select-edge", 0);
+        let mut driver = Driver::open(scratch.path());
+        driver.task("write the file");
+        driver.task("write it again");
+        driver.task("and once more");
+
+        let body = driver.body();
+        // Somewhere in the middle, then dragged off the top of the transcript.
+        driver.mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x,
+            body.y + body.height / 2,
+        );
+        let scroll_before = driver.app.scroll;
+        assert!(
+            scroll_before > 0,
+            "the transcript did not overflow the pane"
+        );
+
+        driver.mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            body.x,
+            body.y.saturating_sub(1),
+        );
+        let selection = driver.app.selection.expect("a selection");
+        assert_eq!(
+            driver.app.scroll,
+            scroll_before - 1,
+            "dragging past the edge did not scroll"
+        );
+        let (from, _) = selection.range();
+        assert_eq!(
+            from.line,
+            usize::from(driver.app.scroll),
+            "the head stopped short of the line that was revealed"
+        );
+    }
+
+    /// The selection lives in the transcript's own coordinates, so scrolling
+    /// moves it with the text. Held in screen cells it would stay on the rows
+    /// it was drawn over and come to cover something else entirely.
+    #[test]
+    fn scrolling_under_a_selection_moves_it_with_the_text() {
+        let _guard = exclusive();
+        let scratch = project("select-scroll", 0);
+        let mut driver = Driver::open(scratch.path());
+        driver.task("write the file");
+        driver.task("write it again");
+
+        let body = driver.body();
+        driver.drag(body.y, body.x, body.x + 8);
+        let before = driver.app.selection.expect("a selection");
+        let text = select::text(
+            &super::super::view::transcript_of(&driver.app, driver.app.at),
+            &before,
+        );
+
+        driver.app.scroll_pane(driver.app.at, -2);
+        let after = driver.app.selection.expect("still a selection");
+        assert_eq!(before, after, "scrolling moved the selection itself");
+        assert_eq!(
+            select::text(
+                &super::super::view::transcript_of(&driver.app, driver.app.at),
+                &after
+            ),
+            text,
+            "the selection came to cover different text"
+        );
+    }
+}

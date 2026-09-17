@@ -201,6 +201,13 @@ pub struct App {
     /// Which pane each column was drawn for, and where, at the last draw.
     /// Empty while one pane has the screen.
     pub columns: Vec<(usize, Rect)>,
+    /// Where each pane's transcript was drawn, and how far it was scrolled,
+    /// at the last draw. What a drag is read against: a screen row means a
+    /// line of the transcript only together with the scroll it was drawn at.
+    /// Recorded for the single-pane screen as well as for columns.
+    pub transcripts: Vec<(usize, Rect, u16)>,
+    /// Text selected in a pane with the mouse, waiting to be copied.
+    pub selection: Option<super::select::Selection>,
     /// The first pane shown when there are more panes than columns.
     pub first: usize,
     /// What `@` can name here: this repository's paths and the agents. Read
@@ -259,6 +266,8 @@ impl App {
             prompt_text: Rect::default(),
             prompt_scroll: 0,
             columns: Vec::new(),
+            transcripts: Vec::new(),
+            selection: None,
             first: 0,
             mentionable: Mentionable::default(),
             models: Vec::new(),
@@ -435,6 +444,23 @@ impl App {
         self.forget_detail();
     }
 
+    /// Scrolls one pane, whichever it is, by a number of lines.
+    ///
+    /// The pane in front scrolls with the screen and any other keeps its own
+    /// place, which is two fields rather than one — so a caller that has an
+    /// index rather than "the one in front" goes through here.
+    pub fn scroll_pane(&mut self, index: usize, delta: i16) {
+        if index == self.at {
+            self.scroll_by(delta);
+            return;
+        }
+        let pane = &mut self.panes[index];
+        pane.scroll = pane.scroll.saturating_add_signed(delta);
+        if delta < 0 {
+            pane.follow = false;
+        }
+    }
+
     pub fn scroll_by(&mut self, delta: i16) {
         self.scroll = self.scroll.saturating_add_signed(delta);
         // Scrolling up is someone reading something the tail is about to push
@@ -460,6 +486,7 @@ impl App {
             blocked: self.blocked.is_some(),
             panes: self.panes.len(),
             split: self.columns.len() > 1,
+            selected: self.selection.is_some(),
         }
     }
 
@@ -701,6 +728,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     let content = theme::inset(rows[3]);
     app.columns.clear();
+    app.transcripts.clear();
     if app.setup.is_some() {
         render_setup(frame, app, content);
     } else {
@@ -1007,7 +1035,30 @@ fn render_transcript(frame: &mut Frame, app: &mut App, index: usize, area: Rect)
     } else {
         app.panes[index].scroll = scroll;
     }
+    // Where this transcript was drawn and how far down it was, so a drag can
+    // be read back into the lines it was drawn from. A screen row on its own
+    // says nothing: the same row is a different line after a scroll.
+    app.transcripts.push((index, area, scroll));
+    let lines = match &app.selection {
+        Some(selection) if selection.pane == index => super::select::highlight(lines, selection),
+        _ => lines,
+    };
     frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), area);
+}
+
+/// The transcript of one pane, as the last draw rendered it.
+///
+/// Rendered again rather than kept from the draw: a `Vec<Line>` held across
+/// frames is a second copy of the screen that can disagree with the one on it,
+/// and this is asked for once, when somebody copies.
+pub fn transcript_of(app: &App, index: usize) -> Vec<Line<'static>> {
+    let width = app
+        .transcripts
+        .iter()
+        .find(|(at, _, _)| *at == index)
+        .map(|(_, area, _)| area.width)
+        .unwrap_or(80);
+    thread_lines(&app.panes[index].thread, width, app.tick)
 }
 
 /// What is on screen before anything has been asked in this session.

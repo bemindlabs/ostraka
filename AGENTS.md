@@ -763,13 +763,42 @@ sum of the box's margins, and the box is drawn from it and clicks are read
 against it. A test checks the cell it names against the drawn buffer. A mark
 that takes no cell of its own moves with its letter.
 
-The cost is the terminal's own selection. A terminal that reports the mouse to a
-program stops selecting on a drag, so copying from a transcript needs shift
-held — option in Terminal.app and iTerm2. The wheel is handled for the same
-reason: once the mouse is captured the terminal does not scroll by itself, and
-before this many terminals turned the wheel into arrow keys, where the up arrow
-walks history. Capture is released on the way out and on a panic, as the
-keyboard protocol is.
+The cost was the terminal's own selection. A terminal that reports the mouse to
+a program stops selecting on a drag. The wheel was handled for the same reason:
+once the mouse is captured the terminal does not scroll by itself, and before
+this many terminals turned the wheel into arrow keys, where the up arrow walks
+history. Capture is released on the way out and on a panic, as the keyboard
+protocol is.
+
+**Selecting is the browser's, and copying is the terminal's.** "Hold shift" was
+the answer to that cost for as long as it stood, and it was never the right
+selection here: with panes side by side a terminal dragging across a row takes
+the neighbouring pane's text and the rule between them, and hands somebody lines
+belonging to two different runs. So `tui::select` is a selection of our own,
+made in the transcript's own coordinates — a line index into what `thread_lines`
+produced and a display column within that line — rather than in screen cells.
+Held in cells it would stay on the rows it was drawn over and come to cover
+something else the moment anything scrolled. It is anchored to the pane the drag
+began in, so a drag that wanders into the next column still selects one run.
+
+Copying is OSC 52, and it is the one thing here that cannot be verified. Over
+ssh there is no clipboard on the machine the browser runs on, so every library
+that talks to one would be talking to the wrong one, and the terminal is the
+only thing in the room that can reach the right one. The sequence has no reply:
+Terminal.app and VTE ignore it. So the status line says the terminal was asked
+rather than that the text was copied — claiming a success nobody can observe is
+how somebody pastes what they copied ten minutes ago and cannot work out why.
+tmux is not special-cased; its default `set-clipboard external` already forwards
+this, and wrapping it in a passthrough sequence is what would break it.
+
+A display column is not a character. `unicode-width` is a direct dependency for
+that and adds no crate to the tree — ratatui already draws with it — and without
+it a selection ends inside a wide character and cuts it in half on the way to
+somebody's clipboard. Base64 is twenty lines here rather than a crate: the
+alphabet has not changed since 1987, and a binary whose distribution advantage
+is that it needs nothing does not take a dependency for it. The whole feature
+costs 15 KB, 3.33 MB to 3.34 MB, measured before it was accepted as every
+dependency here is.
 
 **Ask, plan, loop and auto are ways into the pipeline, not around it.**
 `mode::Mode` and everything it needs live in the binary crate. The public types

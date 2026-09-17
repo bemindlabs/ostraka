@@ -371,8 +371,7 @@ starts a fresh thread from `HEAD`.
 takes another line, and the up arrow offers back what you have asked here
 before. The left and right arrows move through the task, and a click in the box
 puts the cursor on the character under it. The browser reads the mouse to do
-that, so the wheel scrolls what you are reading, and selecting text to copy
-needs shift held — option in Terminal.app and iTerm2. `esc` hands the keys back for a moment — `n` takes the box again. Every
+that, so the wheel scrolls what you are reading. `esc` hands the keys back for a moment — `n` takes the box again. Every
 command is also on the `ctrl-x` leader and in the `ctrl-k` palette, and the list
 of commands is the authority for all three, so a key cannot do what the palette
 has decided not to offer.
@@ -393,6 +392,23 @@ previous_pane = "ctrl-["
 
 The screen names whichever key comes first. `ctrl-c` leaves and `ctrl-j` starts
 a new line, and neither can be rebound.
+
+**Drag over a transcript to select it; `ctrl-x y` copies.** The browser reads
+the mouse, which is what stops the terminal selecting on a drag — so the
+selection is the browser's own. Drag past the top or bottom edge and it scrolls;
+`esc` drops it. Scrolling afterwards moves the selection with the text rather
+than leaving it on the rows it was drawn over.
+
+It selects within one pane, which the terminal's own selection cannot: with
+panes side by side, a terminal dragging across a row takes the neighbouring
+pane's text and the rule between them, and hands you lines belonging to two
+different runs.
+
+Copying asks the terminal for the clipboard, over OSC 52 — the only thing that
+reaches the right clipboard when the browser is running over ssh. It is an ask
+with no reply, so the status line says what was asked rather than claiming it
+was done; Terminal.app and VTE terminals do not answer it, and shift-drag
+(option in Terminal.app and iTerm2) is still the terminal's own way there.
 
 **Shift-tab chooses what enter does.** The box shows the mode:
 

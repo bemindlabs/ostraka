@@ -15,6 +15,7 @@ mod command;
 mod flows;
 mod mention;
 mod pane;
+mod select;
 mod session;
 mod theme;
 mod thread;
@@ -205,12 +206,14 @@ fn release_input() {
     chord::leave();
 }
 
-/// The mouse. A click in the box puts the cursor where it landed, and the
-/// wheel scrolls what is being read.
+/// The mouse. A click in the box puts the cursor where it landed, a drag over
+/// a transcript selects it, and the wheel scrolls what is being read.
 ///
 /// The wheel is here because the mouse is captured: a terminal that reports it
 /// to a program no longer scrolls by itself, and many turned the wheel into
-/// arrow keys in a full-screen program, where the up arrow walks history.
+/// arrow keys in a full-screen program, where the up arrow walks history. The
+/// selection is here for the other half of the same cost — a terminal that
+/// reports the mouse stops selecting on a drag.
 fn mouse(app: &mut App, event: MouseEvent) {
     if app.dialog.is_some() {
         return;
@@ -220,7 +223,74 @@ fn mouse(app: &mut App, event: MouseEvent) {
         .iter()
         .find(|(_, area)| area.contains(Position::new(event.column, event.row)))
         .map(|(index, _)| *index);
+    // The transcript under the pointer, if it is over one. Asked first,
+    // because a press there starts a selection as well as focusing the pane.
+    let over = app
+        .transcripts
+        .iter()
+        .find(|(_, area, _)| area.contains(Position::new(event.column, event.row)))
+        .copied();
     match event.kind {
+        MouseEventKind::Down(MouseButton::Left) if over.is_some() => {
+            let (index, area, scroll) = over.unwrap_or_default();
+            app.focus_pane(index);
+            app.focus = Focus::Prompt;
+            let at = spot(app, index, area, scroll, event);
+            app.selection = Some(select::Selection::new(index, at));
+        }
+        // Extending the selection the press started. Read against the pane it
+        // began in, not the one the pointer is over: a drag that wandered into
+        // the next column would otherwise select across two runs, which is the
+        // thing the terminal's own selection gets wrong here.
+        MouseEventKind::Drag(MouseButton::Left) => {
+            let Some(mut selection) = app.selection else {
+                return;
+            };
+            if !selection.dragging {
+                return;
+            }
+            let Some((index, area, scroll)) = app
+                .transcripts
+                .iter()
+                .find(|(at, _, _)| *at == selection.pane)
+                .copied()
+            else {
+                return;
+            };
+            // Dragging past the top or bottom edge scrolls, so a selection can
+            // reach what is not on the screen without letting go of it.
+            //
+            // The scroll this is read against moves with it. Reading the head
+            // against the scroll captured before scrolling left the selection
+            // a line behind the edge it was being dragged past, so it never
+            // reached the line that had just been revealed — which is the only
+            // line that drag was for. Raised in review.
+            let mut scroll = scroll;
+            if event.row < area.y {
+                app.scroll_pane(index, -1);
+                scroll = scroll.saturating_sub(1);
+            } else if event.row >= area.y.saturating_add(area.height) {
+                app.scroll_pane(index, 1);
+                scroll = scroll.saturating_add(1);
+            }
+            selection.head = spot(app, index, area, scroll, event);
+            app.selection = Some(selection);
+        }
+        MouseEventKind::Up(MouseButton::Left) => match app.selection {
+            // A click is a drag of no distance, and it means "put the keys in
+            // this pane" rather than "select nothing".
+            Some(selection) if selection.is_empty() => app.selection = None,
+            Some(mut selection) => {
+                selection.dragging = false;
+                app.selection = Some(selection);
+                app.status = Some(format!(
+                    "selected \u{2014} {} {} copies it",
+                    chord::label(chord::Action::Leader),
+                    Command::Copy.leader()
+                ));
+            }
+            None => {}
+        },
         // A click on a column gives that pane the keys, and nothing else: the
         // task somebody was writing in it is still there to go on with.
         MouseEventKind::Down(MouseButton::Left) if column.is_some() => {
@@ -252,6 +322,61 @@ fn mouse(app: &mut App, event: MouseEvent) {
         MouseEventKind::ScrollDown => app.scroll_by(3),
         _ => {}
     }
+}
+
+/// Where in a transcript a mouse event landed.
+///
+/// A screen row is a line only together with the scroll the transcript was
+/// drawn at, and a screen cell is a display column only after the line has
+/// been consulted about how wide its characters are.
+fn spot(
+    app: &App,
+    index: usize,
+    area: ratatui::layout::Rect,
+    scroll: u16,
+    event: MouseEvent,
+) -> select::Spot {
+    // Held to the rows the transcript was drawn on. A drag goes where the
+    // pointer goes, including off the top and bottom of it, and a row outside
+    // the area is a row that was never part of this transcript — the line it
+    // wants is the first or last one that is.
+    let last = area.y.saturating_add(area.height.saturating_sub(1));
+    let row = event.row.clamp(area.y, last.max(area.y));
+    let at = usize::from(row - area.y) + usize::from(scroll);
+    let lines = view::transcript_of(app, index);
+    let line = at.min(lines.len().saturating_sub(1));
+    select::Spot {
+        line,
+        column: select::column_at(lines.get(line), event.column.saturating_sub(area.x)),
+    }
+}
+
+/// Puts what is selected in a pane on the clipboard.
+///
+/// What is said afterwards is deliberately "asked the terminal" rather than
+/// "copied". OSC 52 has no reply: a terminal that does not do it says nothing,
+/// and Terminal.app and VTE are two that do not. Claiming success we cannot
+/// observe is how somebody pastes the thing they copied ten minutes ago and
+/// does not know why.
+fn copy_selection(app: &mut App) {
+    let Some(selection) = app.selection else {
+        app.status = Some("nothing is selected \u{2014} drag over a transcript first".to_string());
+        return;
+    };
+    let lines = view::transcript_of(app, selection.pane);
+    let text = select::text(&lines, &selection);
+    if text.is_empty() {
+        app.status = Some("the selection is empty".to_string());
+        return;
+    }
+    app.status = Some(match select::to_clipboard(&text) {
+        Ok(()) => format!(
+            "asked the terminal for the clipboard \u{2014} {} line(s), {} character(s)",
+            text.lines().count(),
+            text.chars().count()
+        ),
+        Err(e) => format!("could not copy: {e}"),
+    });
 }
 
 /// Takes whatever the run has said since the last frame.
@@ -402,6 +527,18 @@ fn handle(app: &mut App, key: KeyEvent, records_root: &Path) {
     // Any keypress supersedes the last message. A status line that outlives
     // what it described is worse than no status line.
     app.status = None;
+
+    // A selection is made with the mouse and dropped with the keyboard, and
+    // escape is the key for "never mind" everywhere else on this screen. It
+    // drops the selection before anything else escape does, because a
+    // highlight left over a transcript somebody has moved on from is a
+    // highlight they have to work out how to get rid of. Any other key leaves
+    // it alone: typing a task while some of the transcript is selected is an
+    // ordinary thing to be doing, and it is what copying is usually for.
+    if key.code == KeyCode::Esc && app.selection.is_some() {
+        app.selection = None;
+        return;
+    }
 
     if app.focus == Focus::Prompt {
         prompt_key(app, key, records_root);
@@ -599,6 +736,7 @@ fn perform(app: &mut App, command: Command, records_root: &Path) {
             app.thread_mut().stop();
             app.status = Some("asked the agent to stop".to_string());
         }
+        Command::Copy => copy_selection(app),
         Command::Fix => open_fix(app),
         Command::Settings => {
             app.project_facts = project_facts(app);
