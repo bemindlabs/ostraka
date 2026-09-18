@@ -376,7 +376,13 @@ fn main() -> ExitCode {
                 .unwrap_or_else(|| run::REVIEWER.to_string());
             args.adapter = adapter.clone();
             args.review_adapter = review_adapter.clone();
-            drain::run(&workspace, args, *workers, cli.json)
+            // Every task on the list is a gated run, so a placeholder gate
+            // refuses the lot before the first one is claimed. A task naming a
+            // different repository is not covered — see `placeholder_gate`.
+            match workspace.placeholder_gate(args.repository.as_deref()) {
+                Some(why) => Err(why.into()),
+                None => drain::run(&workspace, args, *workers, cli.json),
+            }
         }
         Commands::Runs => runs::run(&workspace, cli.json),
         Commands::Completion { .. } | Commands::Update { .. } => {
@@ -432,6 +438,11 @@ fn main() -> ExitCode {
                 Err("say what the agent should do, or `--next` to take it from the list".into())
             } else if mode.consults() {
                 consult::run(&workspace, &args, *mode, cli.json)
+            } else if let Some(why) = workspace.placeholder_gate(args.repository.as_deref()) {
+                // Before anything is claimed, authored or paid for. The browser
+                // refuses this in the same words; a run started from a shell is
+                // the same run.
+                Err(why.into())
             } else {
                 run::run(&workspace, &args, cli.json)
             }

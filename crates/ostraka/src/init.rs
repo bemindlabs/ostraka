@@ -226,7 +226,7 @@ pub fn write_profile(workspace: &crate::workspace::Workspace, id: &str) -> std::
 /// it is not is a gate anybody meant to run against, so the browser recognises
 /// it by name and says so before a run is started rather than after one is
 /// refused. Named here because this is where it is written.
-pub(crate) const PLACEHOLDER_CHECK: &str = "declare-your-checks";
+pub const PLACEHOLDER_CHECK: &str = "declare-your-checks";
 
 const IGNORED: [&str; 6] = [
     "/.ostraka/runs/",

@@ -838,7 +838,14 @@ rather than by the mode the thread is in now, which somebody may have changed
 while it was running.
 
 And a run whose gate is still `init`'s placeholder is refused before it starts,
-by name, with the task left in the box. `init` writing a check that fails on
+by name, with the task left in the box. `Workspace::placeholder_gate` is that
+question, asked in one place so the browser, `ostraka run` and `ostraka drain`
+refuse the same thing for the same reason and in the same words — the command
+line refuses before a task is claimed, which matters for `--next`, where
+refusing later would leave a claimed task in `running/`. It is asked of one
+repository, the one a run would be made in; a task naming another is not
+covered, and that is the honest limit of a check made before anything is
+claimed. `init` writing a check that fails on
 purpose is right and is documented above; discovering it from a refusal means
 the run was authored and a vendor was paid first. Asking is untouched, because
 a question is not gated — so a workspace with no gate yet is still usable, which
