@@ -432,17 +432,25 @@ fn main() -> ExitCode {
                     mode.word()
                 )
                 .into())
+            } else if !*next && args.prompt.is_empty() {
+                Err("say what the agent should do, or `--next` to take it from the list".into())
+            } else if !mode.consults()
+                && let Some(why) = workspace.placeholder_gate(args.repository.as_deref())
+            {
+                // Before `--next` claims anything, not only before a run starts.
+                // Refusing further down left a claimed task in `running/` that
+                // nobody took and nothing would take again — and the first
+                // version of this change did exactly that, because the branch
+                // sat below `--next` in this chain. Raised in review.
+                //
+                // Only for the modes that produce a change: asking and planning
+                // never reach the gate, and `--next` with either is already
+                // refused above.
+                Err(why.into())
             } else if *next {
                 task_cmd::run_next(&workspace, args, cli.json)
-            } else if args.prompt.is_empty() {
-                Err("say what the agent should do, or `--next` to take it from the list".into())
             } else if mode.consults() {
                 consult::run(&workspace, &args, *mode, cli.json)
-            } else if let Some(why) = workspace.placeholder_gate(args.repository.as_deref()) {
-                // Before anything is claimed, authored or paid for. The browser
-                // refuses this in the same words; a run started from a shell is
-                // the same run.
-                Err(why.into())
             } else {
                 run::run(&workspace, &args, cli.json)
             }
