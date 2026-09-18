@@ -946,9 +946,24 @@ fn dialog_key(app: &mut App, key: KeyEvent, records_root: &Path) {
                 depart(app);
             }
         }
-        // The keys dialog has nothing to type into, so any key closes it. A
-        // reference someone has to work out how to dismiss is a poor reference.
-        Some(Dialog::Keys) | None => app.close(),
+        // The keys dialog has nothing to type into, so any key closes it — but
+        // it lists more keys than fit on most terminals, and a reference that
+        // closes when you try to scroll it is a reference you cannot read to
+        // the end. The keys that move it are the only ones it keeps.
+        Some(Dialog::Keys) => match key.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.keys_scroll = app.keys_scroll.saturating_add(1)
+            }
+            KeyCode::Up | KeyCode::Char('k') => app.keys_scroll = app.keys_scroll.saturating_sub(1),
+            KeyCode::PageDown => app.keys_scroll = app.keys_scroll.saturating_add(10),
+            KeyCode::PageUp => app.keys_scroll = app.keys_scroll.saturating_sub(10),
+            KeyCode::Home => app.keys_scroll = 0,
+            // Clamped to what is hidden when it is drawn, so a number past the
+            // end is the end.
+            KeyCode::End => app.keys_scroll = u16::MAX,
+            _ => app.close(),
+        },
+        None => app.close(),
     }
 }
 
