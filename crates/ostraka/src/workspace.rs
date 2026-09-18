@@ -496,6 +496,45 @@ impl Workspace {
         }
     }
 
+    /// Why a run that would be gated cannot start here, if anything.
+    ///
+    /// `init` writes a check that fails on purpose where it could not tell how
+    /// a project is verified. That is the right thing to write — a generated
+    /// gate that passed everything would be worse — and the wrong thing to
+    /// find out from a refusal: the run is authored, a vendor is paid, the
+    /// gate then fails by design, and nothing on the way there said the gate
+    /// was a placeholder. It reads as "everything is rejected", which is how
+    /// it was reported.
+    ///
+    /// Asked of one repository, the one a run would be made in. A task naming
+    /// another is not covered, and that is the honest limit of a check made
+    /// before anything is claimed: this refuses what is certainly wrong rather
+    /// than guessing at what might be.
+    ///
+    /// Only for runs. A question is not gated, so a workspace with no gate yet
+    /// is still one somebody can use — which is what makes refusing the run
+    /// affordable.
+    pub fn placeholder_gate(&self, repository: Option<&str>) -> Option<String> {
+        let repo = self.repository(repository).ok()?;
+        let config = self.config_for(&repo).ok()?;
+        if !config
+            .gate
+            .checks
+            .iter()
+            .any(|check| check.name == crate::init::PLACEHOLDER_CHECK)
+        {
+            return None;
+        }
+        let source = self.config_source(&repo);
+        let named = source.strip_prefix(&self.root).unwrap_or(&source);
+        Some(format!(
+            "the gate here is still the placeholder `{}`, which fails on purpose \u{2014} say how \
+             this project is verified in {}, or ask instead: a question is not gated",
+            crate::init::PLACEHOLDER_CHECK,
+            named.display()
+        ))
+    }
+
     /// The workspace's own configuration, for the things that are not a
     /// repository's business: the policy, and the default gate.
     pub fn config(&self) -> Loaded<Config> {
@@ -883,6 +922,42 @@ mod tests {
         let (dir, ws) = workspace("worktrees", &["only"]);
         let config = ws.config().expect("parses");
         assert_eq!(ws.worktrees(&config), dir.join(".ostraka/worktrees"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `init`'s placeholder gate is recognised, and a real one is not mistaken
+    /// for it. Both the browser and the command line ask this one question.
+    #[test]
+    fn a_placeholder_gate_is_named_and_a_real_one_is_left_alone() {
+        let dir = scratch("placeholder");
+        std::fs::create_dir_all(dir.join("repositories/work")).expect("repository");
+        let config = dir.join(".ostraka/ostraka.toml");
+        std::fs::create_dir_all(config.parent().expect("parent")).expect("ostraka");
+
+        std::fs::write(
+            &config,
+            format!(
+                "[gate]\nchecks = [{{ name = \"{}\", cmd = \"exit 1\", required = true }}]\n",
+                crate::init::PLACEHOLDER_CHECK
+            ),
+        )
+        .expect("config");
+        let workspace = Workspace::at(&dir);
+        let said = workspace
+            .placeholder_gate(None)
+            .expect("the placeholder was not recognised");
+        assert!(said.contains(crate::init::PLACEHOLDER_CHECK), "{said}");
+        // It says where to fix it, and that asking still works.
+        assert!(said.contains("ostraka.toml"), "{said}");
+        assert!(said.contains("ask instead"), "{said}");
+
+        std::fs::write(
+            &config,
+            "[gate]\nchecks = [{ name = \"test\", cmd = \"true\", required = true }]\n",
+        )
+        .expect("config");
+        assert_eq!(Workspace::at(&dir).placeholder_gate(None), None);
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }

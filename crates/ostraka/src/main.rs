@@ -376,7 +376,13 @@ fn main() -> ExitCode {
                 .unwrap_or_else(|| run::REVIEWER.to_string());
             args.adapter = adapter.clone();
             args.review_adapter = review_adapter.clone();
-            drain::run(&workspace, args, *workers, cli.json)
+            // Every task on the list is a gated run, so a placeholder gate
+            // refuses the lot before the first one is claimed. A task naming a
+            // different repository is not covered — see `placeholder_gate`.
+            match workspace.placeholder_gate(args.repository.as_deref()) {
+                Some(why) => Err(why.into()),
+                None => drain::run(&workspace, args, *workers, cli.json),
+            }
         }
         Commands::Runs => runs::run(&workspace, cli.json),
         Commands::Completion { .. } | Commands::Update { .. } => {
@@ -426,10 +432,23 @@ fn main() -> ExitCode {
                     mode.word()
                 )
                 .into())
+            } else if !*next && args.prompt.is_empty() {
+                Err("say what the agent should do, or `--next` to take it from the list".into())
+            } else if !mode.consults()
+                && let Some(why) = workspace.placeholder_gate(args.repository.as_deref())
+            {
+                // Before `--next` claims anything, not only before a run starts.
+                // Refusing further down left a claimed task in `running/` that
+                // nobody took and nothing would take again — and the first
+                // version of this change did exactly that, because the branch
+                // sat below `--next` in this chain. Raised in review.
+                //
+                // Only for the modes that produce a change: asking and planning
+                // never reach the gate, and `--next` with either is already
+                // refused above.
+                Err(why.into())
             } else if *next {
                 task_cmd::run_next(&workspace, args, cli.json)
-            } else if args.prompt.is_empty() {
-                Err("say what the agent should do, or `--next` to take it from the list".into())
             } else if mode.consults() {
                 consult::run(&workspace, &args, *mode, cli.json)
             } else {

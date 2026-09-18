@@ -434,8 +434,10 @@ product working; a question being refused is not a question.
 
 For the same reason, a run is refused *before it starts* where the gate is
 still that placeholder. The task stays in the box and the message says which
-file to declare the checks in. Asking is untouched — a workspace with no gate
-yet is still one you can use.
+file to declare the checks in. `ostraka run` and `ostraka drain` refuse it too,
+in the same words and before anything is claimed — a run started from a shell
+is the same run. Asking is untouched: `--mode ask` and `--mode plan` are not
+gated, so a workspace with no gate yet is still one you can use.
 
 **Shift-tab chooses what enter does.** The box shows the mode:
 

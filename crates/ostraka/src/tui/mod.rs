@@ -1427,31 +1427,11 @@ fn go(app: &mut App) {
 
 /// Why a run that would be gated cannot start here.
 ///
-/// `init` writes a check that fails on purpose where it could not tell how a
-/// project is verified, which is the right thing to write and the wrong thing
-/// to discover from a refusal: the run is authored, a vendor is paid, the gate
-/// then fails by design, and nothing on the way there said the gate was a
-/// placeholder. Asking is unaffected — a question is not gated, so a workspace
-/// with no gate yet is still one somebody can use.
+/// The workspace's answer, so the browser and the command line refuse the same
+/// thing for the same reason and in the same words.
 fn cannot_run(app: &App) -> Option<String> {
-    let repo = app.repository()?;
-    let config = app.workspace.config_for(repo).ok()?;
-    if !config
-        .gate
-        .checks
-        .iter()
-        .any(|check| check.name == crate::init::PLACEHOLDER_CHECK)
-    {
-        return None;
-    }
-    let source = app.workspace.config_source(repo);
-    let named = source.strip_prefix(&app.workspace.root).unwrap_or(&source);
-    Some(format!(
-        "the gate here is still the placeholder `{}`, which fails on purpose \u{2014} say how \
-         this project is verified in {}, or ask instead: a question is not gated",
-        crate::init::PLACEHOLDER_CHECK,
-        named.display()
-    ))
+    let named = app.repository().map(|repo| repo.name.clone());
+    app.workspace.placeholder_gate(named.as_deref())
 }
 
 /// Starts the run that has been written into the box.
