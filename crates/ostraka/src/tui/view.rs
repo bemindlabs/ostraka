@@ -208,6 +208,9 @@ pub struct App {
     pub transcripts: Vec<(usize, Rect, u16)>,
     /// Text selected in a pane with the mouse, waiting to be copied.
     pub selection: Option<super::select::Selection>,
+    /// How far the keys dialog is scrolled. It lists more keys than fit on
+    /// most terminals, and truncating it hid the ones somebody came for.
+    pub keys_scroll: u16,
     /// The first pane shown when there are more panes than columns.
     pub first: usize,
     /// What `@` can name here: this repository's paths and the agents. Read
@@ -268,6 +271,7 @@ impl App {
             columns: Vec::new(),
             transcripts: Vec::new(),
             selection: None,
+            keys_scroll: 0,
             first: 0,
             mentionable: Mentionable::default(),
             models: Vec::new(),
@@ -531,6 +535,9 @@ impl App {
         self.dialog = Some(dialog);
         self.query.clear();
         self.pick = 0;
+        // Opened at the top. A reference that reopens halfway down, where it
+        // was left last time, is one somebody has to scroll back up to read.
+        self.keys_scroll = 0;
         self.leader = false;
     }
 
@@ -761,7 +768,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     frame.render_widget(Paragraph::new(lines), theme::inset(rows[5]));
 
     match app.dialog {
-        Some(Dialog::Keys) => render_keys(frame, screen),
+        Some(Dialog::Keys) => render_keys(frame, app, screen),
         Some(Dialog::Commands) => render_palette(frame, app, screen),
         Some(Dialog::Runs) => render_runs(frame, app, screen),
         Some(Dialog::Agents) => render_agents(frame, app, screen),
@@ -2249,69 +2256,205 @@ fn render_leaving(frame: &mut Frame, app: &App, screen: Rect) {
 }
 
 /// Every key the screen answers to, in one place someone can read.
-fn render_keys(frame: &mut Frame, screen: Rect) {
-    let rows: Vec<(&str, &str)> = vec![
-        ("type", "the box has the keys; what you type is the task"),
-        ("enter", "run it"),
+///
+/// The commands half is derived from `Command::ALL` rather than written out
+/// beside it. It was written out, and a command added to the list did not
+/// reach this dialog — so the one screen somebody opens when they cannot
+/// remember a key was the one screen that did not know about it. That is the
+/// drift the single list exists to prevent, and this was the reader that had
+/// opted out of it.
+///
+/// What is written out is the half that has no command behind it: typing,
+/// moving through the task, the mentions. Those are the box's own behaviour,
+/// not entries in a list of actions.
+fn render_keys(frame: &mut Frame, app: &App, screen: Rect) {
+    let mode = app.thread().mode;
+    let situation = app.situation();
+
+    let mut rows: Vec<(String, String, Section)> = Vec::new();
+    let mut writing = |key: &str, what: &str| {
+        rows.push((key.to_string(), what.to_string(), Section::Writing));
+    };
+    writing("type", "what you type is the task");
+    // What enter actually does here. "run it" was true when a thread opened in
+    // auto and is a plain lie in ask, which is where a thread opens now — on
+    // the one screen somebody reads when they are already confused.
+    writing(
+        "enter",
+        match mode {
+            Mode::Ask => "answer it \u{2014} nothing is written",
+            Mode::Plan => "write a plan for it \u{2014} nothing is written",
+            Mode::Loop => "run it, and try again with the reason if it is refused",
+            Mode::Auto => "run it",
+        },
+    );
+    writing(
+        "shift-tab",
+        "ask, plan, loop or auto \u{2014} what enter does",
+    );
+    writing("alt-enter", "another line, for a task that needs one");
+    writing("up / down", "what you have asked here before");
+    writing(
+        "left / right",
+        "move through the task; a click puts the cursor",
+    );
+    writing("@", "a file, a directory or an agent; tab completes it");
+    writing(
+        "esc / n",
+        "put the task aside and take the keys; n gives the box back",
+    );
+
+    // Every command, from the one list. Offered ones first, so what can be
+    // done now is at the top; the rest are shown greyed rather than hidden,
+    // because a key somebody read about yesterday and cannot find today reads
+    // as a browser that has lost it.
+    let offered = Command::offered(situation);
+    let row = |command: Command, section| {
         (
-            "shift-tab",
-            "ask, plan, loop or auto \u{2014} what enter does",
-        ),
-        ("alt-enter", "another line, for a task that needs one"),
-        ("up / down", "what you have asked here before"),
-        (
-            "left / right",
-            "move through the task; a click puts the cursor",
-        ),
-        (
-            "esc / n",
-            "put the task aside and take the keys; n gives the box back",
-        ),
-        ("@", "a file, a directory or an agent; tab completes it"),
-        (
-            label(Chord::NewPane),
-            "another line of work, open beside this one",
-        ),
-        (panes_label(), "move between them"),
-        // One row for the five, because they are one idea and the dialog has
-        // to fit an eighty-by-twenty-six terminal with its way out still on it.
-        ("< > + - =", "move, widen, narrow, even out the panes"),
-        ("s", "ask a running agent to stop"),
-        ("l", "the runs recorded here"),
-        ("w", "the repositories, and n starts one"),
-        ("tab", "checks, events, diff \u{2014} on a record"),
-        ("p", "promote a record; merges nothing"),
-        ("u", "clear the worktrees finished runs left"),
-        ("pgup / pgdn", "scroll"),
-        (label(Chord::Commands), "commands"),
-        (
-            label(Chord::Leader),
-            "leader: the same commands, one key away",
-        ),
-        ("?", "this list"),
-        ("q", "quit"),
-    ];
+            format!(
+                "{:<6} {} {}",
+                command.key(),
+                label(Chord::Leader),
+                command.leader()
+            ),
+            command.about().to_string(),
+            section,
+        )
+    };
+    // Partitioned rather than walked in order. Emitting a heading whenever the
+    // section changed put "commands" on the screen three times, because the
+    // list interleaves what can be done now with what cannot.
+    rows.extend(
+        Command::ALL
+            .into_iter()
+            .filter(|c| offered.contains(c))
+            .map(|c| row(c, Section::Commands)),
+    );
+    rows.extend(
+        Command::ALL
+            .into_iter()
+            .filter(|c| !offered.contains(c))
+            .map(|c| row(c, Section::Unavailable)),
+    );
+
+    let mut around = |key: String, what: &str| {
+        rows.push((key, what.to_string(), Section::Around));
+    };
+    around(label(Chord::NewPane).to_string(), "another line of work");
+    around(panes_label().to_string(), "move between them");
+    around(
+        "< > + - =".to_string(),
+        "move, widen, narrow, even out the panes",
+    );
+    around("pgup / pgdn".to_string(), "scroll");
+    around(label(Chord::Commands).to_string(), "the commands, by name");
+    around(
+        label(Chord::Leader).to_string(),
+        "leader: the same commands, one key away",
+    );
+
+    // The column is as wide as the widest key in it, plus a gap. Fixed at
+    // thirteen, `ctrl-] / ctrl-[` overran it and the description it was meant
+    // to be separated from began in the next cell.
+    let column = rows
+        .iter()
+        .map(|(key, _, _)| key.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2;
 
     let mut lines = vec![
         Line::from(Span::styled("keys", theme::bold())),
         Line::from(""),
     ];
-    for (key, what) in &rows {
+    let mut last: Option<Section> = None;
+    for (key, what, section) in &rows {
+        if last != Some(*section) {
+            if last.is_some() {
+                lines.push(Line::from(""));
+            }
+            lines.push(dim(section.heading().to_string()));
+            last = Some(*section);
+        }
+        let style = if *section == Section::Unavailable {
+            theme::muted()
+        } else {
+            theme::accent()
+        };
         lines.push(Line::from(vec![
-            Span::styled(format!("{key:<13}"), theme::accent()),
-            Span::styled((*what).to_string(), theme::text()),
+            Span::styled(format!("  {key:<column$}"), style),
+            Span::styled(what.clone(), theme::text()),
         ]));
     }
-    lines.push(Line::from(""));
-    lines.push(dim("esc closes this".to_string()));
 
-    let area = theme::centred(screen, 72, lines.len() as u16 + 2);
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(theme::fit(lines, area.height))
-            .block(theme::panel(true).padding(Padding::horizontal(2))),
-        area,
+    // As wide as the terminal allows, up to a line length somebody can read
+    // across. Fixed at seventy-six, the descriptions were clipped mid-word on
+    // terminals with room to spare — a reference that stops mid-sentence is
+    // one somebody has to guess the end of.
+    let area = theme::centred(
+        screen,
+        screen.width.saturating_sub(4).min(100),
+        screen.height.saturating_sub(2),
     );
+    frame.render_widget(Clear, area);
+    let block = theme::panel(true).padding(Padding::horizontal(2));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Scrolled rather than truncated. There are more keys than rows on most
+    // terminals, and "… 5 more lines" is a dialog telling somebody the thing
+    // they came for might be one of the five it will not show them.
+    //
+    // The way out is pinned to the last row instead of being the last line of
+    // what scrolls. A dialog whose footer can be scrolled off is one somebody
+    // is stuck in, which is the invariant the truncating version was keeping
+    // and this nearly threw away.
+    let body = Rect {
+        height: inner.height.saturating_sub(1),
+        ..inner
+    };
+    let foot = Rect {
+        y: inner.y + inner.height.saturating_sub(1),
+        height: 1,
+        ..inner
+    };
+    let hidden = lines.len().saturating_sub(body.height as usize) as u16;
+    let scroll = app.keys_scroll.min(hidden);
+    let left = hidden.saturating_sub(scroll);
+
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), body);
+    frame.render_widget(
+        Paragraph::new(dim(if hidden > 0 {
+            format!("esc closes this \u{b7} up / down scrolls \u{b7} {left} more lines below")
+        } else {
+            "esc closes this".to_string()
+        })),
+        foot,
+    );
+}
+
+/// What a row of the keys dialog is about.
+///
+/// Grouped because a flat list of everything puts "quit" and "what you type is
+/// the task" at the same level, and somebody opening this wants to know how to
+/// start before they want to know how to leave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Section {
+    Writing,
+    Commands,
+    Unavailable,
+    Around,
+}
+
+impl Section {
+    fn heading(self) -> &'static str {
+        match self {
+            Section::Writing => "writing",
+            Section::Commands => "commands",
+            Section::Unavailable => "commands \u{2014} not right now",
+            Section::Around => "getting around",
+        }
+    }
 }
 
 /// The commands, by name, for the times nobody remembers the key.
@@ -4231,6 +4374,32 @@ mod tests {
         assert!(out.contains("esc closes this"), "{out}");
     }
 
+    /// Every command reaches the reference, because the reference is made from
+    /// the same list the palette and the leader read.
+    ///
+    /// It was written out beside that list instead, and a command added to one
+    /// did not reach the other — so the screen somebody opens when they cannot
+    /// remember a key was the screen that did not know the key existed.
+    #[test]
+    fn the_keys_dialog_lists_every_command_there_is() {
+        let mut app = App::new(nowhere(), Vec::new());
+        app.open(Dialog::Keys);
+        // Tall enough that nothing is below the fold, so this is about the
+        // list and not about scrolling.
+        let out = screen(&mut app, 110, 90);
+        for command in Command::ALL {
+            // The chord, not the description: it is short, it is unique to the
+            // command, and it is the thing somebody came here to find. A long
+            // description is clipped to the width of the dialog, which would
+            // make this a test about line length.
+            let chord = format!("{} {}", label(Chord::Leader), command.leader());
+            assert!(
+                out.contains(&chord),
+                "{command:?} is not in the keys dialog:\n{out}"
+            );
+        }
+    }
+
     #[test]
     fn the_command_palette_names_what_it_can_do_and_marks_the_pick() {
         let mut app = App::new(nowhere(), Vec::new());
@@ -4474,8 +4643,10 @@ mod tests {
             "nothing said what was hidden:\n{out}"
         );
 
-        // And where it fits, nothing is trimmed and nothing says it was.
-        let roomy = screen(&mut app, 70, 30);
+        // And where it fits, nothing is hidden and nothing says it is. It
+        // takes a tall terminal now: the commands half is every command, so
+        // the reference is longer than it was when it was written by hand.
+        let roomy = screen(&mut app, 70, 80);
         assert!(roomy.contains("esc closes this"), "{roomy}");
         assert!(!roomy.contains("more line"), "{roomy}");
     }

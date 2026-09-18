@@ -714,6 +714,24 @@ the next one: the row costs the same width and says what there is instead of wha
 to press to find out. Below seventy-two columns the detail moves behind Enter,
 because two columns neither of which can be read is worse than one that can.
 
+**The keys dialog reads the list too, and for a while it did not.** It was
+written out beside `Command::ALL` as an array of its own, so a command added to
+the list did not reach it — the one screen somebody opens when they cannot
+remember a key was the one screen that did not know the key existed. `Go`
+shipped that way. It is derived now, and a test renders it tall and asserts
+every command's chord is on it, which is the assertion that would have caught
+it. What is still written out is the half with no command behind it: typing,
+moving through the task, the mentions.
+
+Three more things that dialog was getting wrong, all of them on the screen
+somebody reads when they are already lost. It said `enter` "run it", which was
+true when a thread opened in auto and is a plain lie in ask. Its key column was
+a fixed thirteen cells, and `ctrl-] / ctrl-[` is fifteen, so that row ran into
+its own description. And it truncated, which meant the key somebody came for
+could be one of the lines it would not show them — it scrolls now, with the way
+out pinned to the last row rather than being the last line of what scrolls,
+because a dialog whose footer can be scrolled off is one somebody is stuck in.
+
 `tui::command::Command` is the list, and the bare key, the `ctrl-x` leader and
 the `ctrl-k` palette all dispatch through one `perform` — three ways to reach
 seven actions, not three implementations that can drift into three slightly

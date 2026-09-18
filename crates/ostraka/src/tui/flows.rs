@@ -1176,8 +1176,18 @@ fn the_palette_reaches_a_command_by_name_and_the_leader_by_letter() {
 
     d.chord('k').typed("keys").key(KeyCode::Enter);
     assert_eq!(d.app.dialog, Some(Dialog::Keys));
-    d.shows("promote a record");
+    d.shows("what you type is the task");
     d.shows(label(Chord::Leader));
+
+    // It lists every command, which is more than fits, so it scrolls rather
+    // than stopping at whatever the terminal happened to have room for.
+    d.shows("more lines below");
+    d.key(KeyCode::End);
+    assert_eq!(d.app.dialog, Some(Dialog::Keys), "scrolling closed it");
+    // The last section, so it really reached the end.
+    d.shows("getting around");
+    // And the way out is on the screen wherever it has been scrolled to.
+    d.shows("esc closes this");
     d.key(KeyCode::Esc);
 
     d.chord('x').key(KeyCode::Char('h'));
