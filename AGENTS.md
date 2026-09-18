@@ -1140,6 +1140,20 @@ decided to release. `check-hygiene.sh` keeps its version equal to the crates'
 and its platform table equal to the release matrix; both drifts were confirmed
 to fail it.
 
+**The curl one-liner is a raw GitHub URL, because `ostraka.sh` was never
+registered.** The naming decision recorded the domain as free and said to claim
+everything on the same day; the registries were claimed and the domains were
+not. `https://ostraka.sh/install` went into the README, `install.sh`'s own
+header, the npm package and every release's notes up to 1.7.0, and it has never
+resolved — `whois` says "Domain not found". Nothing checked, because nothing
+checks a URL in prose.
+
+So every install line points at `raw.githubusercontent.com/bemindlabs/ostraka/main/scripts/install.sh`,
+which is the same script and works. A one-liner that fails at DNS is worse than
+a long one that does not. Shorten it when the domain exists, in all four places
+at once: `README.md`, `scripts/install.sh`, `npm/README.md` and
+`npm/bin/ostraka.js`.
+
 **`scripts/install.sh` takes `OSTRAKA_BASE_URL`.** Without it the script could
 only ever be tested by cutting a real release and watching what happened to
 other people. With a `file://` directory of locally packaged artifacts it runs
