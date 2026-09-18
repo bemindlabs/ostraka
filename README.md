@@ -549,7 +549,7 @@ person — richer routing, and a live view of a run in progress.
 ## Installing
 
 ```console
-curl -fsSL https://ostraka.sh/install | sh     # a binary, no toolchain
+curl -fsSL https://raw.githubusercontent.com/bemindlabs/ostraka/main/scripts/install.sh | sh   # a binary, no toolchain
 npm install -g ostraka                          # downloads the same binary
 cargo install ostraka                           # builds from source
 

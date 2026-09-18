@@ -42,7 +42,7 @@ Nothing merges by itself. An approved run stops at a commit inside its worktree,
 ## Other ways to install
 
 ```console
-curl -fsSL https://ostraka.sh/install | sh     # a binary, no toolchain
+curl -fsSL https://raw.githubusercontent.com/bemindlabs/ostraka/main/scripts/install.sh | sh   # a binary, no toolchain
 cargo install ostraka                           # builds from source
 
 brew tap bemindlabs/ostraka https://github.com/bemindlabs/ostraka

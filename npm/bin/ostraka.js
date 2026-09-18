@@ -20,7 +20,7 @@ if (!existsSync(binary)) {
     "ostraka: no binary here. It is downloaded by a postinstall script, so an " +
       "install run with --ignore-scripts leaves nothing to run.\n" +
       "         Re-run `npm rebuild ostraka`, or install without npm: " +
-      "curl -fsSL https://ostraka.sh/install | sh",
+      "curl -fsSL https://raw.githubusercontent.com/bemindlabs/ostraka/main/scripts/install.sh | sh",
   );
   process.exit(1);
 }

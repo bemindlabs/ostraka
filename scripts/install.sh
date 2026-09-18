@@ -1,10 +1,16 @@
 #!/bin/sh
 # Install ostraka.
 #
-#   curl -fsSL https://ostraka.sh/install | sh
+#   curl -fsSL https://raw.githubusercontent.com/bemindlabs/ostraka/main/scripts/install.sh | sh
 #
 # Downloads a released binary. It deliberately does not use `cargo install`:
 # the point is that installing requires no toolchain.
+#
+# The URL is this file in this repository, and not a short one, because the
+# short one was never real: `ostraka.sh` was noted as free when the name was
+# chosen and never registered, so `https://ostraka.sh/install` — printed by
+# every release up to 1.7.0 — does not resolve. A one-liner that fails at DNS
+# is worse than a long one that works. Shorten it when the domain exists.
 
 set -eu
 
