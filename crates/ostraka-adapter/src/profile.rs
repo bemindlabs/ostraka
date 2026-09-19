@@ -22,6 +22,23 @@ pub enum EventFormat {
     Json,
 }
 
+/// How the task reaches the vendor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptVia {
+    /// Substituted into the argument list at `{{prompt}}`.
+    #[default]
+    Argument,
+    /// Written to the vendor's standard input, which is then closed.
+    ///
+    /// For a CLI that reads its task from stdin when none is given on the
+    /// command line. A review prompt carries the whole diff, and the kernel caps
+    /// a single argument (128 KiB on Linux): past that the vendor cannot even be
+    /// started, and a reviewer that cannot start rejects a change for a reason
+    /// that has nothing to do with it. Stdin has no such ceiling.
+    Stdin,
+}
+
 /// Which side of a run a profile is being invoked for.
 ///
 /// The distinction is a safety property, not a convenience: an author has to be
@@ -42,9 +59,13 @@ fn default_probe_args() -> Vec<String> {
 pub struct Profile {
     pub id: String,
     pub command: String,
-    /// Invocation that writes a change. Must contain `{{prompt}}`.
+    /// Invocation that writes a change. Must contain `{{prompt}}`, unless the
+    /// prompt goes to stdin, in which case it must not.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Where the prompt goes: the argument list by default, or stdin.
+    #[serde(default)]
+    pub prompt_via: PromptVia,
     /// Invocation used when this profile reviews someone else's change.
     ///
     /// Absent means the author invocation is reused. Any profile whose author
@@ -118,26 +139,47 @@ impl Profile {
             });
         }
         let carries_prompt = |args: &[String]| args.iter().any(|a| a.contains("{{prompt}}"));
-        if !carries_prompt(&self.args) {
-            return Err(Error::Profile {
-                id: self.id.clone(),
-                message: "args must place the task somewhere: no {{prompt}} placeholder found"
-                    .to_string(),
-            });
-        }
-        // A review invocation that drops the prompt drops the diff, and a
-        // reviewer with no diff rejects everything for the wrong reason.
-        if self
-            .review_args
-            .as_deref()
-            .is_some_and(|r| !carries_prompt(r))
-        {
-            return Err(Error::Profile {
-                id: self.id.clone(),
-                message: "review_args must place the task somewhere: no {{prompt}} placeholder \
-                          found"
-                    .to_string(),
-            });
+        match self.prompt_via {
+            PromptVia::Argument => {
+                if !carries_prompt(&self.args) {
+                    return Err(Error::Profile {
+                        id: self.id.clone(),
+                        message: "args must place the task somewhere: no {{prompt}} placeholder \
+                                  found"
+                            .to_string(),
+                    });
+                }
+                // A review invocation that drops the prompt drops the diff, and
+                // a reviewer with no diff rejects everything for the wrong
+                // reason.
+                if self
+                    .review_args
+                    .as_deref()
+                    .is_some_and(|r| !carries_prompt(r))
+                {
+                    return Err(Error::Profile {
+                        id: self.id.clone(),
+                        message: "review_args must place the task somewhere: no {{prompt}} \
+                                  placeholder found"
+                            .to_string(),
+                    });
+                }
+            }
+            // The task would arrive twice, and the copy on the command line is
+            // the one that hits the argument limit stdin is there to avoid.
+            PromptVia::Stdin => {
+                let doubled = carries_prompt(&self.args)
+                    || self.review_args.as_deref().is_some_and(carries_prompt)
+                    || carries_prompt(&self.model_args);
+                if doubled {
+                    return Err(Error::Profile {
+                        id: self.id.clone(),
+                        message: "prompt_via is \"stdin\", so args, review_args and \
+                                  model_args must not also carry {{prompt}}"
+                            .to_string(),
+                    });
+                }
+            }
         }
         if let Some(isolation) = &self.isolation {
             isolation.validate(&self.id)?;
@@ -360,6 +402,60 @@ mod tests {
         "#;
         let err = Profile::parse(text).expect_err("must refuse");
         assert!(err.to_string().contains("VENDOR_HOME"), "{err}");
+    }
+
+    #[test]
+    fn a_stdin_profile_needs_no_prompt_placeholder() {
+        let text = r#"
+            id = "s"
+            command = "c"
+            prompt_via = "stdin"
+            args = ["--write"]
+            review_args = ["--read-only"]
+        "#;
+        let p = Profile::parse(text).expect("parses");
+        assert_eq!(p.prompt_via, PromptVia::Stdin);
+        assert_eq!(
+            p.render_args(Role::Review, "go", None, "/wt"),
+            ["--read-only"]
+        );
+    }
+
+    #[test]
+    fn a_stdin_profile_that_also_passes_the_prompt_as_an_argument_is_refused() {
+        for text in [
+            r#"
+                id = "s"
+                command = "c"
+                prompt_via = "stdin"
+                args = ["{{prompt}}"]
+            "#,
+            r#"
+                id = "s"
+                command = "c"
+                prompt_via = "stdin"
+                args = ["--write"]
+                review_args = ["-p", "{{prompt}}"]
+            "#,
+            r#"
+                id = "s"
+                command = "c"
+                prompt_via = "stdin"
+                args = ["--write"]
+                model_args = ["--model", "{{model}}", "--note", "{{prompt}}"]
+            "#,
+        ] {
+            let err = Profile::parse(text).expect_err("must refuse");
+            assert!(err.to_string().contains("prompt_via"), "{err}");
+        }
+    }
+
+    #[test]
+    fn the_prompt_goes_on_the_command_line_by_default() {
+        assert_eq!(
+            Profile::parse(SAMPLE).expect("parses").prompt_via,
+            PromptVia::Argument
+        );
     }
 
     #[test]

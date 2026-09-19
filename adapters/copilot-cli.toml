@@ -20,9 +20,13 @@
 id = "copilot-cli"
 command = "copilot"
 
+# The task goes on stdin, which this CLI reads when `-p` is absent. A review
+# prompt carries the whole diff, and on the command line a large one outgrows
+# the kernel's per-argument limit: the reviewer never starts, and the run is
+# refused with `Argument list too long`.
+prompt_via = "stdin"
+
 args = [
-    "-p",
-    "{{prompt}}",
     "--allow-all-tools",
     "--disable-builtin-mcps",
     "--no-color",
@@ -31,8 +35,6 @@ args = [
 ]
 
 review_args = [
-    "-p",
-    "{{prompt}}",
     "--disable-builtin-mcps",
     "--no-color",
     "--log-level",
