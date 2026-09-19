@@ -72,8 +72,9 @@ pub fn has_a_commit(repo: &Path) -> bool {
 /// Serialized rather than retried: a retry keyed on git's wording is a fix
 /// that stops working when git rewords itself, and adding a worktree takes
 /// milliseconds, so waiting for the one ahead costs nothing a run would
-/// notice. One mutex for every repository rather than one each, for the same
-/// reason.
+/// notice. One process-wide mutex, shared by every repository, rather than
+/// one per repository, for the same reason: two runs on different
+/// repositories wait for each other too, for milliseconds.
 ///
 /// This mutex covers threads in this process. Separate processes on one
 /// repository — two browser windows, a browser and a `drain` — are covered by
@@ -135,7 +136,18 @@ fn common_dir(repo: &Path) -> Option<PathBuf> {
     if !out.status.success() {
         return None;
     }
-    let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    common_dir_from(repo, &String::from_utf8_lossy(&out.stdout))
+}
+
+/// What `git rev-parse --git-common-dir` printed, as a directory.
+fn common_dir_from(repo: &Path, said: &str) -> Option<PathBuf> {
+    let said = said.trim();
+    // Empty would join to the repository itself and put the lock file in the
+    // working tree, where it would reach a diff. No answer is no directory:
+    // the in-process mutex still holds.
+    if said.is_empty() {
+        return None;
+    }
     let dir = PathBuf::from(said);
     Some(if dir.is_absolute() {
         dir
@@ -718,6 +730,20 @@ mod tests {
     /// It is still a race, so this makes the failure likely rather than
     /// certain: with the file lock taken out and only the mutex left, it failed
     /// two runs in six; with it, none in six.
+    /// An empty answer from git is no directory, never the repository itself:
+    /// the lock file must not land in the working tree.
+    #[test]
+    fn an_empty_common_dir_is_no_directory() {
+        let repo = Path::new("/work/repo");
+        assert_eq!(common_dir_from(repo, ""), None);
+        assert_eq!(common_dir_from(repo, " \n"), None);
+        assert_eq!(common_dir_from(repo, ".git\n"), Some(repo.join(".git")));
+        assert_eq!(
+            common_dir_from(repo, "/elsewhere/.git"),
+            Some(PathBuf::from("/elsewhere/.git"))
+        );
+    }
+
     #[test]
     fn processes_making_worktrees_from_one_repository_at_once_all_succeed() {
         // Many processes, few worktrees each: what makes the window likely is
@@ -777,11 +803,29 @@ mod tests {
             .map(|child| child.wait_with_output().expect("the child ends"))
             .filter(|out| !out.status.success())
             .map(|out| {
-                let said = String::from_utf8_lossy(&out.stdout);
+                // The panic is on stderr; the harness's own lines on stdout.
+                // Both, so a failure says why without re-running it.
+                let said = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
                 said.lines()
-                    .find(|l| l.contains("panicked") || l.contains("child"))
-                    .unwrap_or("a child failed")
+                    .filter(|l| l.contains("panicked") || l.contains("child"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .chars()
+                    .take(2000)
+                    .collect::<String>()
+                    .trim()
                     .to_string()
+            })
+            .map(|why| {
+                if why.is_empty() {
+                    "a child failed".to_string()
+                } else {
+                    why
+                }
             })
             .collect();
         assert!(failed.is_empty(), "{failed:#?}");

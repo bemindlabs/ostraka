@@ -1094,9 +1094,9 @@ being made at the same moment has its directory under `.git/worktrees` before it
 has a `commondir` in it. Read in that window, git fails and the run never starts
 — which is what `several_runs_at_once_do_not_collide` hit now and then for long
 enough to be written off as a flaky test. It was not only the test: `drain
---workers N` and panes running together both do exactly this. Both git calls are serialized. Serialized rather than retried, because a retry
-keyed on git's wording stops working when git rewords itself, and an add takes
-milliseconds.
+--workers N` and panes running together both do exactly this. Both git calls
+are serialized rather than retried, because a retry keyed on git's wording
+stops working when git rewords itself, and an add takes milliseconds.
 
 Two locks, because there are two ways to overlap. A process-wide mutex covers
 threads in one process. An OS file lock covers separate processes on one
