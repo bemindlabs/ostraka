@@ -167,15 +167,24 @@ impl VendorAdapter for ProcessAdapter {
         // was started, a probed command that writes wrote into the repository
         // somebody was working in: a test fixture that ignores its arguments
         // did its whole job there, `git add -A` included.
-        let scratch = probe_dir();
+        //
+        // Never the shared temp directory as a fallback: a probe that writes
+        // would write there, beside every other program's files. A probe that
+        // cannot have a directory of its own is not asked.
+        let scratch = match probe_dir() {
+            Ok(dir) => dir,
+            Err(e) => {
+                return Availability::Unusable {
+                    reason: format!("could not make a directory to probe in: {e}"),
+                };
+            }
+        };
         let answer = Command::new(&self.profile.command)
             .args(&self.profile.probe_args)
-            .current_dir(scratch.as_deref().unwrap_or(&std::env::temp_dir()))
+            .current_dir(&scratch)
             .stdin(Stdio::null())
             .output();
-        if let Some(dir) = &scratch {
-            let _ = std::fs::remove_dir_all(dir);
-        }
+        let _ = std::fs::remove_dir_all(&scratch);
         match answer {
             Ok(out) if out.status.success() => Availability::Ready {
                 version: String::from_utf8_lossy(&out.stdout)
@@ -565,14 +574,35 @@ impl Session for ProcessSession {
     }
 }
 
-/// A new, empty directory for one probe to run in, or `None` where one could
-/// not be made — in which case the probe runs in the temp directory itself,
-/// which is still not the caller's.
-fn probe_dir() -> Option<std::path::PathBuf> {
+/// A new, empty directory for one probe to run in, under the temp directory.
+fn probe_dir() -> std::io::Result<std::path::PathBuf> {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("ostraka-probe-{}-{n}", std::process::id()));
-    std::fs::create_dir(&dir).ok().map(|()| dir)
+    fresh_dir(
+        &std::env::temp_dir(),
+        &format!("ostraka-probe-{}-{n}", std::process::id()),
+    )
+}
+
+/// Makes `<base>/<stem>-<k>` for the first `k` nobody has taken.
+///
+/// A name can be taken by a directory another process left behind — a pid is
+/// reused, and a probe killed mid-way never removed its own — so a name that
+/// exists is passed over, not shared: sharing it would hand this probe
+/// whatever the last one wrote. Any other failure is returned as it is.
+fn fresh_dir(base: &Path, stem: &str) -> std::io::Result<std::path::PathBuf> {
+    for k in 0..100 {
+        let dir = base.join(format!("{stem}-{k}"));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("{stem}-0 to {stem}-99 are all taken"),
+    ))
 }
 
 #[cfg(test)]
@@ -604,6 +634,23 @@ mod tests {
             "#
         ))
         .expect("valid profile")
+    }
+
+    /// A name somebody left behind is passed over rather than reused, and a
+    /// failure other than that is an error, not a fall back to somewhere shared.
+    #[test]
+    fn a_probe_directory_is_always_new() {
+        let base = std::env::temp_dir().join(format!("ostraka-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("s-0")).expect("taken");
+        std::fs::create_dir_all(base.join("s-1")).expect("taken");
+        std::fs::write(base.join("s-1/left.txt"), "old").expect("leftover");
+        assert_eq!(fresh_dir(&base, "s").expect("made"), base.join("s-2"));
+        assert!(base.join("s-2").read_dir().expect("dir").next().is_none());
+
+        std::fs::write(base.join("a-file"), "").expect("file");
+        assert!(fresh_dir(&base.join("a-file"), "s").is_err());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Whatever a probe writes, it writes in a directory of its own, which is
