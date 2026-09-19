@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Rust,
-    Node,
+    /// With the package manager its lockfile names, because the gate and the
+    /// install a worktree would otherwise need are that tool's commands.
+    Node(PackageManager),
     Python,
     /// Nothing recognisable. The gate written is one that refuses, because a
     /// gate that passes everything is worse than one that fails loudly.
@@ -55,7 +57,7 @@ impl Kind {
         if project.join("Cargo.toml").is_file() {
             Self::Rust
         } else if project.join("package.json").is_file() {
-            Self::Node
+            Self::Node(PackageManager::of(project))
         } else if project.join("pyproject.toml").is_file()
             || project.join("setup.py").is_file()
             || project.join("requirements.txt").is_file()
@@ -70,9 +72,74 @@ impl Kind {
     pub fn describe(self) -> &'static str {
         match self {
             Self::Rust => "a Rust project",
-            Self::Node => "a Node project",
+            Self::Node(PackageManager::Npm) => "a Node project (npm)",
+            Self::Node(PackageManager::Pnpm) => "a Node project (pnpm)",
+            Self::Node(PackageManager::Yarn) => "a Node project (yarn)",
+            Self::Node(PackageManager::Bun) => "a Node project (bun)",
             Self::Python => "a Python project",
             Self::Unknown => "no recognisable project",
+        }
+    }
+}
+
+/// Which tool a Node project installs and runs its scripts with.
+///
+/// Read from the lockfile, because that is the one file that says which tool
+/// the project is actually used with. `init` used to write `npm test` for every
+/// Node project, which in a pnpm or yarn repository runs a different resolver
+/// against a lockfile it does not read — a gate that can fail, or pass, for
+/// reasons that have nothing to do with the change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageManager {
+    Npm,
+    Pnpm,
+    Yarn,
+    Bun,
+}
+
+impl PackageManager {
+    /// The package manager a project's lockfile names.
+    ///
+    /// Checked in this order where a repository has more than one, and npm
+    /// where it has `package-lock.json` or none: npm is what a bare
+    /// `package.json` is run with, and a stale `package-lock.json` left beside
+    /// another tool's lockfile is the likelier leftover than the other way
+    /// round.
+    pub fn of(project: &Path) -> Self {
+        if project.join("pnpm-lock.yaml").is_file() {
+            Self::Pnpm
+        } else if project.join("yarn.lock").is_file() {
+            Self::Yarn
+        } else if project.join("bun.lockb").is_file() || project.join("bun.lock").is_file() {
+            Self::Bun
+        } else {
+            Self::Npm
+        }
+    }
+
+    /// The command that runs `package.json`'s `test` script.
+    ///
+    /// `bun run test` rather than `bun test`: the second is Bun's own test
+    /// runner, which ignores the script entirely, and the gate is meant to run
+    /// what the project says its tests are — which is what `npm test`,
+    /// `pnpm test` and `yarn test` all do.
+    fn test(self) -> &'static str {
+        match self {
+            Self::Npm => "npm test",
+            Self::Pnpm => "pnpm test",
+            Self::Yarn => "yarn test",
+            Self::Bun => "bun run test",
+        }
+    }
+
+    /// What installing into each worktree would have cost, for the comment
+    /// that explains why `node_modules` is linked instead.
+    fn install(self) -> &'static str {
+        match self {
+            Self::Npm => "npm ci",
+            Self::Pnpm => "pnpm install",
+            Self::Yarn => "yarn install",
+            Self::Bun => "bun install",
         }
     }
 }
@@ -481,7 +548,7 @@ pub(crate) fn config_for(kind: Kind) -> String {
             ("test", "cargo test --workspace"),
             ("build", "cargo build --workspace"),
         ],
-        Kind::Node => vec![("test", "npm test")],
+        Kind::Node(manager) => vec![("test", manager.test())],
         Kind::Python => vec![("test", "python -m pytest")],
         Kind::Unknown => vec![(
             "declare-your-checks",
@@ -537,7 +604,7 @@ pub(crate) fn config_for(kind: Kind) -> String {
          [worktree]\n\
          base = \"worktrees\"\n",
     );
-    out.push_str(link_for(kind));
+    out.push_str(&link_for(kind));
     out
 }
 
@@ -547,21 +614,25 @@ pub(crate) fn config_for(kind: Kind) -> String {
 /// most ecosystems that is exactly the directory the toolchain needs. Detecting
 /// a Node project and writing `npm test` without this hands somebody a gate
 /// that cannot run in the environment Ostraka itself builds.
-fn link_for(kind: Kind) -> &'static str {
+fn link_for(kind: Kind) -> String {
     match kind {
-        Kind::Node => concat!(
-            "\n",
-            "# A worktree is a fresh checkout, so gitignored directories are not in it.\n",
-            "# Linked rather than installed per worktree: `npm ci` in each one costs\n",
-            "# hundreds of megabytes, and linking is instant and free.\n",
-            "link = [\"node_modules\"]\n",
+        // The install named is this project's, so the reason given for linking
+        // is the cost this project would actually pay.
+        Kind::Node(manager) => format!(
+            "\n\
+             # A worktree is a fresh checkout, so gitignored directories are not in it.\n\
+             # Linked rather than installed per worktree: `{}` in each one costs\n\
+             # hundreds of megabytes, and linking is instant and free.\n\
+             link = [\"node_modules\"]\n",
+            manager.install()
         ),
         Kind::Python => concat!(
             "\n",
             "# A worktree is a fresh checkout, so gitignored directories are not in it.\n",
             "# Uncomment whichever your toolchain needs.\n",
             "# link = [\".venv\"]\n",
-        ),
+        )
+        .to_string(),
         Kind::Rust | Kind::Unknown => concat!(
             "\n",
             "# A worktree is a fresh checkout, so anything git ignores is absent from it.\n",
@@ -570,7 +641,8 @@ fn link_for(kind: Kind) -> &'static str {
             "\n",
             "# Or run a command in the worktree before the agent starts.\n",
             "# setup = \"make deps\"\n",
-        ),
+        )
+        .to_string(),
     }
 }
 
@@ -664,8 +736,84 @@ mod tests {
         // cannot execute in a worktree because node_modules is gitignored and
         // therefore absent. Detecting the ecosystem and then handing over an
         // unrunnable gate is worse than not detecting it.
-        let config = ostraka_core::config::Config::parse(&config_for(Kind::Node)).expect("parses");
+        let config =
+            ostraka_core::config::Config::parse(&config_for(Kind::Node(PackageManager::Npm)))
+                .expect("parses");
         assert_eq!(config.worktree.link, ["node_modules"]);
+    }
+
+    /// The lockfile names the tool, and the gate and the install named in the
+    /// comment are that tool's. `npm test` in a pnpm repository runs a
+    /// different resolver against a lockfile it does not read.
+    #[test]
+    fn a_node_projects_lockfile_picks_its_package_manager() {
+        let cases: [(&[&str], PackageManager, &str, &str); 7] = [
+            (&[], PackageManager::Npm, "npm test", "npm ci"),
+            (
+                &["package-lock.json"],
+                PackageManager::Npm,
+                "npm test",
+                "npm ci",
+            ),
+            (
+                &["pnpm-lock.yaml"],
+                PackageManager::Pnpm,
+                "pnpm test",
+                "pnpm install",
+            ),
+            (
+                &["yarn.lock"],
+                PackageManager::Yarn,
+                "yarn test",
+                "yarn install",
+            ),
+            (
+                &["bun.lockb"],
+                PackageManager::Bun,
+                "bun run test",
+                "bun install",
+            ),
+            (
+                &["bun.lock"],
+                PackageManager::Bun,
+                "bun run test",
+                "bun install",
+            ),
+            // A package-lock.json left beside another tool's lockfile is the
+            // likelier leftover, so the other tool wins.
+            (
+                &["package-lock.json", "pnpm-lock.yaml"],
+                PackageManager::Pnpm,
+                "pnpm test",
+                "pnpm install",
+            ),
+        ];
+        for (lockfiles, manager, test, install) in cases {
+            let dir = scratch();
+            std::fs::write(dir.join("package.json"), "{}").expect("package.json");
+            for lockfile in lockfiles {
+                std::fs::write(dir.join(lockfile), "").expect("lockfile");
+            }
+            assert_eq!(Kind::detect(&dir), Kind::Node(manager), "{lockfiles:?}");
+
+            let text = config_for(Kind::detect(&dir));
+            let config = ostraka_core::config::Config::parse(&text).expect("parses");
+            let cmds: Vec<&str> = config.gate.checks.iter().map(|c| c.cmd.as_str()).collect();
+            assert_eq!(cmds, [test], "{lockfiles:?}:\n{text}");
+            assert!(
+                text.contains(&format!("`{install}` in each one")),
+                "{lockfiles:?}: the comment names another tool's install:\n{text}"
+            );
+            assert_eq!(config.worktree.link, ["node_modules"], "{lockfiles:?}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// `bun test` is Bun's own test runner and ignores the `test` script. The
+    /// gate runs what the project says its tests are, as the other three do.
+    #[test]
+    fn bun_runs_the_test_script_rather_than_its_own_runner() {
+        assert_eq!(PackageManager::Bun.test(), "bun run test");
     }
 
     #[test]
@@ -739,7 +887,15 @@ mod tests {
         // The point of writing them is that somebody finds out they exist.
         // `policy.timeout_secs` spent this project's whole life declared and
         // unenforced; a default nobody can see is the next version of that.
-        for kind in [Kind::Rust, Kind::Node, Kind::Python, Kind::Unknown] {
+        for kind in [
+            Kind::Rust,
+            Kind::Node(PackageManager::Npm),
+            Kind::Node(PackageManager::Pnpm),
+            Kind::Node(PackageManager::Yarn),
+            Kind::Node(PackageManager::Bun),
+            Kind::Python,
+            Kind::Unknown,
+        ] {
             let config = ostraka_core::config::Config::parse(&config_for(kind)).expect("parses");
             assert!(
                 config.policy.timeout_secs.is_some(),
@@ -754,7 +910,15 @@ mod tests {
 
     #[test]
     fn every_generated_config_parses_and_validates() {
-        for kind in [Kind::Rust, Kind::Node, Kind::Python, Kind::Unknown] {
+        for kind in [
+            Kind::Rust,
+            Kind::Node(PackageManager::Npm),
+            Kind::Node(PackageManager::Pnpm),
+            Kind::Node(PackageManager::Yarn),
+            Kind::Node(PackageManager::Bun),
+            Kind::Python,
+            Kind::Unknown,
+        ] {
             let text = config_for(kind);
             let parsed = ostraka_core::config::Config::parse(&text)
                 .unwrap_or_else(|e| panic!("{kind:?} did not parse: {e}\n{text}"));
