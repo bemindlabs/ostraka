@@ -611,6 +611,71 @@ pub fn unknown(suite: &Suite, configured: &[String]) -> Vec<String> {
     out
 }
 
+/// What checking a suite's models against its profiles found.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ModelCheck {
+    /// Models a candidate names that its profile does not offer, each with
+    /// what the profile does offer, so the refusal can say what to write.
+    pub unoffered: Vec<(String, String, Vec<String>)>,
+    /// Profiles whose models could not be listed, with why. Nothing named on
+    /// them was checked, and that is said rather than guessed at.
+    pub unchecked: Vec<(String, String)>,
+}
+
+/// Every model a candidate names, against what its profile lists.
+///
+/// The dry run printed the matrix whatever the models said, so a mistyped or
+/// retired model id surfaced as an authoring failure in a paid cell — one per
+/// task it was crossed with. A profile's `[models]` table is where what it can
+/// run is written down, and the model picker already reads it; this reads the
+/// same catalogs.
+///
+/// A candidate naming no model runs its profile's default and has nothing to
+/// check. A profile with no `[models]` table, or whose listing failed or came
+/// back empty, cannot say what it offers, so the models named on it are
+/// reported as unchecked with the reason — not passed as fine, and not refused
+/// on a guess.
+pub fn check_models(suite: &Suite, catalogs: &[crate::models::Catalog]) -> ModelCheck {
+    let mut found = ModelCheck::default();
+    for candidate in &suite.candidates {
+        if candidate.models.is_empty() {
+            continue;
+        }
+        let catalog = catalogs.iter().find(|c| c.profile == candidate.adapter);
+        let why = match catalog {
+            None => Some(format!(
+                "`{}` has no [models] table, so what it can run cannot be listed",
+                candidate.adapter
+            )),
+            Some(c) if c.models.is_empty() => Some(
+                c.note
+                    .clone()
+                    .unwrap_or_else(|| format!("`{}` listed no models", candidate.adapter)),
+            ),
+            Some(c) => c.note.clone(),
+        };
+        if let Some(why) = why {
+            if !found
+                .unchecked
+                .iter()
+                .any(|(id, _)| *id == candidate.adapter)
+            {
+                found.unchecked.push((candidate.adapter.clone(), why));
+            }
+            continue;
+        }
+        let offered = catalog.map(|c| c.models.clone()).unwrap_or_default();
+        for model in &candidate.models {
+            if !offered.contains(model) {
+                found
+                    .unoffered
+                    .push((candidate.adapter.clone(), model.clone(), offered.clone()));
+            }
+        }
+    }
+    found
+}
+
 /// `ostraka bench`.
 pub fn run(workspace: &Workspace, dry_run: bool, json: bool) -> Result<bool, Failure> {
     let suite = load(workspace)?;
@@ -651,6 +716,38 @@ pub fn run(workspace: &Workspace, dry_run: bool, json: bool) -> Result<bool, Fai
     let cells = suite.cells();
 
     if dry_run {
+        // Before the matrix is printed, because the matrix is what somebody
+        // decides to pay for. A model its profile does not offer is refused by
+        // name; a profile that cannot list its models is said to be unchecked.
+        // Listing runs each profile's own listing command, which is why it is
+        // done here and not on every load of the suite.
+        let checked = check_models(&suite, &crate::models::catalogs(&workspace.adapters()));
+        if !checked.unoffered.is_empty() {
+            let lines: Vec<String> = checked
+                .unoffered
+                .iter()
+                .map(|(profile, model, offered)| {
+                    format!(
+                        "  {profile}: `{model}` \u{2014} it offers {}",
+                        if offered.is_empty() {
+                            "nothing".to_string()
+                        } else {
+                            offered.join(", ")
+                        }
+                    )
+                })
+                .collect();
+            return Err(format!(
+                "the benchmark names {} its profile does not offer:\n{}",
+                if lines.len() == 1 {
+                    "a model"
+                } else {
+                    "models"
+                },
+                lines.join("\n")
+            )
+            .into());
+        }
         if json {
             println!(
                 "{}",
@@ -661,9 +758,16 @@ pub fn run(workspace: &Workspace, dry_run: bool, json: bool) -> Result<bool, Fai
                         "reviewer": c.reviewer,
                         "stood_in": c.stood_in,
                     })).collect::<Vec<_>>(),
+                    "unchecked": checked.unchecked.iter().map(|(profile, why)| serde_json::json!({
+                        "profile": profile,
+                        "why": why,
+                    })).collect::<Vec<_>>(),
                 }))?
             );
         } else {
+            for (profile, why) in &checked.unchecked {
+                println!("models on {profile} not checked: {why}");
+            }
             // What it will spend, before it spends it. Every cell is a paid
             // authoring call and a paid review, and a matrix multiplies faster
             // than it reads.
@@ -947,6 +1051,118 @@ adapter = "ref"
             "two candidates, one of which lists two models, is three cells a task"
         );
         assert_eq!(suite.candidates.len(), 2, "and only two candidates");
+    }
+
+    fn catalog(profile: &str, models: &[&str], note: Option<&str>) -> crate::models::Catalog {
+        crate::models::Catalog {
+            profile: profile.to_string(),
+            models: models.iter().map(|m| (*m).to_string()).collect(),
+            note: note.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_model_its_profile_does_not_offer_is_named_and_one_it_does_is_not() {
+        let suite = Suite::parse(SUITE).expect("parses");
+        // `cand` names m1 and m2; `ref` names none and runs its default.
+        let all_there = check_models(&suite, &[catalog("cand", &["m1", "m2", "m3"], None)]);
+        assert_eq!(all_there, ModelCheck::default());
+
+        let one_missing = check_models(&suite, &[catalog("cand", &["m1", "m3"], None)]);
+        assert_eq!(
+            one_missing.unoffered,
+            vec![(
+                "cand".to_string(),
+                "m2".to_string(),
+                vec!["m1".to_string(), "m3".to_string()]
+            )]
+        );
+        assert!(one_missing.unchecked.is_empty());
+    }
+
+    /// A profile that cannot say what it offers is not a profile whose models
+    /// are wrong. Refusing would be a guess, and so would passing them.
+    #[test]
+    fn a_profile_that_cannot_list_its_models_is_said_to_be_unchecked() {
+        let suite = Suite::parse(SUITE).expect("parses");
+
+        let no_table = check_models(&suite, &[]);
+        assert!(no_table.unoffered.is_empty(), "{no_table:?}");
+        assert_eq!(no_table.unchecked.len(), 1, "{no_table:?}");
+        assert_eq!(no_table.unchecked[0].0, "cand");
+        assert!(
+            no_table.unchecked[0].1.contains("no [models] table"),
+            "{no_table:?}"
+        );
+
+        let failed = check_models(
+            &suite,
+            &[catalog("cand", &[], Some("`cand models` could not be run"))],
+        );
+        assert!(failed.unoffered.is_empty(), "{failed:?}");
+        assert_eq!(failed.unchecked[0].1, "`cand models` could not be run");
+    }
+
+    /// The same two paths through `ostraka bench --dry-run` itself, against a
+    /// workspace whose profiles list their models with `known`, so nothing
+    /// is run to find out.
+    #[test]
+    fn the_dry_run_refuses_a_model_by_name_and_reports_what_it_could_not_check() {
+        let dir = std::env::temp_dir().join(format!("ostraka-bench-models-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let adapters = dir.join(".ostraka/adapters");
+        std::fs::create_dir_all(&adapters).expect("adapters");
+        std::fs::create_dir_all(dir.join("repositories/work")).expect("repository");
+        let profile = |id: &str, extra: &str| {
+            std::fs::write(
+                adapters.join(format!("{id}.toml")),
+                format!("id = \"{id}\"\ncommand = \"true\"\nargs = [\"{{{{prompt}}}}\"]\n{extra}"),
+            )
+            .expect("profile");
+        };
+        profile("cand", "\n[models]\nknown = [\"m1\", \"m2\"]\n");
+        profile("plain", "");
+        profile("ref", "");
+        std::fs::write(
+            dir.join(".ostraka/ostraka.toml"),
+            "[gate]\nchecks = [{ name = \"t\", cmd = \"true\", required = true }]\n",
+        )
+        .expect("config");
+        let bench = |candidates: &str| {
+            std::fs::write(
+                dir.join(".ostraka").join(FILE),
+                format!(
+                    "reviewers = [\"ref\"]\n\n[[task]]\nid = \"one\"\nprompt = \"do it\"\n\n{candidates}"
+                ),
+            )
+            .expect("bench");
+        };
+        let workspace = Workspace::at(&dir);
+
+        bench("[[candidate]]\nadapter = \"cand\"\nmodels = [\"m1\", \"m9\"]\n");
+        let refused = run(&workspace, true, true).expect_err("m9 is not offered");
+        let said = refused.to_string();
+        assert!(said.contains("cand"), "{said}");
+        assert!(said.contains("`m9`"), "{said}");
+        assert!(
+            said.contains("m1, m2"),
+            "it did not say what is offered: {said}"
+        );
+
+        bench("[[candidate]]\nadapter = \"cand\"\nmodels = [\"m1\", \"m2\"]\n");
+        assert!(run(&workspace, true, true).expect("offered"));
+
+        // A profile with no [models] table: not refused, and not waved through
+        // silently either — the JSON says it was not checked.
+        bench("[[candidate]]\nadapter = \"plain\"\nmodels = [\"anything\"]\n");
+        assert!(run(&workspace, true, true).expect("unchecked is not a refusal"));
+        let checked = check_models(
+            &load(&workspace).expect("loads"),
+            &crate::models::catalogs(&workspace.adapters()),
+        );
+        assert_eq!(checked.unchecked.len(), 1, "{checked:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
