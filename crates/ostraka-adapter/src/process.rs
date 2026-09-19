@@ -6,12 +6,12 @@
 
 use crate::capability::{Availability, Capabilities};
 use crate::event::normalize_line;
-use crate::profile::{Profile, Role};
+use crate::profile::{Profile, PromptVia, Role};
 use crate::{AdapterOutcome, Error, Result, Session, VendorAdapter};
 use ostraka_core::record::Event;
 use ostraka_core::task::TaskSpec;
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -207,7 +207,13 @@ impl VendorAdapter for ProcessAdapter {
             .env_clear()
             .envs(self.environment()?)
             .current_dir(worktree)
-            .stdin(Stdio::null())
+            // Null unless the prompt goes there: a vendor that reads stdin when
+            // it has nothing to read would otherwise wait on the launcher's
+            // terminal.
+            .stdin(match self.profile.prompt_via {
+                PromptVia::Argument => Stdio::null(),
+                PromptVia::Stdin => Stdio::piped(),
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -215,6 +221,20 @@ impl VendorAdapter for ProcessAdapter {
                 command: self.profile.command.clone(),
                 source,
             })?;
+
+        // Written on a thread of its own, for the same reason the output is
+        // read on one: a vendor that starts talking before it has read the
+        // whole task fills its stdout pipe while this side is still blocked
+        // filling its stdin. Dropping the handle closes stdin, which is how the
+        // vendor knows the task has ended. A write that fails means the vendor
+        // is already gone, and its exit status says why better than a broken
+        // pipe would.
+        if let Some(mut stdin) = child.stdin.take() {
+            let prompt = spec.prompt.clone();
+            std::thread::spawn(move || {
+                let _ = stdin.write_all(prompt.as_bytes());
+            });
+        }
 
         // Both streams are read on their own threads. Stderr must be, or a
         // vendor writing more than a pipe buffer of progress before closing
@@ -648,6 +668,38 @@ mod tests {
                 .is_some_and(|d| d.contains("quota exhausted")),
             "an error event was not quoted: {:?}",
             outcome.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_prompt_too_long_for_the_command_line_reaches_a_stdin_vendor_whole() {
+        // Past the kernel's per-argument ceiling, which is what a review prompt
+        // carrying a large diff hits: the vendor could not even be started.
+        let profile = Profile::parse(
+            r#"
+            id = "stdin-sh"
+            command = "sh"
+            prompt_via = "stdin"
+            args = ["-c", "wc -c"]
+            "#,
+        )
+        .expect("valid profile");
+        let prompt = "diff line\n".repeat(64 * 1024);
+        let spec = TaskSpec {
+            prompt: prompt.clone(),
+            ..spec()
+        };
+        let mut session = ProcessAdapter::new(profile)
+            .launch(&spec, Path::new("."))
+            .expect("launches");
+        let mut said = String::new();
+        while let Some(event) = session.next_event() {
+            said.push_str(&format!("{event:?}"));
+        }
+        assert_eq!(session.finish().exit_code, Some(0));
+        assert!(
+            said.contains(&prompt.len().to_string()),
+            "the vendor did not read the whole prompt: {said}"
         );
     }
 

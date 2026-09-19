@@ -107,6 +107,13 @@ Placeholders substituted into every argument list: `{{prompt}}`, `{{model}}`,
 `{{worktree}}`. Substitution is one pass and non-recursive, so task text cannot
 expand into further placeholders.
 
+`prompt_via = "stdin"` sends the task to the vendor's standard input instead,
+and closes it once the task is written; `args` and `review_args` then must not
+carry `{{prompt}}`. Use it for any CLI that reads its task from stdin. A review
+prompt carries the whole diff, and the kernel caps a single argument (128 KiB on
+Linux), so on the command line a large change cannot be reviewed at all — the
+reviewer fails to start with `Argument list too long`.
+
 ## One vendor, two models
 
 Independence is expressed between profiles, so a reviewer that is the same CLI
