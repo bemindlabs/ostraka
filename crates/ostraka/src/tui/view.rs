@@ -2971,7 +2971,10 @@ fn event_rows(
     width: u16,
 ) -> Vec<Line<'static>> {
     let taken: usize = first.iter().map(|span| span.width()).sum();
-    let room = (width as usize).saturating_sub(taken).max(8);
+    // What is left beside the label, and never more. A floor here would let a
+    // row run past a narrow pane, which is the cut this exists to stop; `fold`
+    // copes with a row of one cell.
+    let room = (width as usize).saturating_sub(taken).max(1);
     fold(text, room)
         .into_iter()
         .enumerate()
@@ -3303,8 +3306,35 @@ mod tests {
             vec!["\u{4e16}\u{4e16}", "\u{4e16}"]
         );
         // No row is ever wider than asked.
-        for row in fold(&"lorem ipsum dolor ".repeat(20), 17) {
-            assert!(row.chars().count() <= 17, "{row:?}");
+        // Measured in display width, the way it is drawn: a character count
+        // would pass rows of wide characters twice as wide as asked.
+        use unicode_width::UnicodeWidthStr;
+        for text in [
+            "lorem ipsum dolor ".repeat(20),
+            "\u{4e16}\u{754c} ".repeat(20),
+            "a\u{4e16}b\u{754c}c".repeat(10),
+        ] {
+            for row in fold(&text, 17) {
+                assert!(row.width() <= 17, "{row:?} is {} wide", row.width());
+            }
+        }
+    }
+
+    /// A pane so narrow the label takes nearly all of it still gets rows that
+    /// fit, rather than rows held to a floor that runs past its edge.
+    #[test]
+    fn a_folded_event_never_runs_past_a_narrow_pane() {
+        use unicode_width::UnicodeWidthStr;
+        let rows = event_rows(
+            vec![Span::raw("| said ")],
+            vec![Span::raw("       ")],
+            &"word ".repeat(10),
+            ratatui::style::Style::default(),
+            10,
+        );
+        for row in &rows {
+            let width: usize = row.spans.iter().map(|s| s.content.width()).sum();
+            assert!(width <= 10, "{row:?} is {width} wide");
         }
     }
 
