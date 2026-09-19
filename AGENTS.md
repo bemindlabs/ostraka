@@ -300,9 +300,24 @@ about this workspace, not about how a repository is verified. A run nobody named
 a reviewer for takes the first profile on the list that exists here, is not the
 author named for it, and answers. Asking and planning take their read-only
 profile from the same list. A name with no profile behind it is skipped, not
-refused, because the list is written once and a machine may lack one CLI. An
-empty or missing list leaves routing's own ordering as it was. `init` writes
-the profiles that review read-only and are handed the repository's instructions.
+refused, because the list is written once and a machine may lack one CLI. `init`
+writes the profiles that review read-only and are handed the repository's
+instructions.
+
+**A profile can say it goes without the repository's rules, and a workspace that
+names no reviewers is not given one that does.** The list above fixed new
+workspaces and left every older one — and every hand-written config — on
+routing's own ordering, where `agy` still won on its id. The fact routing could
+not see is now data: `[instructions] repository = false` in a profile, read by
+the binary from the file the way `[models]` is, so `Profile` gains no field and
+the published parser ignores the table. `Workspace::reviewers` returns the
+workspace's list where it has one, and otherwise the profiles that review
+read-only and do not declare that, in id order. Asking and planning read the
+same list. Where nothing else qualifies the default is empty and routing decides
+as before, so a workspace whose only other profile falls short still gets a
+pair; a profile left out of the default can still be named. An existing
+workspace picks up the declaration through `ostraka check`, which reports the
+missing table, and `ostraka init --upgrade`, which appends it.
 
 **An identity nobody chose is the profile that did the work.** Records and commit
 authors used to say `author` and `reviewer` for every run nobody named anyone
@@ -1037,6 +1052,18 @@ change — reported from a real Next.js onboarding, issue #1.
 the ecosystem and then handing over a gate that cannot run in the environment
 Ostraka itself builds is worse than not detecting it.
 
+The gate is written with the project's own package manager, read from its
+lockfile: `pnpm-lock.yaml` is pnpm, `yarn.lock` is yarn, `bun.lockb` or
+`bun.lock` is bun, and `package-lock.json` or none is npm. It used to be `npm
+test` for every Node project, which in a pnpm or yarn repository runs a
+different resolver against a lockfile it does not read. Bun's is `bun run test`
+and not `bun test`, which is Bun's own test runner and ignores the script — the
+gate runs what the project says its tests are, as `npm test`, `pnpm test` and
+`yarn test` all do. Where a repository has more than one lockfile, pnpm, yarn
+and bun are asked in that order before npm, because a `package-lock.json` left
+beside another tool's lockfile is the likelier leftover. `describe` names the
+tool, so what `init` detected is on the screen.
+
 **Worktrees are released on success only.** The commit is on the run's branch,
 and the diff pane, replay and promotion all read it from there, so the checkout
 is redundant once a run is approved — and a directory per run is how a busy
@@ -1060,6 +1087,18 @@ did not exist was somewhere to take the second task from, and a claim two
 workers cannot both win — `tasks::claim` renames `pending/<id>` to
 `running/<id>`, which is atomic everywhere this ships and tells the loser
 `NotFound`. No lock file, no crate.
+
+**Worktrees are made one at a time, even when runs are not.** `git worktree
+add` and `remove` read every other worktree's metadata while they run, and one
+being made at the same moment has its directory under `.git/worktrees` before it
+has a `commondir` in it. Read in that window, git fails and the run never starts
+— which is what `several_runs_at_once_do_not_collide` hit now and then for long
+enough to be written off as a flaky test. It was not only the test: `drain
+--workers N` and panes running together both do exactly this. A process-wide
+lock in `worktree` serializes the two git calls. Serialized rather than retried,
+because a retry keyed on git's wording stops working when git rewords itself,
+and an add takes milliseconds. Two separate `ostraka` processes on one
+repository are not covered.
 
 **One Ctrl-C stops everything, and one run can be stopped on its own.** The
 process-wide flag stays, because a signal is global: Ctrl-C during
