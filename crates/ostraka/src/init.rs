@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Rust,
-    /// With the package manager its lockfile names, because the gate and the
-    /// install a worktree would otherwise need are that tool's commands.
+    /// With the package manager its lockfile names. The gate runs that tool's
+    /// test script, and installing into a worktree would use that tool too.
     Node(PackageManager),
     Python,
     /// Nothing recognisable. The gate written is one that refuses, because a
@@ -612,7 +612,7 @@ pub(crate) fn config_for(kind: Kind) -> String {
 ///
 /// A worktree is a fresh checkout, so anything git ignores is absent — and for
 /// most ecosystems that is exactly the directory the toolchain needs. Detecting
-/// a Node project and writing `npm test` without this hands somebody a gate
+/// a Node project and writing its test command without this hands somebody a gate
 /// that cannot run in the environment Ostraka itself builds.
 fn link_for(kind: Kind) -> String {
     match kind {
