@@ -1242,17 +1242,20 @@ fn steps_lines(
             }
             Step::Said { event, .. } => {
                 let (kind, text, colour) = describe_event(event);
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("{} ", theme::CONTINUE),
-                        theme::on(phase_colour(phase)),
-                    ),
-                    Span::styled(format!("{kind} "), theme::muted()),
-                    Span::styled(
-                        truncate(&text, width.saturating_sub(8) as usize),
-                        theme::on(colour),
-                    ),
-                ]));
+                let gutter = Span::styled(
+                    format!("{} ", theme::CONTINUE),
+                    theme::on(phase_colour(phase)),
+                );
+                lines.extend(event_rows(
+                    vec![
+                        gutter.clone(),
+                        Span::styled(format!("{kind} "), theme::muted()),
+                    ],
+                    vec![gutter, Span::raw(" ".repeat(kind.len() + 1))],
+                    &text,
+                    theme::on(colour),
+                    width,
+                ));
             }
             Step::Checked(record) => lines.extend(checked_lines(record)),
         }
@@ -1321,9 +1324,13 @@ fn check_mark(record: &CheckRecord) -> (&'static str, &'static str, Color) {
 /// What an event is, said the same way wherever it is shown.
 fn describe_event(event: &Event) -> (&'static str, String, Color) {
     match event {
-        Event::Message { text, .. } => ("said", text.replace('\n', " "), theme::TEXT),
+        // As the vendor wrote it. Flattening newlines here turned a list, a
+        // stack trace or a block of code into one run-on line, and then the
+        // pane cut that line at its width — so what an agent said was never on
+        // the screen whole. `event_rows` folds it to the width instead.
+        Event::Message { text, .. } => ("said", text.clone(), theme::TEXT),
         Event::ToolUse { name, .. } => ("tool", name.clone(), theme::ACCENT),
-        Event::Error { message, .. } => ("err ", message.replace('\n', " "), theme::BAD),
+        Event::Error { message, .. } => ("err ", message.clone(), theme::BAD),
         Event::Finished {
             exit_code,
             files_touched,
@@ -1355,7 +1362,7 @@ fn render_record(frame: &mut Frame, app: &mut App, area: Rect) {
     lines.push(theme::rule(area.width));
     match app.detail {
         Detail::Checks => lines.extend(check_lines(app, &run)),
-        Detail::Events => lines.extend(event_lines(app)),
+        Detail::Events => lines.extend(event_lines(app, area.width)),
         Detail::Diff => lines.extend(diff_lines(app)),
     }
 
@@ -2929,19 +2936,103 @@ fn check_lines(app: &App, run: &RunSummary) -> Vec<Line<'static>> {
     lines
 }
 
-fn event_lines(app: &App) -> Vec<Line<'static>> {
+fn event_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     if app.events.is_empty() {
         return vec![dim("no events recorded".to_string())];
     }
     let mut lines = Vec::new();
     for event in &app.events {
         let (kind, text, colour) = describe_event(event);
-        lines.push(Line::from(vec![
-            Span::styled(format!("{kind} "), theme::muted()),
-            Span::styled(text, theme::on(colour)),
-        ]));
+        lines.extend(event_rows(
+            vec![Span::styled(format!("{kind} "), theme::muted())],
+            vec![Span::raw(" ".repeat(kind.len() + 1))],
+            &text,
+            theme::on(colour),
+            width,
+        ));
     }
     lines
+}
+
+/// One event, as many rows as its text needs at this width.
+///
+/// The first row carries `first` in front of it and the rest carry `rest`,
+/// which is the same width in blanks, so a folded message reads as one block
+/// under its label rather than wrapping back to the margin.
+///
+/// Folded, not cut. The pane used to cut every event to one row with an
+/// ellipsis, so an agent's longer answers — the ones worth reading — were
+/// never on the screen whole, and selecting them copied the ellipsis too.
+fn event_rows(
+    first: Vec<Span<'static>>,
+    rest: Vec<Span<'static>>,
+    text: &str,
+    style: ratatui::style::Style,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let taken: usize = first.iter().map(|span| span.width()).sum();
+    // What is left beside the label, and never more. A floor here would let a
+    // row run past a narrow pane, which is the cut this exists to stop; `fold`
+    // copes with a row of one cell.
+    let room = (width as usize).saturating_sub(taken).max(1);
+    fold(text, room)
+        .into_iter()
+        .enumerate()
+        .map(|(n, row)| {
+            let mut spans = if n == 0 { first.clone() } else { rest.clone() };
+            spans.push(Span::styled(row, style));
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// Text broken into rows no wider than `width` display columns.
+///
+/// Unlike `wrap`, which is for sentences this screen writes, this is for what
+/// a vendor wrote: its own line breaks are kept, its indentation is kept, and
+/// a word longer than the row — a path, a hash, a URL — is broken rather than
+/// left to run off the edge. A row breaks at the last space that fits where
+/// there is one. Widths are display widths, so a wide character counts as the
+/// two cells it takes.
+fn fold(text: &str, width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    for source in text.split('\n') {
+        let source = source.trim_end_matches('\r');
+        let mut row = String::new();
+        let mut used = 0usize;
+        // Where the row could be broken at a space: the byte offset after it,
+        // and the width up to it.
+        let mut space: Option<(usize, usize)> = None;
+        for character in source.chars() {
+            let cells = UnicodeWidthChar::width(character).unwrap_or(0);
+            if used + cells > width && !row.is_empty() {
+                match space.take() {
+                    // Broken after the last space that fit. The space stays on
+                    // the row it ends, and is trimmed off it.
+                    Some((at, before)) => {
+                        let tail = row.split_off(at);
+                        rows.push(row.trim_end().to_string());
+                        row = tail;
+                        used -= before;
+                    }
+                    // No space to break at: a word longer than the row.
+                    None => {
+                        rows.push(std::mem::take(&mut row));
+                        used = 0;
+                    }
+                }
+            }
+            row.push(character);
+            used += cells;
+            if character == ' ' {
+                space = Some((row.len(), used));
+            }
+        }
+        rows.push(row);
+    }
+    rows
 }
 
 fn diff_lines(app: &App) -> Vec<Line<'static>> {
@@ -3156,6 +3247,94 @@ mod tests {
             outcome: Some(outcome),
             summary: summary.to_string(),
             plan: None,
+        }
+    }
+
+    /// What an agent said is on the screen whole. It was cut to one row with an
+    /// ellipsis, so a long answer — the kind worth reading — never was, and
+    /// selecting it copied the ellipsis.
+    #[test]
+    fn what_an_agent_said_is_folded_to_the_pane_rather_than_cut() {
+        let mut app = App::new(nowhere(), Vec::new());
+        let long = format!("START {} END", "word ".repeat(40));
+        turn(
+            &mut app,
+            "say something long",
+            vec![
+                Step::Entered(Phase::Authoring),
+                said(Phase::Authoring, &long),
+                said(Phase::Authoring, "first line\n  indented second\nthird"),
+            ],
+            Some(finished(
+                "t1-20260920T000000Z",
+                Outcome::Approved,
+                "approved",
+            )),
+        );
+        let out = screen(&mut app, 80, 40);
+        assert!(out.contains("START"), "{out}");
+        assert!(out.contains("END"), "the end of it was cut:\n{out}");
+        // Asked of the transcript's own rows: the status line under it is
+        // shortened to fit on purpose, and is not what this is about.
+        assert!(
+            !out.lines()
+                .any(|l| l.contains("word") && l.contains('\u{2026}')),
+            "an ellipsis stands in for text:\n{out}"
+        );
+        // Its own line breaks are kept, indentation included, rather than being
+        // run together into one line.
+        assert!(out.contains("first line"), "{out}");
+        assert!(out.contains("  indented second"), "{out}");
+        assert!(
+            !out.contains("first line   indented"),
+            "the line breaks were flattened:\n{out}"
+        );
+    }
+
+    #[test]
+    fn fold_keeps_line_breaks_and_breaks_at_a_space_that_fits() {
+        assert_eq!(fold("", 10), vec![String::new()]);
+        assert_eq!(fold("one two three", 8), vec!["one two", "three"]);
+        assert_eq!(fold("a\nb", 10), vec!["a", "b"]);
+        // Indentation is part of what was said.
+        assert_eq!(fold("  x", 10), vec!["  x"]);
+        // A word longer than the row is broken rather than left to run off it.
+        assert_eq!(fold("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        // Widths are display widths: a wide character takes two cells.
+        assert_eq!(
+            fold("\u{4e16}\u{4e16}\u{4e16}", 4),
+            vec!["\u{4e16}\u{4e16}", "\u{4e16}"]
+        );
+        // No row is ever wider than asked.
+        // Measured in display width, the way it is drawn: a character count
+        // would pass rows of wide characters twice as wide as asked.
+        use unicode_width::UnicodeWidthStr;
+        for text in [
+            "lorem ipsum dolor ".repeat(20),
+            "\u{4e16}\u{754c} ".repeat(20),
+            "a\u{4e16}b\u{754c}c".repeat(10),
+        ] {
+            for row in fold(&text, 17) {
+                assert!(row.width() <= 17, "{row:?} is {} wide", row.width());
+            }
+        }
+    }
+
+    /// A pane so narrow the label takes nearly all of it still gets rows that
+    /// fit, rather than rows held to a floor that runs past its edge.
+    #[test]
+    fn a_folded_event_never_runs_past_a_narrow_pane() {
+        use unicode_width::UnicodeWidthStr;
+        let rows = event_rows(
+            vec![Span::raw("| said ")],
+            vec![Span::raw("       ")],
+            &"word ".repeat(10),
+            ratatui::style::Style::default(),
+            10,
+        );
+        for row in &rows {
+            let width: usize = row.spans.iter().map(|s| s.content.width()).sum();
+            assert!(width <= 10, "{row:?} is {width} wide");
         }
     }
 
