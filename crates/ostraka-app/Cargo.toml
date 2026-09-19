@@ -2,7 +2,9 @@
 name = "ostraka-app"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# Higher than the workspace's. The window draws with egui 0.36, which needs
+# 1.95; the command line does not depend on it and keeps the lower floor.
+rust-version = "1.95"
 license.workspace = true
 repository.workspace = true
 authors.workspace = true

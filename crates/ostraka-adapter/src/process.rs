@@ -482,16 +482,16 @@ impl Session for ProcessSession {
         // status says. A non-zero exit keeps its own code and its own words,
         // which explain the failure better than the broken pipe does.
         let mut undelivered = None;
-        if !self.timed_out && !self.interrupted {
-            if let Some(Ok(Err(e))) = self.stdin_writer.take().map(JoinHandle::join) {
-                if exit_code == Some(0) {
-                    exit_code = None;
-                    undelivered = Some(format!(
-                        "the prompt was not delivered on stdin: {e}; the vendor exited \
+        if !self.timed_out
+            && !self.interrupted
+            && let Some(Ok(Err(e))) = self.stdin_writer.take().map(JoinHandle::join)
+            && exit_code == Some(0)
+        {
+            exit_code = None;
+            undelivered = Some(format!(
+                "the prompt was not delivered on stdin: {e}; the vendor exited \
                          before reading all of it"
-                    ));
-                }
-            }
+            ));
         }
         // Joined only when the vendor ended on its own. After a kill a
         // grandchild may still hold the pipes, and joining would reintroduce

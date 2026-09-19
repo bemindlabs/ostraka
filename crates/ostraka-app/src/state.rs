@@ -174,13 +174,12 @@ impl State {
         let Some(run_id) = self.selected_run().map(|r| r.run_id.clone()) else {
             return;
         };
-        if self.record.is_none() {
-            if let Ok((record, events)) =
+        if self.record.is_none()
+            && let Ok((record, events)) =
                 orchestrator::replay(&self.project.join(".ostraka"), &run_id)
-            {
-                self.record = Some(record);
-                self.events = events;
-            }
+        {
+            self.record = Some(record);
+            self.events = events;
         }
         if self.detail == Detail::Diff && self.diff.is_none() {
             self.diff = Some(index::diff(&self.project, &run_id).ok().flatten());

@@ -266,10 +266,10 @@ impl Thread {
         // The chain advances only through the gate. A refused run leaves the
         // next task starting where this one did, because building on a change
         // the gate would not take is a way of taking it.
-        if turn.approved() {
-            if let Some(id) = &ended {
-                self.base_ref = format!("ostraka/{id}");
-            }
+        if turn.approved()
+            && let Some(id) = &ended
+        {
+            self.base_ref = format!("ostraka/{id}");
         }
         self.turns.push(turn);
         ended

@@ -109,10 +109,9 @@ fn reader(
     // is handed the repository's own rules, is the reason to prefer it here.
     if let Some(id) = run::preferred_reviewer(preferred, profiles, None, |p| {
         p.review_args.is_some() && ProcessAdapter::new(p.clone()).probe().is_ready()
-    }) {
-        if let Some(profile) = profiles.iter().find(|p| p.id == id) {
-            return Ok(profile.clone());
-        }
+    }) && let Some(profile) = profiles.iter().find(|p| p.id == id)
+    {
+        return Ok(profile.clone());
     }
     let mut readers: Vec<&Profile> = profiles
         .iter()

@@ -403,10 +403,10 @@ fn take_stock(app: &mut App, records_root: &Path) {
     // A vendor that could not run, in the pane in front, offered another
     // profile. Never over a dialog somebody has open: the offer waits on the
     // thread until the screen is free, or until that pane is in front.
-    if app.dialog.is_none() {
-        if let Some(offer) = app.pane_mut().thread.offer.take() {
-            offer_fallback(app, offer);
-        }
+    if app.dialog.is_none()
+        && let Some(offer) = app.pane_mut().thread.offer.take()
+    {
+        offer_fallback(app, offer);
     }
     if let Some(rx) = app.agents_loading.take() {
         match rx.try_recv() {
@@ -460,18 +460,17 @@ fn finished_run(app: &mut App, records_root: &Path, at: usize, run_id: Option<St
         app.runs = runs;
         app.refilter();
     }
-    if let Some(id) = run_id {
-        if let Some(at) = app
+    if let Some(id) = run_id
+        && let Some(at) = app
             .matching
             .iter()
             .position(|i| app.runs.get(*i).is_some_and(|run| run.run_id == id))
-        {
-            // Selected, so that looking the run up afterwards lands on it
-            // rather than on whatever was selected before it started.
-            app.selected = at;
-            app.forget_detail();
-            load_detail(app, records_root);
-        }
+    {
+        // Selected, so that looking the run up afterwards lands on it
+        // rather than on whatever was selected before it started.
+        app.selected = at;
+        app.forget_detail();
+        load_detail(app, records_root);
     }
 }
 
@@ -1040,15 +1039,15 @@ fn settings_key(app: &mut App, code: KeyCode) {
             app.open(Dialog::Agents);
         }
         KeyCode::Enter => {
-            if let Some((_, value, editable)) = rows.get(app.pick) {
-                if *editable {
-                    // Starts from what is there, because most changes are edits.
-                    app.editing = Some(if value == "\u{2014}" {
-                        String::new()
-                    } else {
-                        value.clone()
-                    });
-                }
+            if let Some((_, value, editable)) = rows.get(app.pick)
+                && *editable
+            {
+                // Starts from what is there, because most changes are edits.
+                app.editing = Some(if value == "\u{2014}" {
+                    String::new()
+                } else {
+                    value.clone()
+                });
             }
         }
         _ => {}
@@ -1557,11 +1556,11 @@ fn load_detail(app: &mut App, records_root: &Path) {
     let Some(run) = app.current().map(|r| r.run_id.clone()) else {
         return;
     };
-    if app.record.is_none() {
-        if let Ok((record, events)) = orchestrator::replay(records_root, &run) {
-            app.record = Some(record);
-            app.events = events;
-        }
+    if app.record.is_none()
+        && let Ok((record, events)) = orchestrator::replay(records_root, &run)
+    {
+        app.record = Some(record);
+        app.events = events;
     }
     // The diff costs a git call, so it is fetched only when someone asks to see
     // one — moving down a list of fifty runs should not shell out fifty times.
