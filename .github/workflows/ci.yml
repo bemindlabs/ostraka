@@ -50,5 +50,16 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: test
         run: cargo test --workspace --locked
+      # Not one of the four: a check on the tests rather than on the code. A
+      # test that writes into the checkout it runs from leaves debris that the
+      # next `git add -A` commits, so a run must leave the tree as it found it.
+      - name: tests leave the checkout clean
+        run: |
+          dirty=$(git status --porcelain)
+          if [ -n "$dirty" ]; then
+            echo "the test run changed the checkout:"
+            echo "$dirty"
+            exit 1
+          fi
       - name: build
         run: cargo build --workspace --locked

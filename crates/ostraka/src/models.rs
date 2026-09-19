@@ -89,6 +89,34 @@ pub fn catalogs(adapters: &Path) -> Vec<Catalog> {
         .collect()
 }
 
+/// The catalogs of only the profiles named in `ids`.
+///
+/// Listing runs each profile's own listing command, some of them over the
+/// network, so a caller that needs a few profiles must not pay for all of
+/// them: `bench --dry-run` listing every profile in a workspace went from
+/// instant to eight seconds to check the models of one. Each file's id is read
+/// without listing anything, and only the named ones are listed.
+pub fn catalogs_of(adapters: &Path, ids: &[String]) -> Vec<Catalog> {
+    #[derive(serde::Deserialize)]
+    struct Id {
+        id: String,
+    }
+    let Ok(entries) = std::fs::read_dir(adapters) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<_> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+        .collect();
+    paths.sort();
+    paths
+        .iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .filter(|text| toml::from_str::<Id>(text).is_ok_and(|file| ids.contains(&file.id)))
+        .filter_map(|text| catalog(&text))
+        .collect()
+}
+
 /// One profile's catalog, from the text of its file. `None` where the file
 /// does not parse or says nothing about models.
 pub fn catalog(text: &str) -> Option<Catalog> {
@@ -309,5 +337,50 @@ mod tests {
             started.elapsed() < LISTING,
             "the writer blocked on a full pipe"
         );
+    }
+    /// Only the profiles named are listed. The others' listing commands are
+    /// never run — each one writes a marker if it is, into this test's own
+    /// scratch directory and nowhere else.
+    #[test]
+    fn only_the_profiles_named_are_listed() {
+        let dir = std::env::temp_dir().join(format!("ostraka-models-named-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        for id in ["wanted", "unwanted"] {
+            let script = dir.join(format!("{id}.sh"));
+            std::fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\ntouch '{}'\necho {id}-model\n",
+                    dir.join(format!("{id}.listed")).display()
+                ),
+            )
+            .expect("script");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod");
+            }
+            std::fs::write(
+                dir.join(format!("{id}.toml")),
+                format!(
+                    "id = \"{id}\"\ncommand = \"{}\"\nargs = [\"{{{{prompt}}}}\"]\n\n[models]\nargs = []\n",
+                    script.display()
+                ),
+            )
+            .expect("profile");
+        }
+
+        let found = catalogs_of(&dir, &["wanted".to_string()]);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].profile, "wanted");
+        assert_eq!(found[0].models, ["wanted-model"]);
+        assert!(dir.join("wanted.listed").exists());
+        assert!(
+            !dir.join("unwanted.listed").exists(),
+            "a profile nobody named had its listing command run"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

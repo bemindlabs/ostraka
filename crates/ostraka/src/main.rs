@@ -126,7 +126,9 @@ enum Commands {
     /// constant across them. Every cell is a full run, so a matrix costs what
     /// its size says it does; `--dry-run` prints that size without spending it.
     Bench {
-        /// Print the matrix and stop. Nothing is run and no vendor is called.
+        /// Print the matrix and stop. No task is run, and no vendor is asked
+        /// to write or review. For each candidate that names models, its
+        /// profile's model listing command is run, to check those models exist.
         #[arg(long)]
         dry_run: bool,
     },
