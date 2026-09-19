@@ -99,8 +99,10 @@ struct LayoutTable {
 /// repository is verified, and the published `Config` stays untouched.
 #[derive(Debug, Default, serde::Deserialize)]
 struct RoutingTable {
+    /// `None` where the key is absent, which takes the default; an empty list
+    /// written out is a choice — leave it to routing — and is kept as one.
     #[serde(default)]
-    reviewers: Vec<String>,
+    reviewers: Option<Vec<String>>,
 }
 
 /// A path somebody wrote down, made into one this process can use.
@@ -553,8 +555,9 @@ impl Workspace {
     /// a reviewer for. Read when asked: it is a file somebody edits.
     ///
     /// `[routing] reviewers` where the workspace says, and it always wins —
-    /// which profiles judge changes here is the operator's call. Where it says
-    /// nothing, the profiles that can review read-only and are handed the
+    /// which profiles judge changes here is the operator's call, and that
+    /// includes `reviewers = []`, which leaves the choice to routing as it was.
+    /// Where the key is absent, the profiles that can review read-only and are handed the
     /// repository's own rules, in id order. Empty where there are none of
     /// those, which leaves the choice to routing, so a workspace whose only
     /// other profile falls short still gets a pair.
@@ -569,12 +572,13 @@ impl Workspace {
         let listed = std::fs::read_to_string(self.config_path())
             .ok()
             .and_then(|text| toml::from_str::<Layout>(&text).ok())
-            .map(|layout| layout.routing.reviewers)
-            .unwrap_or_default();
-        if !listed.is_empty() {
-            return listed;
+            .and_then(|layout| layout.routing.reviewers);
+        match listed {
+            // Written down, even empty: an empty list is somebody saying to
+            // leave the choice to routing, not somebody saying nothing.
+            Some(listed) => listed,
+            None => self.reviews_with_the_rules(),
         }
-        self.reviews_with_the_rules()
     }
 
     /// Profiles that review read-only and do not say they go without the
@@ -1052,6 +1056,17 @@ mod tests {
         assert_eq!(
             Workspace::at(&dir).reviewers(),
             vec!["agy".to_string(), "codex".to_string()]
+        );
+
+        // An empty list written out is a choice too: leave it to routing.
+        std::fs::write(
+            dir.join(".ostraka/ostraka.toml"),
+            "[gate]\nchecks = []\n\n[routing]\nreviewers = []\n",
+        )
+        .expect("config");
+        assert!(
+            Workspace::at(&dir).reviewers().is_empty(),
+            "an empty list was replaced by the default"
         );
 
         std::fs::remove_dir_all(&dir).ok();
