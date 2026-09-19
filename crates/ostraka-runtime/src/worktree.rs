@@ -58,10 +58,37 @@ pub fn has_a_commit(repo: &Path) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// One `git worktree add` or `remove` at a time, across this process.
+///
+/// Both read every other worktree's metadata under `.git/worktrees` while
+/// they run, and a worktree being made at the same moment has its directory
+/// there before it has a `commondir` in it. Read in that window, git fails
+/// with "failed to read .git/worktrees/…/commondir" and the run never starts.
+/// `drain --workers N` and several panes running at once both make worktrees
+/// from one repository concurrently, so this was a real failure and not only
+/// a flaky test — `several_runs_at_once_do_not_collide` hit it now and then,
+/// and a sixteen-at-a-time test reproduces it on demand.
+///
+/// Serialized rather than retried: a retry keyed on git's wording is a fix
+/// that stops working when git rewords itself, and adding a worktree takes
+/// milliseconds, so waiting for the one ahead costs nothing a run would
+/// notice. One lock for every repository rather than one each, for the same
+/// reason. It covers threads in this process, which is how both of those run;
+/// two separate `ostraka` processes on one repository are not covered.
+static GIT_WORKTREES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The lock, held for as long as git is changing `.git/worktrees`. A poisoned
+/// lock is still a lock: the thread that panicked left nothing half-done that
+/// the next `git` call depends on.
+fn worktrees_lock() -> std::sync::MutexGuard<'static, ()> {
+    GIT_WORKTREES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub fn create(repo: &Path, base: &Path, run_id: &str, base_ref: &str) -> Result<Worktree> {
     let path = base.join(run_id);
     let branch = format!("ostraka/{run_id}");
 
+    let _held = worktrees_lock();
     let out = Command::new("git")
         .args(["worktree", "add", "-b", &branch])
         .arg(&path)
@@ -511,6 +538,7 @@ pub fn release_path(repo: &Path, path: &Path) -> Result<()> {
 }
 
 fn remove_checkout(repo: &Path, path: &Path) -> Result<()> {
+    let _held = worktrees_lock();
     let out = Command::new("git")
         .args(["worktree", "remove", "--force"])
         .arg(path)
@@ -559,6 +587,63 @@ mod tests {
             link: link.iter().map(|s| (*s).to_string()).collect(),
             setup: setup.map(str::to_string),
         }
+    }
+
+    /// Many worktrees made at once from one repository, which is what
+    /// `drain --workers N` and several panes running together both do.
+    ///
+    /// `git worktree add` reads every other worktree's metadata while it runs,
+    /// and one being made at the same moment has a directory under
+    /// `.git/worktrees` before it has a `commondir` in it. Read in that
+    /// window, git fails with "failed to read .git/worktrees/…/commondir" — the
+    /// error `several_runs_at_once_do_not_collide` hit now and then.
+    ///
+    /// Forty-eight at once, three times over. What makes the window likely is
+    /// how many overlap, not how many rounds there are: sixteen at a time over
+    /// eight rounds failed the unlocked code once in six runs, and forty-eight
+    /// at a time over three failed it four in six. It is still a race, so it
+    /// is likely rather than certain; the lock costs about three seconds here
+    /// because every one of those adds now waits its turn.
+    #[test]
+    fn worktrees_made_at_the_same_time_from_one_repository_all_succeed() {
+        let dir = scratch("parallel-add");
+        let repo = dir.join("project");
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.invalid"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(repo.join("f"), "x\n").expect("write");
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "seed"]);
+
+        for round in 0..3 {
+            let failures: Vec<String> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..48)
+                    .map(|n| {
+                        let repo = repo.clone();
+                        let base = dir.join("wt");
+                        scope.spawn(move || create(&repo, &base, &format!("r{round}-{n}"), "HEAD"))
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .filter_map(|h| h.join().expect("thread").err().map(|e| e.to_string()))
+                    .collect()
+            });
+            assert!(failures.is_empty(), "round {round}: {failures:#?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
