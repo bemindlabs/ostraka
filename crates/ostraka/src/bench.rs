@@ -724,7 +724,19 @@ pub fn run(workspace: &Workspace, dry_run: bool, json: bool) -> Result<bool, Fai
         // name; a profile that cannot list its models is said to be unchecked.
         // Listing runs each profile's own listing command, which is why it is
         // done here and not on every load of the suite.
-        let checked = check_models(&suite, &crate::models::catalogs(&workspace.adapters()));
+        // Only the candidates that name a model: a candidate on its profile's
+        // default has nothing to check, and a profile the suite does not use
+        // is none of this dry run's business.
+        let named: Vec<String> = suite
+            .candidates
+            .iter()
+            .filter(|c| !c.models.is_empty())
+            .map(|c| c.adapter.clone())
+            .collect();
+        let checked = check_models(
+            &suite,
+            &crate::models::catalogs_of(&workspace.adapters(), &named),
+        );
         if !checked.unoffered.is_empty() {
             let lines: Vec<String> = checked
                 .unoffered
