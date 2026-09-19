@@ -1061,6 +1061,18 @@ workers cannot both win — `tasks::claim` renames `pending/<id>` to
 `running/<id>`, which is atomic everywhere this ships and tells the loser
 `NotFound`. No lock file, no crate.
 
+**Worktrees are made one at a time, even when runs are not.** `git worktree
+add` and `remove` read every other worktree's metadata while they run, and one
+being made at the same moment has its directory under `.git/worktrees` before it
+has a `commondir` in it. Read in that window, git fails and the run never starts
+— which is what `several_runs_at_once_do_not_collide` hit now and then for long
+enough to be written off as a flaky test. It was not only the test: `drain
+--workers N` and panes running together both do exactly this. A process-wide
+lock in `worktree` serializes the two git calls. Serialized rather than retried,
+because a retry keyed on git's wording stops working when git rewords itself,
+and an add takes milliseconds. Two separate `ostraka` processes on one
+repository are not covered.
+
 **One Ctrl-C stops everything, and one run can be stopped on its own.** The
 process-wide flag stays, because a signal is global: Ctrl-C during
 `drain --workers` stops every worker. Beside it, each run carries a `Stop` of
