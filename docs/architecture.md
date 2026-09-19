@@ -3,11 +3,54 @@
 Five diagrams of what the code on `main` does, checked against it rather than
 against a plan. They are Mermaid, so GitHub renders them in place.
 
+- [Who this is for, and what it answers](#who-this-is-for-and-what-it-answers)
 - [The big picture](#the-big-picture)
 - [One run, step by step](#one-run-step-by-step)
 - [From task to merged change](#from-task-to-merged-change)
 - [Several runs at once](#several-runs-at-once)
 - [The crates](#the-crates)
+
+## Who this is for, and what it answers
+
+This description is organized the way ISO/IEC/IEEE 42010 organizes an
+architecture description: the people it is for, the questions they bring to
+it, and one view per question, each drawn from a stated point of view. It
+describes the architecture; it makes no claim about anybody's conformance to
+that standard.
+
+**Stakeholders**
+
+| Stakeholder | Who they are |
+|---|---|
+| Operator | Runs Ostraka: writes tasks, starts runs, reads what came of them. |
+| Merging person | Decides whether an approved change reaches `main`. |
+| Profile author | Adds or edits an agent CLI's profile in `adapters/`. |
+| Contributor | Changes Ostraka's own code. |
+| Quality lead | Answers for how changes are verified and what is recorded. |
+
+**Concerns**
+
+| # | Concern |
+|---|---|
+| C1 | Can a change reach a branch without passing the checks and a review by someone other than its author? |
+| C2 | What runs where, and what does Ostraka write, and where? |
+| C3 | How does a run end, and what can a person do next? |
+| C4 | What happens when several runs are going at once? |
+| C5 | Where does anything specific to one agent CLI live, and what does adding one take? |
+
+**Viewpoints and the views below**
+
+| View | Viewpoint | For | Addresses |
+|---|---|---|---|
+| [The big picture](#the-big-picture) | Context: the parts, the places they write, and who calls whom | operator, profile author, quality lead | C2, C5 |
+| [One run, step by step](#one-run-step-by-step) | Behaviour: one run as an ordered exchange | operator, merging person, quality lead | C1, C3 |
+| [From task to merged change](#from-task-to-merged-change) | State: a task's life and the outcomes a record can hold | operator, merging person | C1, C3 |
+| [Several runs at once](#several-runs-at-once) | Concurrency: what runs in parallel and what is serialized | operator, contributor | C4 |
+| [The crates](#the-crates) | Module: crates and what each depends on | contributor, profile author | C5 |
+
+The reasons behind each view are the settled decisions in
+[`AGENTS.md`](../AGENTS.md); where a view and the code disagree, the code is
+right and this page is the bug.
 
 ## The big picture
 
@@ -221,6 +264,11 @@ flowchart TB
         c3["claim a task"] --> x3["run it: worktree, author, checks, review"]
     end
 
+    Lock{{"worktree lock, one git worktree call at a time in this process"}}
+    x1 -.-> Lock
+    x2 -.-> Lock
+    x3 -.-> Lock
+
     x1 --> Runs[".ostraka/runs"]
     x2 --> Runs
     x3 --> Runs
@@ -232,6 +280,14 @@ flowchart TB
 Claiming a task renames it from `pending` to `running`. The rename is atomic,
 so two workers cannot take the same task, and no lock file is needed. One
 Ctrl-C stops every worker; each run can also be stopped on its own.
+
+Making and removing worktrees is the one step that is not parallel. `git
+worktree add` reads every other worktree's metadata while it runs, and one
+being made at the same moment can be caught half-written, so a process-wide
+lock lets only one of those git calls run at a time. That covers the workers of
+one `drain`, and panes running together in one browser. Two separate processes
+on one repository — two browser windows, or a browser and a `drain` in another
+shell — are not serialized by it.
 
 `ostraka bench` uses the same machinery for comparison: every task in
 `.ostraka/bench.toml` crossed with every candidate profile and model, reviewers
