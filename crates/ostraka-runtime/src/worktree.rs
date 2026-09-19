@@ -72,23 +72,83 @@ pub fn has_a_commit(repo: &Path) -> bool {
 /// Serialized rather than retried: a retry keyed on git's wording is a fix
 /// that stops working when git rewords itself, and adding a worktree takes
 /// milliseconds, so waiting for the one ahead costs nothing a run would
-/// notice. One lock for every repository rather than one each, for the same
-/// reason. It covers threads in this process, which is how both of those run;
-/// two separate `ostraka` processes on one repository are not covered.
+/// notice. One mutex for every repository rather than one each, for the same
+/// reason.
+///
+/// This mutex covers threads in this process. Separate processes on one
+/// repository — two browser windows, a browser and a `drain` — are covered by
+/// the file lock `worktrees_lock` takes beside it, in the repository's git
+/// common directory.
 static GIT_WORKTREES: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// The lock, held for as long as git is changing `.git/worktrees`. A poisoned
-/// lock is still a lock: the thread that panicked left nothing half-done that
-/// the next `git` call depends on.
-fn worktrees_lock() -> std::sync::MutexGuard<'static, ()> {
-    GIT_WORKTREES.lock().unwrap_or_else(|e| e.into_inner())
+/// Both locks, held for as long as git is changing `.git/worktrees`.
+///
+/// The mutex covers threads in this process, which is how `drain` and the
+/// browser's panes run. The file lock covers every other process using the
+/// same repository — a second browser window, or a browser and a `drain` in
+/// another shell — which the mutex alone could not, and which hit the same
+/// race. Dropping this releases both.
+struct Held {
+    _file: Option<std::fs::File>,
+    _thread: std::sync::MutexGuard<'static, ()>,
+}
+
+/// Takes both locks for `repo`.
+///
+/// The file is `ostraka-worktrees.lock` in the repository's git common
+/// directory: every worktree of a repository shares that directory, so every
+/// process working in any of them agrees on the one file, and nothing lands in
+/// a working tree where it could reach a diff. `File::lock` is an OS lock
+/// — `flock` on Unix, `LockFileEx` on Windows — held by the open file and
+/// released when it closes, so a process that dies holding it gives it up.
+///
+/// Where the file cannot be made or locked — a read-only `.git`, a filesystem
+/// without locks — the mutex is still taken, so this process at least stays
+/// serialized, and the git call goes ahead rather than a run failing over a
+/// lock meant to protect it. A poisoned mutex is still a lock: the thread that
+/// panicked left nothing half-done that the next `git` call depends on.
+fn worktrees_lock(repo: &Path) -> Held {
+    let thread = GIT_WORKTREES.lock().unwrap_or_else(|e| e.into_inner());
+    let file = common_dir(repo).and_then(|dir| {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("ostraka-worktrees.lock"))
+            .ok()?;
+        file.lock().ok()?;
+        Some(file)
+    });
+    Held {
+        _file: file,
+        _thread: thread,
+    }
+}
+
+/// The repository's git common directory, which its worktrees share.
+fn common_dir(repo: &Path) -> Option<PathBuf> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(repo)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let dir = PathBuf::from(said);
+    Some(if dir.is_absolute() {
+        dir
+    } else {
+        repo.join(dir)
+    })
 }
 
 pub fn create(repo: &Path, base: &Path, run_id: &str, base_ref: &str) -> Result<Worktree> {
     let path = base.join(run_id);
     let branch = format!("ostraka/{run_id}");
 
-    let _held = worktrees_lock();
+    let _held = worktrees_lock(repo);
     let out = Command::new("git")
         .args(["worktree", "add", "-b", &branch])
         .arg(&path)
@@ -538,7 +598,7 @@ pub fn release_path(repo: &Path, path: &Path) -> Result<()> {
 }
 
 fn remove_checkout(repo: &Path, path: &Path) -> Result<()> {
-    let _held = worktrees_lock();
+    let _held = worktrees_lock(repo);
     let out = Command::new("git")
         .args(["worktree", "remove", "--force"])
         .arg(path)
@@ -643,6 +703,100 @@ mod tests {
             });
             assert!(failures.is_empty(), "round {round}: {failures:#?}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Separate processes making worktrees from one repository at the same
+    /// time, which the in-process mutex alone could not serialize: two browser
+    /// windows, or a browser and a `drain` in another shell.
+    ///
+    /// Real processes, not threads. The test runs itself as the children: a
+    /// child is this same test with `OSTRAKA_WORKTREE_CHILD` set, and makes its
+    /// worktrees one after another on a single thread, so the only contention
+    /// there is is between processes — which is the case being tested.
+    ///
+    /// It is still a race, so this makes the failure likely rather than
+    /// certain: with the file lock taken out and only the mutex left, it failed
+    /// two runs in six; with it, none in six.
+    #[test]
+    fn processes_making_worktrees_from_one_repository_at_once_all_succeed() {
+        // Many processes, few worktrees each: what makes the window likely is
+        // how many adds overlap, and each process does one at a time.
+        const CHILDREN: usize = 48;
+        const EACH: usize = 4;
+        const NAME: &str =
+            "worktree::tests::processes_making_worktrees_from_one_repository_at_once_all_succeed";
+        if let Ok(repo) = std::env::var("OSTRAKA_WORKTREE_CHILD") {
+            let repo = PathBuf::from(repo);
+            let who = std::env::var("OSTRAKA_WORKTREE_WHO").expect("who");
+            let base = repo.parent().expect("parent").join("wt");
+            for n in 0..EACH {
+                if let Err(e) = create(&repo, &base, &format!("p{who}-{n}"), "HEAD") {
+                    panic!("child {who}, worktree {n}: {e}");
+                }
+            }
+            return;
+        }
+
+        let dir = scratch("processes");
+        let repo = dir.join("project");
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.invalid"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(repo.join("f"), "x\n").expect("write");
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "seed"]);
+
+        let exe = std::env::current_exe().expect("this test binary");
+        let children: Vec<_> = (0..CHILDREN)
+            .map(|who| {
+                Command::new(&exe)
+                    .args([NAME, "--exact", "--nocapture", "--test-threads=1"])
+                    .env("OSTRAKA_WORKTREE_CHILD", &repo)
+                    .env("OSTRAKA_WORKTREE_WHO", who.to_string())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("a child starts")
+            })
+            .collect();
+        let failed: Vec<String> = children
+            .into_iter()
+            .map(|child| child.wait_with_output().expect("the child ends"))
+            .filter(|out| !out.status.success())
+            .map(|out| {
+                let said = String::from_utf8_lossy(&out.stdout);
+                said.lines()
+                    .find(|l| l.contains("panicked") || l.contains("child"))
+                    .unwrap_or("a child failed")
+                    .to_string()
+            })
+            .collect();
+        assert!(failed.is_empty(), "{failed:#?}");
+        // Every worktree every child made is one git knows about.
+        let listed = Command::new("git")
+            .args(["worktree", "list"])
+            .current_dir(&repo)
+            .output()
+            .expect("git worktree list");
+        let count = String::from_utf8_lossy(&listed.stdout).lines().count();
+        assert_eq!(
+            count,
+            1 + CHILDREN * EACH,
+            "the main checkout and every worktree"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

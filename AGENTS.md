@@ -1094,11 +1094,32 @@ being made at the same moment has its directory under `.git/worktrees` before it
 has a `commondir` in it. Read in that window, git fails and the run never starts
 — which is what `several_runs_at_once_do_not_collide` hit now and then for long
 enough to be written off as a flaky test. It was not only the test: `drain
---workers N` and panes running together both do exactly this. A process-wide
-lock in `worktree` serializes the two git calls. Serialized rather than retried,
-because a retry keyed on git's wording stops working when git rewords itself,
-and an add takes milliseconds. Two separate `ostraka` processes on one
-repository are not covered.
+--workers N` and panes running together both do exactly this. Both git calls are serialized. Serialized rather than retried, because a retry
+keyed on git's wording stops working when git rewords itself, and an add takes
+milliseconds.
+
+Two locks, because there are two ways to overlap. A process-wide mutex covers
+threads in one process. An OS file lock covers separate processes on one
+repository — two browser windows, or a browser and a `drain` in another shell —
+which the mutex alone could not, and which hit the same race: in a test of
+forty-eight processes making worktrees at once, the mutex alone failed two runs
+in six. The file is `ostraka-worktrees.lock` in the repository's git common
+directory, because every worktree of a repository shares that directory, so
+every process agrees on one file and nothing lands in a working tree where it
+could reach a diff. It is `std::fs::File::lock` — `flock` on Unix, `LockFileEx`
+on Windows — held by the open file and released when it closes, so a process
+that dies holding it gives it up. Where the file cannot be made or locked, the
+mutex is still taken and the git call goes ahead rather than a run failing over
+a lock meant to protect it.
+
+**The declared minimum Rust is the one that builds, and it is checked.**
+`rust-version` said 1.85 and nothing checked it, and nothing had built on 1.85
+for a while: `ratatui` 0.30 needs 1.88 and the code uses let-chains, which need
+it too, and `ostraka-app`'s `egui` 0.36 needs 1.95. The workspace declares 1.89
+now — the first release with `File::lock` — and `ostraka-app` declares its own
+1.95. Both were verified on those exact toolchains: the command-line crates
+check on 1.89 and fail on 1.88 over `file_lock`, and the whole workspace checks
+on 1.95.
 
 **One Ctrl-C stops everything, and one run can be stopped on its own.** The
 process-wide flag stays, because a signal is global: Ctrl-C during
