@@ -157,11 +157,22 @@ impl VendorAdapter for ProcessAdapter {
         // not modify anything, and a CLI that refuses it is one we cannot reason
         // about. A profile may name a stronger question — a CLI can be on PATH
         // and answer `--version` while being unauthenticated and unusable.
-        match Command::new(&self.profile.command)
+        //
+        // Nothing makes that question read-only, though, so it is asked in an
+        // empty directory of its own, removed afterwards. Asked where `ostraka`
+        // was started, a probed command that writes wrote into the repository
+        // somebody was working in: a test fixture that ignores its arguments
+        // did its whole job there, `git add -A` included.
+        let scratch = probe_dir();
+        let answer = Command::new(&self.profile.command)
             .args(&self.profile.probe_args)
+            .current_dir(scratch.as_deref().unwrap_or(&std::env::temp_dir()))
             .stdin(Stdio::null())
-            .output()
-        {
+            .output();
+        if let Some(dir) = &scratch {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        match answer {
             Ok(out) if out.status.success() => Availability::Ready {
                 version: String::from_utf8_lossy(&out.stdout)
                     .lines()
@@ -550,6 +561,16 @@ impl Session for ProcessSession {
     }
 }
 
+/// A new, empty directory for one probe to run in, or `None` where one could
+/// not be made — in which case the probe runs in the temp directory itself,
+/// which is still not the caller's.
+fn probe_dir() -> Option<std::path::PathBuf> {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("ostraka-probe-{}-{n}", std::process::id()));
+    std::fs::create_dir(&dir).ok().map(|()| dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -579,6 +600,31 @@ mod tests {
             "#
         ))
         .expect("valid profile")
+    }
+
+    /// Whatever a probe writes, it writes in a directory of its own, which is
+    /// gone once the probe has answered.
+    #[test]
+    fn a_probe_runs_in_a_directory_of_its_own_and_leaves_nothing() {
+        let adapter = ProcessAdapter::new(
+            Profile::parse(
+                r#"
+                id = "t"
+                command = "sh"
+                args = ["{{prompt}}"]
+                probe_args = ["-c", "touch probed.txt && pwd"]
+                "#,
+            )
+            .expect("valid profile"),
+        );
+        let Availability::Ready { version: Some(dir) } = adapter.probe() else {
+            panic!("the probe did not answer");
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let here = std::env::current_dir().expect("cwd");
+        assert_ne!(dir, here, "the probe ran where the caller was");
+        assert!(!here.join("probed.txt").exists(), "the probe wrote here");
+        assert!(!dir.exists(), "the probe's directory was left behind");
     }
 
     #[test]
