@@ -169,12 +169,13 @@ impl Profile {
             // the one that hits the argument limit stdin is there to avoid.
             PromptVia::Stdin => {
                 let doubled = carries_prompt(&self.args)
-                    || self.review_args.as_deref().is_some_and(carries_prompt);
+                    || self.review_args.as_deref().is_some_and(carries_prompt)
+                    || carries_prompt(&self.model_args);
                 if doubled {
                     return Err(Error::Profile {
                         id: self.id.clone(),
-                        message: "prompt_via is \"stdin\", so args and review_args must not \
-                                  also carry {{prompt}}"
+                        message: "prompt_via is \"stdin\", so args, review_args and \
+                                  model_args must not also carry {{prompt}}"
                             .to_string(),
                     });
                 }
@@ -435,6 +436,13 @@ mod tests {
                 prompt_via = "stdin"
                 args = ["--write"]
                 review_args = ["-p", "{{prompt}}"]
+            "#,
+            r#"
+                id = "s"
+                command = "c"
+                prompt_via = "stdin"
+                args = ["--write"]
+                model_args = ["--model", "{{model}}", "--note", "{{prompt}}"]
             "#,
         ] {
             let err = Profile::parse(text).expect_err("must refuse");

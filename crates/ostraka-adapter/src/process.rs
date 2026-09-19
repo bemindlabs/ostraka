@@ -228,13 +228,11 @@ impl VendorAdapter for ProcessAdapter {
         // filling its stdin. Dropping the handle closes stdin, which is how the
         // vendor knows the task has ended. A write that fails means the vendor
         // is already gone, and its exit status says why better than a broken
-        // pipe would.
-        if let Some(mut stdin) = child.stdin.take() {
+        // pipe would — unless it exits 0, which `finish` refuses to believe.
+        let stdin_writer = child.stdin.take().map(|mut stdin| {
             let prompt = spec.prompt.clone();
-            std::thread::spawn(move || {
-                let _ = stdin.write_all(prompt.as_bytes());
-            });
-        }
+            std::thread::spawn(move || stdin.write_all(prompt.as_bytes()))
+        });
 
         // Both streams are read on their own threads. Stderr must be, or a
         // vendor writing more than a pipe buffer of progress before closing
@@ -290,6 +288,7 @@ impl VendorAdapter for ProcessAdapter {
             drained: false,
             stderr_tail,
             stderr_reader,
+            stdin_writer,
             stop: self.stop.clone(),
             last_said: None,
         }))
@@ -366,6 +365,8 @@ pub struct ProcessSession {
     drained: bool,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
     stderr_reader: Option<JoinHandle<()>>,
+    /// Delivers the prompt when the profile sends it on stdin.
+    stdin_writer: Option<JoinHandle<std::io::Result<()>>>,
     stop: crate::interrupt::Stop,
     /// The last thing the vendor said on stdout, for explaining a failure that
     /// left stderr empty.
@@ -463,7 +464,24 @@ impl Session for ProcessSession {
 
     fn finish(mut self: Box<Self>) -> AdapterOutcome {
         self.drain_stdout();
-        let exit_code = self.child.wait().ok().and_then(|s| s.code());
+        let mut exit_code = self.child.wait().ok().and_then(|s| s.code());
+        // A vendor that stopped reading before the prompt ended and then
+        // exited 0 has answered a task it never saw in full — for a reviewer,
+        // a diff it never saw in full. That is not a success, whatever the exit
+        // status says. A non-zero exit keeps its own code and its own words,
+        // which explain the failure better than the broken pipe does.
+        let mut undelivered = None;
+        if !self.timed_out && !self.interrupted {
+            if let Some(Ok(Err(e))) = self.stdin_writer.take().map(JoinHandle::join) {
+                if exit_code == Some(0) {
+                    exit_code = None;
+                    undelivered = Some(format!(
+                        "the prompt was not delivered on stdin: {e}; the vendor exited \
+                         before reading all of it"
+                    ));
+                }
+            }
+        }
         // Joined only when the vendor ended on its own. After a kill a
         // grandchild may still hold the pipes, and joining would reintroduce
         // exactly the wait the ceiling exists to bound. The threads end when
@@ -499,6 +517,8 @@ impl Session for ProcessSession {
         // wrong.
         let diagnostics = if exit_code == Some(0) {
             None
+        } else if undelivered.is_some() {
+            undelivered
         } else if !stderr_text.trim().is_empty() {
             Some(stderr_text)
         } else {
@@ -700,6 +720,38 @@ mod tests {
         assert!(
             said.contains(&prompt.len().to_string()),
             "the vendor did not read the whole prompt: {said}"
+        );
+    }
+
+    #[test]
+    fn a_stdin_vendor_that_exits_0_without_reading_the_prompt_has_not_succeeded() {
+        // Larger than any pipe buffer, so the write cannot complete unread.
+        let profile = Profile::parse(
+            r#"
+            id = "deaf-sh"
+            command = "sh"
+            prompt_via = "stdin"
+            args = ["-c", "exec 0<&-; echo looks fine"]
+            "#,
+        )
+        .expect("valid profile");
+        let spec = TaskSpec {
+            prompt: "x".repeat(1024 * 1024),
+            ..spec()
+        };
+        let mut session = ProcessAdapter::new(profile)
+            .launch(&spec, Path::new("."))
+            .expect("launches");
+        while session.next_event().is_some() {}
+        let outcome = session.finish();
+        assert_ne!(outcome.exit_code, Some(0));
+        assert!(
+            outcome
+                .diagnostics
+                .as_deref()
+                .is_some_and(|d| d.contains("not delivered")),
+            "{:?}",
+            outcome.diagnostics
         );
     }
 
