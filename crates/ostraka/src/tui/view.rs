@@ -784,7 +784,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // them answers a click or a key, so the box keeps the focus it had.
     let (content, side) = beside(app, content, screen.width);
     app.side_shown = side.is_some();
-    let work_width = screen.width - side.map_or(0, |s| s.width + SIDE_GAP);
+    // Measured off the area the work is drawn in, so the column count and
+    // the columns cannot disagree about how wide it is. The thresholds are
+    // terminal widths — the work plus the gutter `inset` took off its left —
+    // which is what they were before the agents took any width.
+    let work_width = content.width + theme::GUTTER;
     app.columns.clear();
     app.transcripts.clear();
     if app.setup.is_some() {
@@ -4857,6 +4861,30 @@ mod tests {
         assert!(lopsided[1] >= COLUMN_MIN, "{lopsided:?}");
         assert_eq!(lopsided.iter().sum::<u16>(), 200);
         assert_eq!(column_widths(241, &[3, 3, 3]).iter().sum::<u16>(), 241);
+    }
+
+    /// With the agents beside it, the work splits into columns only where the
+    /// width left to it would have split on its own, and every column stays
+    /// inside the work: none reaches under the agents.
+    #[test]
+    fn columns_count_the_width_the_agents_leave() {
+        let taken = super::super::roster::WIDTH + SIDE_GAP;
+        let mut app = with_agents();
+        app.open_pane();
+        screen(&mut app, SPLIT_WIDTH + taken, 30);
+        assert!(app.side_shown);
+        assert_eq!(app.columns.len(), 2, "{:?}", app.columns);
+        let edge = SPLIT_WIDTH + taken - super::super::roster::WIDTH - SIDE_GAP;
+        for (_, area) in &app.columns {
+            assert!(
+                area.x + area.width <= edge,
+                "{area:?} runs under the agents"
+            );
+        }
+
+        screen(&mut app, SPLIT_WIDTH + taken - 1, 30);
+        assert!(app.side_shown);
+        assert!(app.columns.is_empty(), "split one short of the threshold");
     }
 
     #[test]

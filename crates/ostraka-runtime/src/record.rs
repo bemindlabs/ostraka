@@ -140,6 +140,9 @@ impl RunLog {
             return;
         };
         let tmp = self.dir.join("live.json.tmp");
+        // `fs::rename` replaces an existing destination on every platform,
+        // Windows included (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`),
+        // so every phase after the first lands too.
         if fs::write(&tmp, json).is_ok() {
             let _ = fs::rename(&tmp, live_path(&self.dir));
         }
