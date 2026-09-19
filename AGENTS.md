@@ -704,6 +704,30 @@ gate the colour of something under test, the reviewer its own — so a transcrip
 can be scanned for "what did the reviewer say" without being read. Still
 sixteen ANSI colours and no palette of our own.
 
+**The agents sit beside the work, and read only what the runtime reports.**
+Every profile in `.ostraka/adapters`, always on screen from a hundred columns:
+whether it can run here, what it is doing, and whether it is the pair a run
+started now would use. Called agents, not a fleet — the screen names what is
+there, and a fleet is what several of them become, not what one row is.
+
+What a profile is doing had nowhere to be read from. The event log says what
+was said and the record says how a run ended, and neither says, while a run is
+going, which profile is writing it and which will review it — so a `drain` in
+another shell was a list of unfinished run ids and nothing more. The runtime
+now writes it: `live.json` beside each run in progress, naming the author and
+reviewer profiles and the phase, rewritten as the phase moves and removed when
+the record is written. `index::live` reads it for every run, whichever process
+is running it. A profile is doing something only while its agent runs — writing
+in `Authoring`, reviewing in `Reviewing` — and is idle between, because nothing
+of it is running then.
+
+Which pair a run would use is `run::choose`, the one function `execute` picks
+with, so the mark and the run cannot disagree. It probes, so it runs on a
+thread, again only when the thread's own choice changes. The probe is the one
+`ostraka adapters` uses, taken once and held. Nothing is read or probed while
+the pane is not on the screen, and `v` hides it without taking the keys from
+the box.
+
 **Choosing the pair is offered; being allowed to is still the gate's.**
 `Dialog::Agents` sets the author and reviewer profiles for a thread, because
 routing is usually right and occasionally not, and naming one is a decision.

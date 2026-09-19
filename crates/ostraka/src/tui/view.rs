@@ -211,6 +211,26 @@ pub struct App {
     /// How far the keys dialog is scrolled. It lists more keys than fit on
     /// most terminals, and truncating it hid the ones somebody came for.
     pub keys_scroll: u16,
+    /// The agents beside the work are wanted. On unless somebody hid them.
+    pub side: bool,
+    /// The last draw had room for them. Nothing is probed or read for a pane
+    /// nobody can see.
+    pub side_shown: bool,
+    /// This workspace's profile ids, read when the browser opens.
+    pub profile_ids: Vec<String>,
+    /// What each profile's probe answered. Taken once, on a thread, and held:
+    /// probing runs every CLI, and doing that per frame would be the browser
+    /// launching vendors four times a second.
+    pub probes: Vec<Agent>,
+    pub probes_loading: Option<std::sync::mpsc::Receiver<Vec<Agent>>>,
+    /// Every run in progress, from this process or any other, as the runtime
+    /// reports it. Read about once a second.
+    pub live: Vec<(String, ostraka_runtime::record::Live)>,
+    /// The pair a run started now would use, the thread choice it was worked
+    /// out for, and the working-out while it happens.
+    pub next_pair: Option<(String, String)>,
+    pub next_pair_for: Option<(Option<String>, Option<String>)>,
+    pub next_pair_loading: Option<std::sync::mpsc::Receiver<Option<(String, String)>>>,
     /// The first pane shown when there are more panes than columns.
     pub first: usize,
     /// What `@` can name here: this repository's paths and the agents. Read
@@ -233,6 +253,11 @@ pub struct App {
 impl App {
     pub fn new(workspace: Workspace, runs: Vec<RunSummary>) -> Self {
         let matching = (0..runs.len()).collect();
+        // Parsed, not probed: this is only which profiles exist.
+        let profile_ids = workspace
+            .profiles()
+            .map(|profiles| profiles.into_iter().map(|p| p.id).collect())
+            .unwrap_or_default();
         Self {
             where_shown: where_we_are(&workspace.root),
             workspace,
@@ -272,6 +297,15 @@ impl App {
             transcripts: Vec::new(),
             selection: None,
             keys_scroll: 0,
+            side: true,
+            side_shown: false,
+            profile_ids,
+            probes: Vec::new(),
+            probes_loading: None,
+            live: Vec::new(),
+            next_pair: None,
+            next_pair_for: None,
+            next_pair_loading: None,
             first: 0,
             mentionable: Mentionable::default(),
             models: Vec::new(),
@@ -735,18 +769,27 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     );
 
     let content = theme::inset(rows[3]);
+    // The agents take their width off the right of the work, and only where
+    // the work keeps enough to be read. They never take the keys: nothing in
+    // them answers a click or a key, so the box keeps the focus it had.
+    let (content, side) = beside(app, content, screen.width);
+    app.side_shown = side.is_some();
+    let work_width = screen.width - side.map_or(0, |s| s.width + SIDE_GAP);
     app.columns.clear();
     app.transcripts.clear();
     if app.setup.is_some() {
         render_setup(frame, app, content);
     } else {
         match app.screen {
-            Screen::Work => match columns_for(app, screen.width) {
+            Screen::Work => match columns_for(app, work_width) {
                 1 => render_work(frame, app, content),
                 count => render_columns(frame, app, content, count),
             },
             Screen::Record => render_record(frame, app, content),
         }
+    }
+    if let Some(area) = side {
+        render_roster(frame, app, area);
     }
 
     (app.prompt_text, app.prompt_scroll) = prompt_view(app, rows[4]);
@@ -899,6 +942,120 @@ const MAX_COLUMNS: usize = 3;
 const SEAM: u16 = 3;
 
 /// How many panes the work screen shows at once on a terminal this wide.
+/// The columns between the work and the agents beside it.
+const SIDE_GAP: u16 = 2;
+
+/// The work's area and, where there is room and they are wanted, the agents'.
+///
+/// Not while a directory is being set up — there are no profiles to list yet,
+/// and that screen needs its width to explain itself — and not in a workspace
+/// with no profiles at all, where the pane would be a heading over nothing.
+fn beside(app: &App, content: Rect, screen_width: u16) -> (Rect, Option<Rect>) {
+    let wanted = app.side && app.setup.is_none() && !app.profile_ids.is_empty();
+    if !wanted || screen_width < super::roster::SHOWN_FROM {
+        return (content, None);
+    }
+    let side_width = super::roster::WIDTH.min(content.width);
+    let work = Rect {
+        width: content.width.saturating_sub(side_width + SIDE_GAP),
+        ..content
+    };
+    let side = Rect {
+        x: work.x + work.width + SIDE_GAP,
+        width: side_width,
+        ..content
+    };
+    (work, Some(side))
+}
+
+/// Every profile in this workspace: can it run, what is it doing, and is it
+/// the one a run would use next. A picture of `roster::rows` and nothing more;
+/// the rows are worked out there.
+fn render_roster(frame: &mut Frame, app: &App, area: Rect) {
+    let rows = super::roster::rows(
+        &app.profile_ids,
+        &app.probes,
+        &app.live,
+        app.next_pair.as_ref(),
+    );
+    let room = area.width as usize;
+    let mut lines = vec![
+        Line::from(Span::styled("agents", theme::bold())),
+        Line::from(Span::styled("\u{2500}".repeat(room), theme::muted())),
+    ];
+    for row in &rows {
+        use super::roster::{Doing, Probe};
+        let (word, colour) = match &row.probe {
+            Probe::Asking => ("\u{2026}", theme::MUTED),
+            Probe::Ready(_) => ("ready", theme::OK),
+            Probe::Missing(_) => ("missing", theme::BAD),
+        };
+        let name_room = room.saturating_sub(word.chars().count() + 1);
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<name_room$}", truncate(&row.id, name_room)),
+                theme::text(),
+            ),
+            Span::raw(" "),
+            Span::styled(word.to_string(), theme::on(colour)),
+        ]));
+        // What the probe said and, when nothing is going, that nothing is —
+        // one row, because a profile per three rows does not fit the ten that
+        // ship on a terminal of ordinary height.
+        let note = match &row.probe {
+            Probe::Ready(note) | Probe::Missing(note) => note.as_str(),
+            Probe::Asking => "",
+        };
+        let second = match (note.is_empty(), row.doing.is_empty()) {
+            (true, true) => "idle".to_string(),
+            // Idle first: a long version string is what gets cut, not the
+            // one word that says what the profile is doing.
+            (false, true) => format!("idle \u{b7} {note}"),
+            (_, false) => note.to_string(),
+        };
+        if !second.is_empty() {
+            lines.push(dim(format!(
+                "  {}",
+                truncate(&second, room.saturating_sub(2))
+            )));
+        }
+        let mut next = Vec::new();
+        if row.writes_next {
+            next.push("writes next");
+        }
+        if row.reviews_next {
+            next.push("reviews next");
+        }
+        if !next.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("  {}", next.join(", ")),
+                theme::accent(),
+            )));
+        }
+        for doing in &row.doing {
+            let (verb, run) = match doing {
+                Doing::Writing(run) => ("writing", run),
+                Doing::Reviewing(run) => ("reviewing", run),
+            };
+            let run_room = room.saturating_sub(verb.len() + 3);
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {verb} "), theme::on(theme::WARN)),
+                Span::styled(truncate(run, run_room), theme::text()),
+            ]));
+        }
+    }
+    // Cut from the bottom, and said. Not `theme::fit`, which keeps a dialog's
+    // last line because that is its way out: here the last line is somebody's
+    // status, and keeping it alone under the cut attaches it to nobody.
+    let height = area.height as usize;
+    if lines.len() > height && height > 1 {
+        let hidden = lines.len() - (height - 1);
+        lines.truncate(height - 1);
+        lines.push(dim(format!("\u{2026} {hidden} more lines")));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
 fn columns_for(app: &App, width: u16) -> usize {
     if width < SPLIT_WIDTH {
         return 1;
@@ -3336,6 +3493,91 @@ mod tests {
             let width: usize = row.spans.iter().map(|s| s.content.width()).sum();
             assert!(width <= 10, "{row:?} is {width} wide");
         }
+    }
+
+    /// A workspace with two profiles, one writing a run and marked to write
+    /// the next, one missing — the state the side pane is a picture of.
+    fn with_agents() -> App {
+        use ostraka_runtime::progress::Phase;
+        use ostraka_runtime::record::Live;
+        let mut app = App::new(nowhere(), Vec::new());
+        app.profile_ids = vec!["zz-writer".into(), "zz-reader".into()];
+        app.probes = vec![
+            Agent {
+                id: "zz-writer".into(),
+                ready: true,
+                note: "writer 1.2.3".into(),
+                configured: true,
+            },
+            Agent {
+                id: "zz-reader".into(),
+                ready: false,
+                note: "not installed".into(),
+                configured: true,
+            },
+        ];
+        app.live = vec![(
+            "t9-run".into(),
+            Live {
+                author: "zz-writer".into(),
+                reviewer: "zz-reader".into(),
+                phase: Phase::Authoring,
+            },
+        )];
+        app.next_pair = Some(("zz-writer".into(), "zz-reader".into()));
+        app
+    }
+
+    #[test]
+    fn the_agents_beside_the_work_show_what_the_state_says() {
+        let mut app = with_agents();
+        let out = screen(&mut app, 120, 24);
+        assert!(app.side_shown);
+        for want in [
+            "zz-writer",
+            "ready",
+            "writer 1.2.3",
+            "writes next",
+            "writing t9-run",
+            "zz-reader",
+            "missing",
+            "reviews next",
+            "idle",
+        ] {
+            assert!(out.contains(want), "{want:?} is not on:\n{out}");
+        }
+    }
+
+    /// Below the threshold the width is the work's, and nothing is drawn,
+    /// probed or read for a pane nobody can see.
+    #[test]
+    fn the_agents_step_aside_on_a_narrow_terminal() {
+        let mut app = with_agents();
+        let narrow = screen(&mut app, super::super::roster::SHOWN_FROM - 1, 24);
+        assert!(!app.side_shown);
+        assert!(!narrow.contains("zz-writer"), "{narrow}");
+
+        let wide = screen(&mut app, super::super::roster::SHOWN_FROM, 24);
+        assert!(app.side_shown);
+        assert!(wide.contains("zz-writer"), "{wide}");
+    }
+
+    #[test]
+    fn hidden_agents_stay_hidden_however_wide_the_terminal() {
+        let mut app = with_agents();
+        app.side = false;
+        let out = screen(&mut app, 200, 24);
+        assert!(!app.side_shown);
+        assert!(!out.contains("zz-writer"), "{out}");
+    }
+
+    /// A workspace with no profiles has nothing to list, and a heading over
+    /// nothing is not worth the width.
+    #[test]
+    fn no_profiles_means_no_pane() {
+        let mut app = App::new(nowhere(), Vec::new());
+        let _ = screen(&mut app, 200, 24);
+        assert!(!app.side_shown);
     }
 
     #[test]

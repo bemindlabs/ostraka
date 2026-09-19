@@ -15,6 +15,7 @@ mod command;
 mod flows;
 mod mention;
 mod pane;
+mod roster;
 mod select;
 mod session;
 mod theme;
@@ -382,6 +383,63 @@ fn copy_selection(app: &mut App) {
     });
 }
 
+/// Brings what the agents beside the work show up to date.
+///
+/// Only while they are on the screen, and never on the drawing path. The probe
+/// is taken once, on a thread, and kept. Runs in progress are read from disk
+/// about once a second, which is where a `drain` in another shell leaves them.
+/// The pair a run would use is worked out again only when the thread's own
+/// choice changes, because working it out probes too.
+fn stock_roster(app: &mut App, records_root: &Path) {
+    if let Some(rx) = app.probes_loading.take() {
+        match rx.try_recv() {
+            Ok(found) => app.probes = found,
+            Err(std::sync::mpsc::TryRecvError::Empty) => app.probes_loading = Some(rx),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+        }
+    }
+    if let Some(rx) = app.next_pair_loading.take() {
+        match rx.try_recv() {
+            Ok(pair) => app.next_pair = pair,
+            Err(std::sync::mpsc::TryRecvError::Empty) => app.next_pair_loading = Some(rx),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+        }
+    }
+    if !app.side_shown {
+        return;
+    }
+    if app.probes.is_empty() && app.probes_loading.is_none() && !app.profile_ids.is_empty() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let workspace = app.workspace.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(agents(&workspace));
+        });
+        app.probes_loading = Some(rx);
+    }
+    // Four ticks of a quarter of a second each.
+    if app.tick % 4 == 0 {
+        app.live = ostraka_runtime::index::live(records_root);
+    }
+    let wanted = (
+        app.thread().adapter.clone(),
+        app.thread().review_adapter.clone(),
+    );
+    if app.next_pair_for.as_ref() != Some(&wanted) && app.next_pair_loading.is_none() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let workspace = app.workspace.clone();
+        let (author, reviewer) = wanted.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::run::would_route(
+                &workspace,
+                author.as_deref(),
+                reviewer.as_deref(),
+            ));
+        });
+        app.next_pair_for = Some(wanted);
+        app.next_pair_loading = Some(rx);
+    }
+}
+
 /// Takes whatever the run has said since the last frame.
 ///
 /// Called before drawing rather than after a key, because a run says things
@@ -415,6 +473,7 @@ fn take_stock(app: &mut App, records_root: &Path) {
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
         }
     }
+    stock_roster(app, records_root);
     // The model listing, once every profile has answered.
     if let Some(rx) = app.models_loading.take() {
         match rx.try_recv() {
@@ -662,6 +721,7 @@ fn command_key(app: &mut App, key: KeyEvent, records_root: &Path) {
         }
         KeyCode::Char('n') | KeyCode::Enter => perform(app, Command::NewRun, records_root),
         KeyCode::Char('e') => perform(app, Command::Go, records_root),
+        KeyCode::Char('v') => perform(app, Command::Side, records_root),
         KeyCode::Char('s') => perform(app, Command::Stop, records_root),
         KeyCode::Char('l') => perform(app, Command::Runs, records_root),
         KeyCode::Char('w') => perform(app, Command::Repos, records_root),
@@ -741,6 +801,21 @@ fn perform(app: &mut App, command: Command, records_root: &Path) {
         }
         Command::Copy => copy_selection(app),
         Command::Go => go(app),
+        // Not a dialog and not a focus: the agents are shown or hidden, and
+        // whoever had the keys keeps them.
+        Command::Side => {
+            app.side = !app.side;
+            app.status = Some(if !app.side {
+                "the agents are hidden \u{2014} v shows them".to_string()
+            } else if app.side_shown || app.setup.is_some() {
+                "the agents are shown".to_string()
+            } else {
+                format!(
+                    "the agents are shown from {} columns wide",
+                    roster::SHOWN_FROM
+                )
+            });
+        }
         Command::Fix => open_fix(app),
         Command::Settings => {
             app.project_facts = project_facts(app);

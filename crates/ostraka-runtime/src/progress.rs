@@ -18,7 +18,8 @@ use ostraka_core::record::Event;
 ///
 /// Named for what is happening rather than numbered, because the numbers in
 /// the orchestrator's comments have already changed once.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Phase {
     /// Making the worktree the change will be written in.
     Isolating,

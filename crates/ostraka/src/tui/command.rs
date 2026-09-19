@@ -44,6 +44,7 @@ pub enum Command {
     Runs,
     Repos,
     Agents,
+    Side,
     Settings,
     Mode,
     Models,
@@ -69,7 +70,7 @@ pub enum Command {
 impl Command {
     /// In the order the palette offers them: what someone reaches for most,
     /// first.
-    pub const ALL: [Command; 27] = [
+    pub const ALL: [Command; 28] = [
         Command::NewRun,
         Command::Go,
         Command::Stop,
@@ -77,6 +78,7 @@ impl Command {
         Command::Runs,
         Command::Repos,
         Command::Agents,
+        Command::Side,
         Command::Settings,
         Command::Mode,
         Command::Models,
@@ -108,6 +110,7 @@ impl Command {
             Command::Runs => "runs",
             Command::Repos => "repositories",
             Command::Agents => "agents",
+            Command::Side => "show or hide the agents beside the work",
             Command::Settings => "settings",
             Command::Mode => "switch mode",
             Command::Models => "models",
@@ -141,6 +144,7 @@ impl Command {
             Command::Runs => "l",
             Command::Repos => "w",
             Command::Agents => "a",
+            Command::Side => "v",
             Command::Settings => ",",
             Command::Mode => "m",
             Command::Models => "o",
@@ -181,6 +185,8 @@ impl Command {
             Command::Runs => 'l',
             Command::Repos => 'w',
             Command::Agents => 'a',
+            // Free as a bare key and as a leader letter, so the two agree.
+            Command::Side => 'v',
             Command::Settings => ',',
             Command::Mode => 'm',
             Command::Models => 'o',
@@ -221,6 +227,9 @@ impl Command {
             Command::Runs => "look up a run recorded here",
             Command::Repos => "choose which repository to work in",
             Command::Agents => "choose who writes and who reviews",
+            Command::Side => {
+                "every profile here: can it run, what is it doing, who a run would use"
+            }
             Command::Settings => "what this thread and this project are set to",
             Command::Mode => "ask, plan, loop or auto \u{2014} what enter does next",
             Command::Models => {
@@ -266,6 +275,7 @@ impl Command {
             Command::Runs => "runs",
             Command::Repos => "repos",
             Command::Agents => "agents",
+            Command::Side => "side",
             Command::Settings => "settings",
             Command::Mode => "mode",
             Command::Models => "models",

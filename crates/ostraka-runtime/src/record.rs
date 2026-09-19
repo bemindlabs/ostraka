@@ -24,6 +24,36 @@ pub struct RunLog {
     /// Which part of the pipeline the run is in, so an event can be attributed
     /// to the agent that produced it rather than arriving unlabelled.
     phase: Phase,
+    /// The profiles this run is using, once routing has chosen them. Written
+    /// out as `live.json` whenever the phase moves, so that what a run is
+    /// doing can be seen from outside the process running it.
+    running_as: Option<(String, String)>,
+}
+
+/// What a run in progress is doing, as `live.json` beside its event log.
+///
+/// The event log says what was said and the record says how it ended, and
+/// neither says, while a run is going, which profile is writing it and which
+/// will review it. A screen in the same process could ask its own session; a
+/// screen watching a `drain` in another process had nothing to read, so it
+/// could list a run as unfinished and not say who was working on it. This is
+/// that fact, written by the runtime that knows it.
+///
+/// It exists only while the run does: it is removed once the record is
+/// written. A process killed outright leaves one behind beside a run with no
+/// record, which is the same run `index::list` already calls unfinished.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Live {
+    /// The profile writing the change.
+    pub author: String,
+    /// The profile that will review it.
+    pub reviewer: String,
+    pub phase: Phase,
+}
+
+/// Where a run's `live.json` is.
+pub fn live_path(run_dir: &Path) -> PathBuf {
+    run_dir.join("live.json")
 }
 
 impl RunLog {
@@ -40,7 +70,37 @@ impl RunLog {
             events,
             watcher: None,
             phase: Phase::Isolating,
+            running_as: None,
         })
+    }
+
+    /// Names the profiles this run is using, and starts reporting what it is
+    /// doing where another process can read it.
+    pub fn running_as(mut self, author: &str, reviewer: &str) -> Self {
+        self.running_as = Some((author.to_string(), reviewer.to_string()));
+        self.report();
+        self
+    }
+
+    /// Rewrites `live.json`. Best effort: a run is not failed because a file
+    /// meant for somebody watching could not be written. Written to a
+    /// temporary file and renamed, so a reader never sees half of one.
+    fn report(&self) {
+        let Some((author, reviewer)) = &self.running_as else {
+            return;
+        };
+        let live = Live {
+            author: author.clone(),
+            reviewer: reviewer.clone(),
+            phase: self.phase,
+        };
+        let Ok(json) = serde_json::to_string(&live) else {
+            return;
+        };
+        let tmp = self.dir.join("live.json.tmp");
+        if fs::write(&tmp, json).is_ok() {
+            let _ = fs::rename(&tmp, live_path(&self.dir));
+        }
     }
 
     /// Sends everything this log is told to whoever is watching.
@@ -52,6 +112,7 @@ impl RunLog {
     /// Moves the run into a phase, and says so.
     pub fn enter(&mut self, phase: Phase) {
         self.phase = phase;
+        self.report();
         self.tell(Step::Entered(phase));
     }
 
@@ -94,6 +155,8 @@ impl RunLog {
         let json = serde_json::to_string_pretty(record)
             .map_err(|e| Error::Other(format!("serializing record: {e}")))?;
         fs::write(self.dir.join("record.json"), json)?;
+        // The record says how it ended, so there is nothing live left to say.
+        let _ = fs::remove_file(live_path(&self.dir));
         Ok(())
     }
 }
