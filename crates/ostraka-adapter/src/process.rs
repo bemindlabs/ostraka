@@ -147,6 +147,10 @@ impl VendorAdapter for ProcessAdapter {
         &self.profile.id
     }
 
+    fn passes_model(&self) -> bool {
+        !self.profile.model_args.is_empty()
+    }
+
     fn probe(&self) -> Availability {
         // Deliberately inherits the environment, unlike `launch`. A probe asks
         // a question rather than running a task, and building an environment

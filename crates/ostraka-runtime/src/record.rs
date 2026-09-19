@@ -11,6 +11,82 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// Which agent took one seat in a run, as far as can be established.
+///
+/// Gap G4 in the standards mapping (ISO/IEC 5338, ISO/IEC 42001): the record
+/// named the profile and not what it ran, so "which CLI release wrote this,
+/// and on which model" had no answer later.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Seat {
+    /// The profile id.
+    pub profile: String,
+    /// The version the agent's probe reported, where it reported one.
+    pub cli: Option<String>,
+    /// The model hint passed on the agent's command line. `None` means none
+    /// was passed, and that is exact, not unknown: a hint reaches only an
+    /// agent that says how to take one, and a reviewer is never given one. The
+    /// model is then whatever the profile decides — a profile may pin one in
+    /// its own `args`, and the profile id says which — or the CLI's default.
+    /// Which model a vendor used internally is not something any of them
+    /// reports reliably, and is not claimed.
+    pub model: Option<String>,
+}
+
+impl Seat {
+    /// The seat as taken: probed for its version, and credited with the model
+    /// only where the agent actually passes it on.
+    pub fn of(agent: &dyn ostraka_adapter::VendorAdapter, requested: Option<&str>) -> Self {
+        let cli = match agent.probe() {
+            ostraka_adapter::Availability::Ready { version } => version,
+            _ => None,
+        };
+        Seat {
+            profile: agent.id().to_string(),
+            cli,
+            model: requested
+                .filter(|_| agent.passes_model())
+                .map(str::to_string),
+        }
+    }
+
+    /// The value of a `-cli` trailer: the version, or that none was reported.
+    pub fn cli_trailer(&self) -> String {
+        self.cli.clone().unwrap_or_else(|| "unreported".to_string())
+    }
+
+    /// The value of a `-model` trailer: the model passed, or that none was and
+    /// the profile's own model — pinned in its arguments, or the CLI's
+    /// default — stood.
+    pub fn model_trailer(&self) -> String {
+        self.model
+            .clone()
+            .unwrap_or_else(|| "profile default".to_string())
+    }
+}
+
+/// Which agents took a run's seats: `provenance.json` beside the record.
+///
+/// A file of its own rather than fields on `RunRecord`, because that type is
+/// public and not `#[non_exhaustive]`, so a field there is a SemVer break. It
+/// joins the record at 2.0. Written when the run starts and kept after it
+/// ends, since it describes the run rather than its progress.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Provenance {
+    pub author: Seat,
+    pub reviewer: Seat,
+}
+
+/// Where a run's `provenance.json` is.
+pub fn provenance_path(run_dir: &Path) -> PathBuf {
+    run_dir.join("provenance.json")
+}
+
+/// A run's provenance, where it recorded one. Runs made before this existed
+/// did not, and read as `None` rather than as a guess.
+pub fn read_provenance(run_dir: &Path) -> Option<Provenance> {
+    serde_json::from_str(&fs::read_to_string(provenance_path(run_dir)).ok()?).ok()
+}
+
 pub struct RunLog {
     dir: PathBuf,
     events: File,
@@ -193,6 +269,14 @@ impl RunLog {
             phase,
             event: event.clone(),
         });
+        Ok(())
+    }
+
+    /// Writes which agents took this run's seats.
+    pub fn write_provenance(&self, provenance: &Provenance) -> Result<()> {
+        let json = serde_json::to_string_pretty(provenance)
+            .map_err(|e| Error::Other(format!("serializing provenance: {e}")))?;
+        fs::write(provenance_path(&self.dir), json)?;
         Ok(())
     }
 

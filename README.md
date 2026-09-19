@@ -316,7 +316,19 @@ Author: archon <archon@ostraka.invalid>
     Run: t907222-20260906T132706Z
     Authored-by: archon (claude-code)
     Reviewed-by: ephor (codex)
+    Author-cli: 2.1.278 (Claude Code)
+    Author-model: profile default
+    Reviewer-cli: codex-cli 0.153.4
+    Reviewer-model: profile default
 ```
+
+The last four lines say what took each seat: the version the CLI's probe
+reported, and the model named on the command line when a run asked for one
+(`--model`) and the profile says how to pass it. `profile default` means none
+was passed, so the profile decided — a model pinned in its `args`, or the CLI's
+own default. Which model a vendor used internally is not something any of them
+reports reliably, so it is not claimed. `ostraka replay` shows the same, from
+`provenance.json` beside the run's record.
 
 An approved run stops at a commit inside its worktree. `ostraka promote` gives
 that commit a branch of its own and then stops too:

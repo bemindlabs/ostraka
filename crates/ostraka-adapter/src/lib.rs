@@ -94,4 +94,15 @@ pub trait VendorAdapter: Send + Sync {
 
     /// Start the agent against a task inside an existing worktree.
     fn launch(&self, spec: &TaskSpec, worktree: &Path) -> Result<Box<dyn Session>>;
+
+    /// Whether a task's model hint reaches this agent's command line.
+    ///
+    /// A hint is passed only where the agent says how to pass one, so a run
+    /// that asked for a model and was handed to an agent that cannot take it
+    /// ran on that agent's default. What a run records as its model depends on
+    /// knowing which. Provided, and false, so an adapter written before this
+    /// existed still compiles and is not credited with passing anything.
+    fn passes_model(&self) -> bool {
+        false
+    }
 }

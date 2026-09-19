@@ -109,6 +109,14 @@ pub fn run_task_until(
     let mut log = RunLog::create(places.records, &run_id)?
         .watched_by(watcher)
         .running_as(routing.author.id(), routing.reviewer.id());
+    // Which agents take the seats, recorded before anything else happens so a
+    // run that fails early still says what it was going to run. The author is
+    // the only seat a model hint can reach; the reviewer is never handed one.
+    let provenance = crate::record::Provenance {
+        author: crate::record::Seat::of(routing.author.as_ref(), task.model.as_deref()),
+        reviewer: crate::record::Seat::of(routing.reviewer.as_ref(), None),
+    };
+    log.write_provenance(&provenance)?;
     log.enter(Phase::Isolating);
 
     let mut record = RunRecord {
@@ -398,13 +406,21 @@ pub fn run_task_until(
         Ok(token) => {
             // The trailers are the audit trail in the place it survives longest:
             // a commit outlives the run directory it came from.
+            // What wrote and what reviewed, in the record that outlives the run
+            // directory. Promotion reads the three lines above them by prefix,
+            // so these do not disturb that check.
             let message = format!(
-                "{}\n\nRun: {run_id}\nAuthored-by: {} ({})\nReviewed-by: {} ({})",
+                "{}\n\nRun: {run_id}\nAuthored-by: {} ({})\nReviewed-by: {} ({})\n\
+                 Author-cli: {}\nAuthor-model: {}\nReviewer-cli: {}\nReviewer-model: {}",
                 task.prompt,
                 task.author,
                 routing.author.id(),
                 reviewer_identity,
                 routing.reviewer.id(),
+                provenance.author.cli_trailer(),
+                provenance.author.model_trailer(),
+                provenance.reviewer.cli_trailer(),
+                provenance.reviewer.model_trailer(),
             );
             worktree::commit(wt.path(), &message, &task.author)?;
             // The commit is on the run's branch now, and everything downstream
