@@ -643,8 +643,11 @@ pub fn check_models(suite: &Suite, catalogs: &[crate::models::Catalog]) -> Model
         }
         let catalog = catalogs.iter().find(|c| c.profile == candidate.adapter);
         let why = match catalog {
+            // `catalog` answers nothing both for a profile with no `[models]`
+            // table and for one whose table does not parse, so the sentence
+            // covers both rather than naming one of them wrongly.
             None => Some(format!(
-                "`{}` has no [models] table, so what it can run cannot be listed",
+                "`{}` has no readable [models] table, so what it can run cannot be listed",
                 candidate.adapter
             )),
             Some(c) if c.models.is_empty() => Some(
@@ -738,12 +741,13 @@ pub fn run(workspace: &Workspace, dry_run: bool, json: bool) -> Result<bool, Fai
                 })
                 .collect();
             return Err(format!(
-                "the benchmark names {} its profile does not offer:\n{}",
+                "the benchmark names {} that {} profile does not offer:\n{}",
                 if lines.len() == 1 {
                     "a model"
                 } else {
                     "models"
                 },
+                if lines.len() == 1 { "its" } else { "their" },
                 lines.join("\n")
             )
             .into());
@@ -1091,7 +1095,9 @@ adapter = "ref"
         assert_eq!(no_table.unchecked.len(), 1, "{no_table:?}");
         assert_eq!(no_table.unchecked[0].0, "cand");
         assert!(
-            no_table.unchecked[0].1.contains("no [models] table"),
+            no_table.unchecked[0]
+                .1
+                .contains("no readable [models] table"),
             "{no_table:?}"
         );
 
@@ -1108,7 +1114,12 @@ adapter = "ref"
     /// is run to find out.
     #[test]
     fn the_dry_run_refuses_a_model_by_name_and_reports_what_it_could_not_check() {
-        let dir = std::env::temp_dir().join(format!("ostraka-bench-models-{}", std::process::id()));
+        // Named for this test as well as this process, so no other test in
+        // the same run can be handed the same directory.
+        let dir = std::env::temp_dir().join(format!(
+            "ostraka-bench-models-{}-dry-run-refuses",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         let adapters = dir.join(".ostraka/adapters");
         std::fs::create_dir_all(&adapters).expect("adapters");
