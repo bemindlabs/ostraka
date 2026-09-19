@@ -1034,7 +1034,7 @@ mod tests {
 
         // And asked for on the command line, it is refused by name before
         // anything is written.
-        let err = crate::init_cmd::run(&dir, Some(&dir), false, false, true)
+        let err = crate::init_cmd::run(&dir, Some(&dir), false, false, true, true)
             .expect_err("must refuse")
             .to_string();
         assert!(err.contains("workspace itself"), "{err}");

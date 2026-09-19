@@ -11,6 +11,7 @@ pub fn run(
     repositories: Option<&Path>,
     force: bool,
     upgrade: bool,
+    yes: bool,
     json: bool,
 ) -> Outcome {
     // Refused by name before anything is planned. Taken, the workspace would
@@ -154,5 +155,42 @@ pub fn run(
         print!("{}", drift::report(&drifts));
     }
 
+    // The files are the start of it. What is left — a repository to work on, a
+    // gate that has been run, two CLIs that can answer — is the difference
+    // between a directory that has been written to and one that can run
+    // something. At a terminal it is walked; otherwise it is only said, because
+    // a question nobody can answer is a command that hangs until something
+    // kills it.
+    if !json {
+        let steps = crate::setup::gather(&workspace, None);
+        if yes || !crate::offer::at_a_terminal() {
+            say_what_is_left(&steps);
+        } else {
+            let stdin = std::io::stdin();
+            crate::setup::walk(&workspace, &mut stdin.lock(), &mut std::io::stdout())?;
+        }
+    }
+
     Ok(true)
+}
+
+/// What is left, said rather than asked about.
+fn say_what_is_left(facts: &crate::setup::Facts) {
+    let left = crate::setup::remaining(facts);
+    if left.is_empty() {
+        println!("\nEvery step is taken: this project can run.");
+        return;
+    }
+    println!("\nStill to do, in the order that costs most when it is wrong:");
+    for step in left {
+        println!("\n  {}", step.title);
+        println!("    {}", step.why);
+        for said in &step.detail {
+            println!("    {said}");
+        }
+        if let crate::setup::State::Yours(said) = &step.state {
+            println!("    {said}");
+        }
+    }
+    println!("\n`ostraka init` at a terminal walks these, one at a time.");
 }

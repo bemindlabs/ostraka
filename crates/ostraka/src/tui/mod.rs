@@ -397,6 +397,33 @@ fn copy_selection(app: &mut App) {
     });
 }
 
+/// What the setup screen lists under its plan, taken once on a thread.
+///
+/// Gathering probes every chosen CLI, so it is not done while drawing, and not
+/// at all unless that screen is up.
+fn stock_setup(app: &mut App) {
+    if let Some(rx) = app.setup_steps_loading.take() {
+        match rx.try_recv() {
+            Ok(found) => app.setup_steps = found,
+            Err(std::sync::mpsc::TryRecvError::Empty) => app.setup_steps_loading = Some(rx),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+        }
+    }
+    if app.setup.is_none() {
+        app.setup_steps.clear();
+        return;
+    }
+    if app.setup_steps.is_empty() && app.setup_steps_loading.is_none() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let workspace = app.workspace.clone();
+        std::thread::spawn(move || {
+            let facts = crate::setup::gather(&workspace, None);
+            let _ = tx.send(crate::setup::steps(&facts));
+        });
+        app.setup_steps_loading = Some(rx);
+    }
+}
+
 /// Brings what the agents beside the work, and the footer under it, show up
 /// to date.
 ///
@@ -578,6 +605,7 @@ fn take_stock(app: &mut App, records_root: &Path) {
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
         }
     }
+    stock_setup(app);
     stock_roster(app, records_root);
     // The model listing, once every profile has answered.
     if let Some(rx) = app.models_loading.take() {
