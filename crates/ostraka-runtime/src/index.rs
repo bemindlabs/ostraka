@@ -156,8 +156,10 @@ pub fn list(records_root: &Path) -> Result<Vec<RunSummary>> {
 /// Read from each run's `live.json`, so it covers runs in any process — a pane
 /// of this browser and a `drain` worker in another shell alike. A run with a
 /// record has finished and is left out even if a `live.json` survived beside
-/// it. A file that cannot be read or parsed is skipped: it may be mid-rename,
-/// and the next read will have it.
+/// it, and so is one whose process is gone — killed, crashed, or lost to a
+/// reboot — which `record::live_owner_running` tells by the lock the run holds.
+/// A file that cannot be read or parsed is skipped: it may be mid-rename, and
+/// the next read will have it.
 pub fn live(records_root: &Path) -> Vec<(String, crate::record::Live)> {
     let dir = records_root.join("runs");
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -167,6 +169,7 @@ pub fn live(records_root: &Path) -> Vec<(String, crate::record::Live)> {
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
         .filter(|path| path.is_dir() && !path.join("record.json").exists())
+        .filter(|path| crate::record::live_owner_running(path))
         .filter_map(|path| {
             let text = std::fs::read_to_string(crate::record::live_path(&path)).ok()?;
             let live = serde_json::from_str(&text).ok()?;
@@ -459,6 +462,79 @@ mod tests {
             .expect("rewrites");
         assert!(live(&records).is_empty(), "a finished run is still live");
         assert!(!records.join("runs/t1-live/live.json").exists());
+
+        let _ = std::fs::remove_dir_all(&records);
+    }
+
+    /// A `live.json` whose writer was killed outright is not a run in
+    /// progress. Real processes: the child is this same test with
+    /// `OSTRAKA_LIVE_CHILD` set, which starts a run, says so, and waits to be
+    /// killed — SIGKILL on Unix, so nothing of its own gets to clean up.
+    #[test]
+    fn a_run_whose_process_was_killed_is_not_shown_as_going() {
+        use crate::record::RunLog;
+        use std::io::BufRead;
+        const NAME: &str = "index::tests::a_run_whose_process_was_killed_is_not_shown_as_going";
+        if let Ok(records) = std::env::var("OSTRAKA_LIVE_CHILD") {
+            let _log = RunLog::create(Path::new(&records), "t1-killed")
+                .expect("log")
+                .running_as("writer", "reader");
+            println!("CHILD-READY");
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            return;
+        }
+
+        let records = root();
+        let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([NAME, "--exact", "--nocapture", "--test-threads=1"])
+            .env("OSTRAKA_LIVE_CHILD", &records)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("the child starts");
+        let stdout = child.stdout.take().expect("stdout");
+        let ready = std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(std::result::Result::ok)
+            .any(|line| line.contains("CHILD-READY"));
+        assert!(ready, "the child never started its run");
+
+        assert_eq!(
+            live(&records).len(),
+            1,
+            "a going run in another process is not seen"
+        );
+
+        child.kill().expect("killed");
+        child.wait().expect("reaped");
+        assert!(
+            records.join("runs/t1-killed/live.json").exists(),
+            "the fixture is wrong: the killed child cleaned up after itself"
+        );
+        assert!(
+            live(&records).is_empty(),
+            "a killed run is still shown as going"
+        );
+
+        let _ = std::fs::remove_dir_all(&records);
+    }
+
+    /// A `live.json` with no lock file beside it — left by a run made before
+    /// there was one — reads as a run that is over rather than one going.
+    #[test]
+    fn a_live_file_with_no_owner_is_not_shown_as_going() {
+        let records = root();
+        let run = records.join("runs/t1-orphan");
+        std::fs::create_dir_all(&run).expect("run dir");
+        std::fs::write(
+            run.join("live.json"),
+            r#"{"author":"writer","reviewer":"reader","phase":"authoring"}"#,
+        )
+        .expect("live.json");
+        assert!(live(&records).is_empty());
+
+        // And a lock file nobody holds is the same as none.
+        std::fs::write(run.join("live.lock"), "").expect("lock file");
+        assert!(live(&records).is_empty());
 
         let _ = std::fs::remove_dir_all(&records);
     }

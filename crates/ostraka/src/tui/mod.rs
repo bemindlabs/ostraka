@@ -430,7 +430,7 @@ fn stock_roster(app: &mut App, records_root: &Path) {
         app.probes_loading = Some(rx);
     }
     // Four ticks of a quarter of a second each.
-    if app.tick % 4 == 0 {
+    if app.tick.is_multiple_of(4) {
         app.live = ostraka_runtime::index::live(records_root);
         let ostraka = app.workspace.ostraka();
         let list = |state| crate::tasks::list(&ostraka, state);

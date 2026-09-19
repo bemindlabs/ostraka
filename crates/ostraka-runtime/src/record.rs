@@ -28,6 +28,11 @@ pub struct RunLog {
     /// out as `live.json` whenever the phase moves, so that what a run is
     /// doing can be seen from outside the process running it.
     running_as: Option<(String, String)>,
+    /// `live.lock`, held for as long as this log exists. The OS lets go of it
+    /// when the process ends, however it ends, which is how a reader tells a
+    /// run that is going from one whose process was killed and left its
+    /// `live.json` behind.
+    _owner: Option<File>,
 }
 
 /// What a run in progress is doing, as `live.json` beside its event log.
@@ -40,8 +45,11 @@ pub struct RunLog {
 /// that fact, written by the runtime that knows it.
 ///
 /// It exists only while the run does: it is removed once the record is
-/// written. A process killed outright leaves one behind beside a run with no
-/// record, which is the same run `index::list` already calls unfinished.
+/// written. A process killed outright — a signal, a crash, a reboot — cannot
+/// remove it, so the run also holds an OS lock on `live.lock` beside it, and
+/// `index::live` leaves out a `live.json` nobody holds that lock for. The OS
+/// releases the lock however the process ends, and a lock cannot outlive its
+/// process the way a recorded pid can be reused by another one.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Live {
     /// The profile writing the change.
@@ -54,6 +62,28 @@ pub struct Live {
 /// Where a run's `live.json` is.
 pub fn live_path(run_dir: &Path) -> PathBuf {
     run_dir.join("live.json")
+}
+
+/// Where the lock a running run holds is.
+pub fn live_lock_path(run_dir: &Path) -> PathBuf {
+    run_dir.join("live.lock")
+}
+
+/// Whether the process that wrote a run's `live.json` still holds its lock.
+///
+/// No lock file means no owner: the lock is taken before `live.json` is first
+/// written. Where the file system cannot lock at all, the run is taken to be
+/// going, which is what every run looked like before there was a lock.
+pub fn live_owner_running(run_dir: &Path) -> bool {
+    let Ok(file) = File::open(live_lock_path(run_dir)) else {
+        return false;
+    };
+    match file.try_lock_shared() {
+        // Nobody holds it. Released at once as `file` drops.
+        Ok(()) => false,
+        Err(std::fs::TryLockError::WouldBlock) => true,
+        Err(std::fs::TryLockError::Error(_)) => true,
+    }
 }
 
 impl RunLog {
@@ -71,12 +101,24 @@ impl RunLog {
             watcher: None,
             phase: Phase::Isolating,
             running_as: None,
+            _owner: None,
         })
     }
 
     /// Names the profiles this run is using, and starts reporting what it is
     /// doing where another process can read it.
     pub fn running_as(mut self, author: &str, reviewer: &str) -> Self {
+        // The lock first, so no reader ever finds a `live.json` whose owner
+        // has not taken it yet and calls the run dead. Best effort, like
+        // `live.json` itself: without it the run still runs, and reads as dead
+        // to a screen in another process.
+        self._owner = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(live_lock_path(&self.dir))
+            .ok()
+            .filter(|file| file.lock().is_ok());
         self.running_as = Some((author.to_string(), reviewer.to_string()));
         self.report();
         self
@@ -156,7 +198,9 @@ impl RunLog {
             .map_err(|e| Error::Other(format!("serializing record: {e}")))?;
         fs::write(self.dir.join("record.json"), json)?;
         // The record says how it ended, so there is nothing live left to say.
+        // The lock file goes too; the lock itself is released as the log drops.
         let _ = fs::remove_file(live_path(&self.dir));
+        let _ = fs::remove_file(live_lock_path(&self.dir));
         Ok(())
     }
 }
