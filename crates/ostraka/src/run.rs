@@ -53,6 +53,11 @@ pub struct Args {
     pub model: Option<String>,
     /// How many attempts a refused run gets. One is a run; more is a loop.
     pub attempts: usize,
+    /// The queued task this run is taking, where it is taking one. Its id
+    /// begins the run's id, so a run in progress can be tied back to the task
+    /// on the list — which is how a screen shows what a `drain` worker's task
+    /// is doing before the run has finished and the task records its run.
+    pub task: Option<String>,
 }
 
 impl Args {
@@ -73,6 +78,7 @@ impl Args {
             from: None,
             model: None,
             attempts: 1,
+            task: None,
         }
     }
 }
@@ -186,27 +192,11 @@ pub fn execute(
     // Vendors that can only be isolated by relocating their home directory get
     // one here, beside the run records and ignored by git for the same reason.
     let vendor_home = workspace.ostraka().join("vendor-home");
-    // A reviewer nobody named is the first one this workspace prefers that
-    // answers. Routing's own ordering only sees what a profile declares, and
-    // whether a reviewer is handed the repository's own rules is not something
-    // a profile can declare without a breaking change.
-    let review_adapter = args.review_adapter.clone().or_else(|| {
-        preferred_reviewer(
-            &workspace.reviewers(),
-            &profiles,
-            args.adapter.as_deref(),
-            |profile| {
-                ostraka_adapter::VendorAdapter::probe(
-                    &ostraka_adapter::process::ProcessAdapter::new(profile.clone()),
-                )
-                .is_ready()
-            },
-        )
-    });
-    let routing = route::select_until(
+    let routing = choose(
+        workspace,
         &profiles,
         args.adapter.as_deref(),
-        review_adapter.as_deref(),
+        args.review_adapter.as_deref(),
         &vendor_home,
         config
             .policy
@@ -230,7 +220,7 @@ pub fn execute(
     };
 
     let task = TaskSpec {
-        id: task_id(),
+        id: args.task.clone().unwrap_or_else(task_id),
         prompt: args.prompt.clone(),
         adapter: routing_author_id(&routing),
         author: ActorId::new(identity(&args.author, AUTHOR, &routing_author_id(&routing))),
@@ -498,6 +488,68 @@ pub fn run_reporting(
 /// A name that matches no profile is skipped rather than refused. The list is
 /// a preference written once for a workspace, and a profile missing from one
 /// machine should not stop runs on it.
+/// Picks the author and reviewer for a run, the way every run is picked.
+///
+/// A reviewer nobody named is the first one this workspace prefers that
+/// answers; then routing decides the rest. One function, because `execute`
+/// and the browser's picture of what a run would use must not be able to
+/// disagree — a pane that marked one profile as the reviewer while runs went
+/// to another would be a view that lied.
+#[allow(clippy::too_many_arguments)]
+pub fn choose(
+    workspace: &Workspace,
+    profiles: &[ostraka_adapter::Profile],
+    author: Option<&str>,
+    reviewer: Option<&str>,
+    vendor_home: &std::path::Path,
+    timeout: Option<std::time::Duration>,
+    stop: &ostraka_adapter::interrupt::Stop,
+) -> ostraka_runtime::Result<route::Routing> {
+    let reviewer = reviewer.map(str::to_string).or_else(|| {
+        preferred_reviewer(&workspace.reviewers(), profiles, author, |profile| {
+            ostraka_adapter::VendorAdapter::probe(&ostraka_adapter::process::ProcessAdapter::new(
+                profile.clone(),
+            ))
+            .is_ready()
+        })
+    });
+    route::select_until(
+        profiles,
+        author,
+        reviewer.as_deref(),
+        vendor_home,
+        timeout,
+        stop,
+    )
+}
+
+/// The profile ids a run started now would use as author and reviewer.
+///
+/// `None` where no pair can be made — no profiles, or none that answer — which
+/// a screen shows as nothing marked rather than as a guess. It probes, so it
+/// is for a background thread, not for drawing.
+pub fn would_route(
+    workspace: &Workspace,
+    author: Option<&str>,
+    reviewer: Option<&str>,
+) -> Option<(String, String)> {
+    let profiles = workspace.profiles().ok()?;
+    let routing = choose(
+        workspace,
+        &profiles,
+        author,
+        reviewer,
+        &workspace.ostraka().join("vendor-home"),
+        None,
+        &ostraka_adapter::interrupt::Stop::new(),
+    )
+    .ok()?;
+    Some((
+        ostraka_adapter::VendorAdapter::id(routing.author.as_ref()).to_string(),
+        ostraka_adapter::VendorAdapter::id(routing.reviewer.as_ref()).to_string(),
+    ))
+}
+
 pub fn preferred_reviewer(
     preferred: &[String],
     profiles: &[ostraka_adapter::Profile],

@@ -109,6 +109,7 @@ pub fn run_next(workspace: &Workspace, mut args: crate::run::Args, json: bool) -
     };
 
     args.prompt = task.prompt.clone();
+    args.task = Some(task.id.clone());
     if task.repository.is_some() {
         args.repository = task.repository.clone();
     }

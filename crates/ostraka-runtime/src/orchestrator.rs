@@ -106,7 +106,9 @@ pub fn run_task_until(
 ) -> Result<RunReport> {
     let repo = places.repo;
     let run_id = format!("{}-{}", task.id, now_rfc3339().replace([':', '-'], ""));
-    let mut log = RunLog::create(places.records, &run_id)?.watched_by(watcher);
+    let mut log = RunLog::create(places.records, &run_id)?
+        .watched_by(watcher)
+        .running_as(routing.author.id(), routing.reviewer.id());
     log.enter(Phase::Isolating);
 
     let mut record = RunRecord {

@@ -1584,3 +1584,121 @@ mod conversation {
         assert_eq!(d.app.pane().prompt, "change something");
     }
 }
+
+/// The agents beside the work: shown and hidden without taking the keys, and
+/// fed by what the runtime writes while a run is going.
+mod agents_beside {
+    use super::*;
+
+    #[test]
+    fn toggling_the_agents_leaves_the_task_being_typed_where_it_was() {
+        let _guard = exclusive();
+        let scratch = project("agents-toggle", 0);
+        let mut d = Driver::open(scratch.path());
+        d.screen();
+        assert!(d.app.side_shown, "a wide terminal did not show the agents");
+
+        d.typed("half a ta");
+        d.chord('x').key(KeyCode::Char('v'));
+        assert!(!d.app.side, "the leader did not hide them");
+        assert_eq!(d.app.focus, Focus::Prompt, "hiding them took the keys");
+        d.typed("sk");
+        assert_eq!(d.app.pane().prompt, "half a task");
+        d.hides("writes next");
+
+        d.chord('x').key(KeyCode::Char('v'));
+        assert!(d.app.side);
+        assert_eq!(d.app.focus, Focus::Prompt);
+    }
+
+    /// End to end: a run started in this browser is seen the way a `drain`
+    /// worker in another shell would be — through the `live.json` the runtime
+    /// writes beside it — and the profile writing it says so.
+    #[test]
+    fn a_run_in_progress_shows_who_is_writing_it() {
+        let _guard = exclusive();
+        let scratch = project("agents-live", 3);
+        let mut d = Driver::open(scratch.path());
+        d.screen();
+        d.auto().typed("write the file").key(KeyCode::Enter);
+        d.until("the pane to see the writer", |app| {
+            app.live
+                .iter()
+                .any(|(_, live)| live.phase == ostraka_runtime::progress::Phase::Authoring)
+        });
+        let writer = d.app.live[0].1.author.clone();
+        let out = d.screen();
+        let row = out
+            .lines()
+            .skip_while(|line| !line.contains(writer.as_str()))
+            .take(5)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            row.contains("writing"),
+            "the writer is not shown writing:\n{out}"
+        );
+
+        // And once the run is over, nobody is still shown working on it.
+        d.until("the run to finish", |app| !app.thread().running());
+        d.until("the pane to catch up", |app| app.live.is_empty());
+        d.hides("writing");
+    }
+
+    /// End to end: a task queued from another shell is read off disk into
+    /// the only repository there is, and a click on that repository's header
+    /// folds its tasks away without taking the keys.
+    #[test]
+    fn queued_tasks_appear_and_a_header_click_folds_them() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let _guard = exclusive();
+        let scratch = project("agents-tasks", 0);
+        crate::tasks::add(
+            &scratch.path().join(".ostraka"),
+            "tidy the readme",
+            None,
+            None,
+        )
+        .expect("queue");
+        let mut d = Driver::open(scratch.path());
+        d.screen();
+        d.until("the pane to read the list", |app| {
+            !app.task_groups.is_empty()
+        });
+        assert_eq!(d.app.task_groups[0].repository, "work");
+        d.shows("tidy the readme");
+
+        let (header, _) = d.app.task_headers[0].clone();
+        super::super::mouse(
+            &mut d.app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: header.x + 2,
+                row: header.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert!(d.app.tasks_closed.contains("work"));
+        assert_eq!(d.app.focus, Focus::Prompt, "the click took the keys");
+        d.hides("tidy the readme");
+    }
+    /// The pane ties a going task to its run by the run id beginning with the
+    /// task's, since the task records its run only once the run is over.
+    #[test]
+    fn a_queued_task_begins_the_id_of_the_run_that_takes_it() {
+        let _guard = exclusive();
+        let scratch = project("agents-task-run", 0);
+        let workspace = Workspace::at(scratch.path());
+        let queued =
+            crate::tasks::add(&workspace.ostraka(), "write the file", None, None).expect("queue");
+        let args = crate::run::Args::for_task(String::new());
+        crate::task_cmd::run_next(&workspace, args, true).expect("run");
+        let done = crate::tasks::list(&workspace.ostraka(), crate::tasks::State::Done);
+        let run = done[0].run_id.clone().expect("the task records its run");
+        assert!(
+            run.starts_with(&format!("{}-", queued.id)),
+            "{run} does not begin with {}",
+            queued.id
+        );
+    }
+}
