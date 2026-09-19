@@ -67,10 +67,18 @@ fn verdict(answer: &str) -> String {
     )
 }
 
+/// A fixture script. It answers the probe a run starts with by naming itself
+/// and a version, and does nothing else then: its body ignores its arguments,
+/// and probed, it would do its whole job — writing files, sleeping — before the
+/// run it was probed for began.
+fn script(id: &str, body: &str) -> String {
+    format!("#!/bin/sh\ncase \"$1\" in --probe) echo \"{id} 0.0.1\"; exit 0;; esac\n{body}\n")
+}
+
 /// Writes an executable script and returns a profile that runs it.
 fn agent(repo: &Path, id: &str, body: &str) -> Profile {
     let path = repo.join(format!("{id}.sh"));
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
+    std::fs::write(&path, script(id, body)).expect("write script");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -81,6 +89,7 @@ fn agent(repo: &Path, id: &str, body: &str) -> Profile {
         id = "{id}"
         command = "{}"
         args = ["{{{{prompt}}}}"]
+        probe_args = ["--probe"]
         "#,
         path.display()
     ))
@@ -404,6 +413,120 @@ fn an_approved_run_produces_a_token_a_commit_and_a_replayable_record() {
     assert!(!events.is_empty(), "no events were logged");
 }
 
+/// G4: what took each seat is recorded beside the run and in the commit — the
+/// CLI version the probe reported and the model hint that reached the command
+/// line. The reviewer is never handed a hint, so its model reads "profile
+/// default".
+#[test]
+fn a_run_records_which_cli_and_model_took_each_seat() {
+    let f = fixture("provenance");
+    let mut writer = agent(&f.repo, "writer", "echo new > added.txt");
+    writer.model_args = vec!["--model".into(), "{{model}}".into()];
+    let reviewer = agent(&f.repo, "reviewer", &verdict("APPROVE"));
+    let routing = route::select(
+        &[writer, reviewer],
+        Some("writer"),
+        Some("reviewer"),
+        &f.repo.join(".ostraka/vendor-home"),
+        None,
+    )
+    .unwrap();
+
+    let (worktrees, records) = places(&f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+        skills: None,
+    };
+    let mut spec = task("add a file", "archon");
+    spec.model = Some("big-model".into());
+    let report = orchestrator::run_task(
+        &places,
+        &config("true"),
+        &routing,
+        &spec,
+        &ActorId::new("ephor"),
+        None,
+    )
+    .expect("run completes");
+    assert!(report.approved(), "{:?}", report.refusal);
+
+    let run_id = &report.record.run_id;
+    let provenance = ostraka_runtime::record::read_provenance(&records.join("runs").join(run_id))
+        .expect("provenance.json was written");
+    assert_eq!(provenance.author.profile, "writer");
+    assert_eq!(provenance.author.cli.as_deref(), Some("writer 0.0.1"));
+    assert_eq!(provenance.author.model.as_deref(), Some("big-model"));
+    assert_eq!(provenance.reviewer.profile, "reviewer");
+    assert_eq!(provenance.reviewer.cli.as_deref(), Some("reviewer 0.0.1"));
+    assert_eq!(provenance.reviewer.model, None);
+
+    let message = std::process::Command::new("git")
+        .args(["log", "-1", "--format=%B", &format!("ostraka/{run_id}")])
+        .current_dir(&f.repo)
+        .output()
+        .expect("git log");
+    let message = String::from_utf8_lossy(&message.stdout);
+    for trailer in [
+        "Author-cli: writer 0.0.1",
+        "Author-model: big-model",
+        "Reviewer-cli: reviewer 0.0.1",
+        "Reviewer-model: profile default",
+        "Run: ",
+        "Authored-by: ",
+        "Reviewed-by: ",
+    ] {
+        assert!(
+            message.contains(trailer),
+            "{trailer:?} missing from:\n{message}"
+        );
+    }
+}
+
+/// A model hint that cannot reach the author's command line is not credited
+/// to the run: the author ran on its own default, and the record says so.
+#[test]
+fn a_model_hint_the_author_cannot_take_is_not_recorded_as_used() {
+    let f = fixture("provenance-nomodel");
+    let writer = agent(&f.repo, "writer", "echo new > added.txt");
+    let reviewer = agent(&f.repo, "reviewer", &verdict("APPROVE"));
+    let routing = route::select(
+        &[writer, reviewer],
+        Some("writer"),
+        Some("reviewer"),
+        &f.repo.join(".ostraka/vendor-home"),
+        None,
+    )
+    .unwrap();
+    let (worktrees, records) = places(&f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+        skills: None,
+    };
+    let mut spec = task("add a file", "archon");
+    spec.model = Some("big-model".into());
+    let report = orchestrator::run_task(
+        &places,
+        &config("true"),
+        &routing,
+        &spec,
+        &ActorId::new("ephor"),
+        None,
+    )
+    .expect("run completes");
+    let provenance =
+        ostraka_runtime::record::read_provenance(&records.join("runs").join(&report.record.run_id))
+            .expect("provenance.json was written");
+    assert_eq!(provenance.author.model, None);
+}
+
 #[test]
 fn a_failing_check_refuses_before_any_reviewer_is_consulted() {
     let f = fixture("checkfail");
@@ -587,7 +710,7 @@ fn the_author_cannot_review_their_own_change_end_to_end() {
 /// A vendor that also reports what it spent, the way a shipped profile does.
 fn counting_agent(repo: &Path, id: &str, body: &str) -> Profile {
     let path = repo.join(format!("{id}.sh"));
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
+    std::fs::write(&path, script(id, body)).expect("write script");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -598,6 +721,7 @@ fn counting_agent(repo: &Path, id: &str, body: &str) -> Profile {
         id = "{id}"
         command = "{}"
         args = ["{{{{prompt}}}}"]
+        probe_args = ["--probe"]
 
         [usage]
         stream = "stderr"
