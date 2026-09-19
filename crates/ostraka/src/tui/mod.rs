@@ -13,6 +13,7 @@
 mod command;
 #[cfg(test)]
 mod flows;
+mod footer;
 mod mention;
 mod pane;
 mod roster;
@@ -396,13 +397,78 @@ fn copy_selection(app: &mut App) {
     });
 }
 
-/// Brings what the agents beside the work show up to date.
+/// Brings what the agents beside the work, and the footer under it, show up
+/// to date.
 ///
-/// Only while they are on the screen, and never on the drawing path. The probe
-/// is taken once, on a thread, and kept. Runs in progress are read from disk
-/// about once a second, which is where a `drain` in another shell leaves them.
-/// The pair a run would use is worked out again only when the thread's own
-/// choice changes, because working it out probes too.
+/// Never on the drawing path. Runs in progress and the task list are read from
+/// disk about once a second, which is where a `drain` in another shell leaves
+/// them — whether or not the agents are shown, because the footer counts them
+/// and is always shown. What only the agents use waits until they are on the
+/// screen: the probe, taken once on a thread and kept, and the pair a run would
+/// use, worked out again only when the thread's own choice changes, because
+/// working it out probes too.
+/// Approved runs still waiting on a promotion, across this workspace's
+/// repositories: one `git for-each-ref` each.
+fn unpromoted(app: &App) -> std::collections::HashSet<String> {
+    let approved: Vec<&str> = app
+        .runs
+        .iter()
+        .filter(|run| run.approved())
+        .map(|run| run.run_id.as_str())
+        .collect();
+    if approved.is_empty() {
+        return Default::default();
+    }
+    app.workspace
+        .repositories()
+        .iter()
+        .flat_map(|repo| {
+            let branches = std::process::Command::new("git")
+                .args([
+                    "for-each-ref",
+                    "--format=%(refname:short)",
+                    "refs/heads/ostraka/",
+                    "refs/heads/promoted/",
+                ])
+                .current_dir(&repo.path)
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| {
+                    String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            footer::unpromoted(&approved, &branches)
+        })
+        .collect()
+}
+
+/// The newest listed run's record, read again only when the newest run is a
+/// different one or has finished since.
+fn stock_last_record(app: &mut App, records_root: &Path) {
+    let Some(newest) = app.matching.first().and_then(|i| app.runs.get(*i)) else {
+        app.last_record = None;
+        return;
+    };
+    let have = app
+        .last_record
+        .as_ref()
+        .is_some_and(|r| r.run_id == newest.run_id && r.outcome == newest.outcome);
+    if have {
+        return;
+    }
+    let path = records_root
+        .join("runs")
+        .join(&newest.run_id)
+        .join("record.json");
+    app.last_record = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok());
+}
+
 fn stock_roster(app: &mut App, records_root: &Path) {
     if let Some(rx) = app.probes_loading.take() {
         match rx.try_recv() {
@@ -417,17 +483,6 @@ fn stock_roster(app: &mut App, records_root: &Path) {
             Err(std::sync::mpsc::TryRecvError::Empty) => app.next_pair_loading = Some(rx),
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
         }
-    }
-    if !app.side_shown {
-        return;
-    }
-    if app.probes.is_empty() && app.probes_loading.is_none() && !app.profile_ids.is_empty() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let workspace = app.workspace.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(agents(&workspace));
-        });
-        app.probes_loading = Some(rx);
     }
     // Four ticks of a quarter of a second each.
     if app.tick.is_multiple_of(4) {
@@ -447,6 +502,19 @@ fn stock_roster(app: &mut App, records_root: &Path) {
             &repositories,
             &app.live,
         );
+        app.unpromoted = unpromoted(app);
+    }
+    stock_last_record(app, records_root);
+    if !app.side_shown {
+        return;
+    }
+    if app.probes.is_empty() && app.probes_loading.is_none() && !app.profile_ids.is_empty() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let workspace = app.workspace.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(agents(&workspace));
+        });
+        app.probes_loading = Some(rx);
     }
     let wanted = (
         app.thread().adapter.clone(),
