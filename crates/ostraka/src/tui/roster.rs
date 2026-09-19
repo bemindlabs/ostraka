@@ -100,6 +100,220 @@ pub fn rows(
         .collect()
 }
 
+/// Where a task on the list stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskState {
+    /// Claimed and being run, with the phase its run is in where its run can
+    /// be found. `None` is a task claimed by a run that has not reported yet.
+    Going(Option<Phase>),
+    /// On the list, not yet taken.
+    Waiting,
+    /// Taken and finished, with the outcome its run recorded.
+    Done(Option<String>),
+}
+
+/// One task, as the pane shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskRow {
+    pub id: String,
+    pub prompt: String,
+    pub state: TaskState,
+    /// Waiting on a person's decision. Nothing sets it yet: the decisions
+    /// queue will, and the row already has the room for its mark.
+    pub needs_person: bool,
+}
+
+/// One repository's tasks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskGroup {
+    pub repository: String,
+    pub waiting: usize,
+    pub going: usize,
+    pub done: usize,
+    /// Going, then waiting in the order they will be taken, then the most
+    /// recently finished few.
+    pub rows: Vec<TaskRow>,
+}
+
+/// How many finished tasks a group shows. The rest are counted, not listed:
+/// the list is for what is happening, and a long tail of done work would push
+/// it off the pane.
+pub const DONE_SHOWN: usize = 3;
+
+/// The group for tasks that name no repository in a workspace with several.
+pub const NO_REPOSITORY: &str = "(no repository)";
+
+/// The task list, grouped by repository.
+///
+/// A task that names no repository belongs to the only one where the workspace
+/// has exactly one — which is where a run would put it — and otherwise to its
+/// own group, rather than to a repository it may not be about. A going task
+/// shows its run's phase where its run can be found in `live`: a run taking a
+/// queued task has an id that begins with the task's.
+pub fn task_groups(
+    pending: &[crate::tasks::Task],
+    running: &[crate::tasks::Task],
+    done: &[crate::tasks::Task],
+    repositories: &[String],
+    live: &[(String, Live)],
+) -> Vec<TaskGroup> {
+    let home = |task: &crate::tasks::Task| -> String {
+        match (&task.repository, repositories) {
+            (Some(named), _) => named.clone(),
+            (None, [only]) => only.clone(),
+            (None, _) => NO_REPOSITORY.to_string(),
+        }
+    };
+    let mut names: Vec<String> = pending
+        .iter()
+        .chain(running)
+        .chain(done)
+        .map(home)
+        .collect();
+    names.sort();
+    names.dedup();
+    // The group of unplaced tasks last: it is the odd one out, not a repository.
+    names.sort_by_key(|name| name == NO_REPOSITORY);
+
+    names
+        .into_iter()
+        .map(|repository| {
+            let mine = |tasks: &[crate::tasks::Task]| -> Vec<crate::tasks::Task> {
+                tasks
+                    .iter()
+                    .filter(|t| home(t) == repository)
+                    .cloned()
+                    .collect()
+            };
+            let (mut going, mut waiting, mut finished) = (mine(running), mine(pending), mine(done));
+            going.sort_by(|a, b| a.id.cmp(&b.id));
+            // Oldest first: the order `run --next` and `drain` take them in.
+            waiting.sort_by(|a, b| a.id.cmp(&b.id));
+            // Most recently finished first, read off the run id's time.
+            let finished_at = |t: &crate::tasks::Task| {
+                t.run_id
+                    .as_deref()
+                    .and_then(|r| r.rsplit_once('-'))
+                    .map(|(_, at)| at.to_string())
+                    .unwrap_or_else(|| t.added_at.clone())
+            };
+            finished.sort_by_key(|t| std::cmp::Reverse(finished_at(t)));
+
+            let phase_of = |task: &crate::tasks::Task| {
+                let prefix = format!("{}-", task.id);
+                live.iter()
+                    .find(|(run, _)| run.starts_with(&prefix))
+                    .map(|(_, live)| live.phase)
+            };
+            let row = |task: &crate::tasks::Task, state| TaskRow {
+                id: task.id.clone(),
+                prompt: task.prompt.clone(),
+                state,
+                needs_person: false,
+            };
+            let rows = going
+                .iter()
+                .map(|t| row(t, TaskState::Going(phase_of(t))))
+                .chain(waiting.iter().map(|t| row(t, TaskState::Waiting)))
+                .chain(
+                    finished
+                        .iter()
+                        .take(DONE_SHOWN)
+                        .map(|t| row(t, TaskState::Done(t.outcome.clone()))),
+                )
+                .collect();
+            TaskGroup {
+                waiting: waiting.len(),
+                going: going.len(),
+                done: finished.len(),
+                repository,
+                rows,
+            }
+        })
+        .collect()
+}
+
+/// One line of the task section, before it is drawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskLine {
+    /// A repository's header. `open` is whether its tasks are under it on
+    /// this draw, which is not only whether somebody closed it: a short pane
+    /// closes groups too.
+    Header {
+        repository: String,
+        waiting: usize,
+        going: usize,
+        done: usize,
+        open: bool,
+    },
+    Task(TaskRow),
+    /// Tasks of the group above that did not fit.
+    More(usize),
+}
+
+/// The task section in `room` lines, headers first.
+///
+/// Every header is placed before any task, so a short pane loses tasks and
+/// keeps the repositories and their counts; the room left goes to the open
+/// groups in order. A group cut short says how many it did not show, rather
+/// than ending as if it had no more.
+pub fn task_lines(
+    groups: &[TaskGroup],
+    closed: &std::collections::HashSet<String>,
+    room: usize,
+) -> Vec<TaskLine> {
+    let header = |group: &TaskGroup, open| TaskLine::Header {
+        repository: group.repository.clone(),
+        waiting: group.waiting,
+        going: group.going,
+        done: group.done,
+        open,
+    };
+    if groups.len() > room {
+        // Not even the headers fit: as many as do, and a count for the rest.
+        let shown = room.saturating_sub(1);
+        let mut lines: Vec<TaskLine> = groups[..shown].iter().map(|g| header(g, false)).collect();
+        if room > 0 {
+            lines.push(TaskLine::More(groups.len() - shown));
+        }
+        return lines;
+    }
+    let mut spare = room - groups.len();
+    let mut lines = Vec::new();
+    for group in groups {
+        let wanted = if closed.contains(&group.repository) {
+            0
+        } else {
+            group.rows.len()
+        };
+        let (shown, more) = if wanted <= spare {
+            (wanted, false)
+        } else if spare >= 2 {
+            (spare - 1, true)
+        } else {
+            (0, false)
+        };
+        lines.push(header(group, shown > 0));
+        lines.extend(group.rows[..shown].iter().cloned().map(TaskLine::Task));
+        if more {
+            lines.push(TaskLine::More(wanted - shown));
+        }
+        spare -= shown + usize::from(more);
+    }
+    lines
+}
+
+/// The part of a task id a narrow pane has room for: the time it was added,
+/// with the counter only where it is not the first of its second.
+/// `k20260920T142501Z-0` is `142501`; `ostraka task list` has the whole id.
+pub fn short_id(id: &str) -> String {
+    let Some((_, time)) = id.split_once('T') else {
+        return id.to_string();
+    };
+    let time = time.replacen('Z', "", 1);
+    time.strip_suffix("-0").unwrap_or(&time).to_string()
+}
+
 /// The narrowest terminal the pane appears on.
 ///
 /// Below it, the width is the work's: a transcript is what this screen is for,
@@ -231,6 +445,162 @@ mod tests {
             .find(|r| r.id == "claude-code")
             .expect("claude-code");
         assert!(claude.doing.is_empty(), "{claude:?}");
+    }
+
+    fn task(id: &str, repository: Option<&str>) -> crate::tasks::Task {
+        crate::tasks::Task {
+            id: id.to_string(),
+            prompt: format!("do {id}"),
+            added_at: id.to_string(),
+            repository: repository.map(str::to_string),
+            adapter: None,
+            run_id: None,
+            outcome: None,
+        }
+    }
+
+    #[test]
+    fn tasks_are_grouped_by_repository_with_counts() {
+        let pending = [task("k1", Some("web")), task("k2", Some("api"))];
+        let running = [task("k3", Some("web"))];
+        let done = [task("k4", Some("web"))];
+        let groups = task_groups(
+            &pending,
+            &running,
+            &done,
+            &["api".into(), "web".into()],
+            &[],
+        );
+        let shape: Vec<(&str, usize, usize, usize)> = groups
+            .iter()
+            .map(|g| (g.repository.as_str(), g.waiting, g.going, g.done))
+            .collect();
+        assert_eq!(shape, [("api", 1, 0, 0), ("web", 1, 1, 1)]);
+    }
+
+    /// With one repository, a task that names none is that repository's, as a
+    /// run would make it. With several it is nobody's, and says so.
+    #[test]
+    fn a_task_with_no_repository_joins_the_only_one_or_its_own_group() {
+        let unplaced = [task("k1", None)];
+        let one = task_groups(&unplaced, &[], &[], &["site".into()], &[]);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].repository, "site");
+
+        let several = task_groups(
+            &[task("k1", None), task("k2", Some("api"))],
+            &[],
+            &[],
+            &["api".into(), "web".into()],
+            &[],
+        );
+        let names: Vec<&str> = several.iter().map(|g| g.repository.as_str()).collect();
+        assert_eq!(
+            names,
+            ["api", NO_REPOSITORY],
+            "the unplaced group comes last"
+        );
+    }
+
+    /// Going first, then waiting oldest first, then the few most recently
+    /// finished — and a going task shows its run's phase where it can be found.
+    #[test]
+    fn a_group_lists_going_then_waiting_then_the_last_few_done() {
+        let pending = [task("k5", Some("r")), task("k2", Some("r"))];
+        let running = [task("k3", Some("r"))];
+        let mut done = Vec::new();
+        for n in 0..5 {
+            let mut t = task(&format!("d{n}"), Some("r"));
+            t.run_id = Some(format!("d{n}-2026092{n}T000000Z"));
+            t.outcome = Some("approved".into());
+            done.push(t);
+        }
+        let live_runs = [(
+            "k3-20260920T120000Z".to_string(),
+            live("writer", "reader", Phase::Gating),
+        )];
+        let groups = task_groups(&pending, &running, &done, &["r".into()], &live_runs);
+        let rows = &groups[0].rows;
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["k3", "k2", "k5", "d4", "d3", "d2"]);
+        assert_eq!(rows[0].state, TaskState::Going(Some(Phase::Gating)));
+        assert_eq!(rows[1].state, TaskState::Waiting);
+        assert_eq!(rows[3].state, TaskState::Done(Some("approved".into())));
+        assert_eq!(groups[0].done, 5, "all five are counted, three are listed");
+        assert!(rows.iter().all(|r| !r.needs_person));
+    }
+
+    fn group(repository: &str, tasks: usize) -> TaskGroup {
+        TaskGroup {
+            repository: repository.to_string(),
+            waiting: tasks,
+            going: 0,
+            done: 0,
+            rows: (0..tasks)
+                .map(|n| TaskRow {
+                    id: format!("{repository}{n}"),
+                    prompt: String::new(),
+                    state: TaskState::Waiting,
+                    needs_person: false,
+                })
+                .collect(),
+        }
+    }
+
+    fn shape(lines: &[TaskLine]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| match line {
+                TaskLine::Header {
+                    repository, open, ..
+                } => {
+                    format!("{}{repository}", if *open { "v" } else { ">" })
+                }
+                TaskLine::Task(row) => row.id.clone(),
+                TaskLine::More(n) => format!("+{n}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_task_section_shows_everything_where_it_fits() {
+        let groups = [group("a", 2), group("b", 1)];
+        let lines = task_lines(&groups, &Default::default(), 10);
+        assert_eq!(shape(&lines), ["va", "a0", "a1", "vb", "b0"]);
+    }
+
+    /// Short of room, tasks go before headers do: every repository keeps its
+    /// header and counts, and a group cut short says how many it hid.
+    #[test]
+    fn a_short_task_section_collapses_to_its_headers_first() {
+        let groups = [group("a", 4), group("b", 2)];
+        assert_eq!(
+            shape(&task_lines(&groups, &Default::default(), 5)),
+            ["va", "a0", "a1", "+2", ">b"]
+        );
+        assert_eq!(
+            shape(&task_lines(&groups, &Default::default(), 2)),
+            [">a", ">b"]
+        );
+        assert_eq!(shape(&task_lines(&groups, &Default::default(), 1)), ["+2"]);
+        assert!(task_lines(&groups, &Default::default(), 0).is_empty());
+    }
+
+    #[test]
+    fn a_closed_group_shows_only_its_header_and_gives_its_room_away() {
+        let groups = [group("a", 2), group("b", 2)];
+        let closed = std::iter::once("a".to_string()).collect();
+        assert_eq!(
+            shape(&task_lines(&groups, &closed, 4)),
+            [">a", "vb", "b0", "b1"]
+        );
+    }
+
+    #[test]
+    fn a_task_id_is_shortened_to_its_time() {
+        assert_eq!(short_id("k20260920T142501Z-0"), "142501");
+        assert_eq!(short_id("k20260920T142501Z-3"), "142501-3");
+        assert_eq!(short_id("custom"), "custom");
     }
 
     #[test]

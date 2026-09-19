@@ -85,6 +85,7 @@ pub fn run(workspace: &Workspace, args: crate::run::Args, workers: usize, json: 
 
                     let mut mine = args.clone();
                     mine.prompt = claimed.prompt.clone();
+                    mine.task = Some(claimed.id.clone());
                     if claimed.repository.is_some() {
                         mine.repository = claimed.repository.clone();
                     }

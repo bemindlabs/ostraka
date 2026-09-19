@@ -1644,4 +1644,61 @@ mod agents_beside {
         d.until("the pane to catch up", |app| app.live.is_empty());
         d.hides("writing");
     }
+
+    /// End to end: a task queued from another shell is read off disk into
+    /// the only repository there is, and a click on that repository's header
+    /// folds its tasks away without taking the keys.
+    #[test]
+    fn queued_tasks_appear_and_a_header_click_folds_them() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let _guard = exclusive();
+        let scratch = project("agents-tasks", 0);
+        crate::tasks::add(
+            &scratch.path().join(".ostraka"),
+            "tidy the readme",
+            None,
+            None,
+        )
+        .expect("queue");
+        let mut d = Driver::open(scratch.path());
+        d.screen();
+        d.until("the pane to read the list", |app| {
+            !app.task_groups.is_empty()
+        });
+        assert_eq!(d.app.task_groups[0].repository, "work");
+        d.shows("tidy the readme");
+
+        let (header, _) = d.app.task_headers[0].clone();
+        super::super::mouse(
+            &mut d.app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: header.x + 2,
+                row: header.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert!(d.app.tasks_closed.contains("work"));
+        assert_eq!(d.app.focus, Focus::Prompt, "the click took the keys");
+        d.hides("tidy the readme");
+    }
+    /// The pane ties a going task to its run by the run id beginning with the
+    /// task's, since the task records its run only once the run is over.
+    #[test]
+    fn a_queued_task_begins_the_id_of_the_run_that_takes_it() {
+        let _guard = exclusive();
+        let scratch = project("agents-task-run", 0);
+        let workspace = Workspace::at(scratch.path());
+        let queued =
+            crate::tasks::add(&workspace.ostraka(), "write the file", None, None).expect("queue");
+        let args = crate::run::Args::for_task(String::new());
+        crate::task_cmd::run_next(&workspace, args, true).expect("run");
+        let done = crate::tasks::list(&workspace.ostraka(), crate::tasks::State::Done);
+        let run = done[0].run_id.clone().expect("the task records its run");
+        assert!(
+            run.starts_with(&format!("{}-", queued.id)),
+            "{run} does not begin with {}",
+            queued.id
+        );
+    }
 }

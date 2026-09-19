@@ -53,6 +53,11 @@ pub struct Args {
     pub model: Option<String>,
     /// How many attempts a refused run gets. One is a run; more is a loop.
     pub attempts: usize,
+    /// The queued task this run is taking, where it is taking one. Its id
+    /// begins the run's id, so a run in progress can be tied back to the task
+    /// on the list — which is how a screen shows what a `drain` worker's task
+    /// is doing before the run has finished and the task records its run.
+    pub task: Option<String>,
 }
 
 impl Args {
@@ -73,6 +78,7 @@ impl Args {
             from: None,
             model: None,
             attempts: 1,
+            task: None,
         }
     }
 }
@@ -214,7 +220,7 @@ pub fn execute(
     };
 
     let task = TaskSpec {
-        id: task_id(),
+        id: args.task.clone().unwrap_or_else(task_id),
         prompt: args.prompt.clone(),
         adapter: routing_author_id(&routing),
         author: ActorId::new(identity(&args.author, AUTHOR, &routing_author_id(&routing))),

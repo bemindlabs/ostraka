@@ -425,6 +425,7 @@ fn main() -> ExitCode {
                 } else {
                     1
                 },
+                task: None,
             };
             if *mode == mode::Mode::Loop && *attempts == 0 {
                 Err("a loop needs at least one attempt".into())

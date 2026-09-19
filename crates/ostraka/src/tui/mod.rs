@@ -231,7 +231,20 @@ fn mouse(app: &mut App, event: MouseEvent) {
         .iter()
         .find(|(_, area, _)| area.contains(Position::new(event.column, event.row)))
         .copied();
+    // A repository's header in the side pane opens and closes its tasks.
+    // The keys stay where they were: the pane is read, not worked in.
+    let header = app
+        .task_headers
+        .iter()
+        .find(|(area, _)| area.contains(Position::new(event.column, event.row)))
+        .map(|(_, repository)| repository.clone());
     match event.kind {
+        MouseEventKind::Down(MouseButton::Left) if header.is_some() => {
+            let repository = header.unwrap_or_default();
+            if !app.tasks_closed.remove(&repository) {
+                app.tasks_closed.insert(repository);
+            }
+        }
         MouseEventKind::Down(MouseButton::Left) if over.is_some() => {
             let (index, area, scroll) = over.unwrap_or_default();
             app.focus_pane(index);
@@ -419,6 +432,21 @@ fn stock_roster(app: &mut App, records_root: &Path) {
     // Four ticks of a quarter of a second each.
     if app.tick % 4 == 0 {
         app.live = ostraka_runtime::index::live(records_root);
+        let ostraka = app.workspace.ostraka();
+        let list = |state| crate::tasks::list(&ostraka, state);
+        let repositories: Vec<String> = app
+            .workspace
+            .repositories()
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        app.task_groups = roster::task_groups(
+            &list(crate::tasks::State::Pending),
+            &list(crate::tasks::State::Running),
+            &list(crate::tasks::State::Done),
+            &repositories,
+            &app.live,
+        );
     }
     let wanted = (
         app.thread().adapter.clone(),

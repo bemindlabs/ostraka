@@ -231,6 +231,13 @@ pub struct App {
     pub next_pair: Option<(String, String)>,
     pub next_pair_for: Option<(Option<String>, Option<String>)>,
     pub next_pair_loading: Option<std::sync::mpsc::Receiver<Option<(String, String)>>>,
+    /// The task list by repository, read on the same tick as `live`.
+    pub task_groups: Vec<super::roster::TaskGroup>,
+    /// Repositories somebody closed in the pane, by name. Kept across reads,
+    /// so a group stays closed while its tasks come and go.
+    pub tasks_closed: std::collections::HashSet<String>,
+    /// Where each repository's header was last drawn, for a click to find.
+    pub task_headers: Vec<(Rect, String)>,
     /// The first pane shown when there are more panes than columns.
     pub first: usize,
     /// What `@` can name here: this repository's paths and the agents. Read
@@ -306,6 +313,9 @@ impl App {
             next_pair: None,
             next_pair_for: None,
             next_pair_loading: None,
+            task_groups: Vec::new(),
+            tasks_closed: Default::default(),
+            task_headers: Vec::new(),
             first: 0,
             mentionable: Mentionable::default(),
             models: Vec::new(),
@@ -971,7 +981,7 @@ fn beside(app: &App, content: Rect, screen_width: u16) -> (Rect, Option<Rect>) {
 /// Every profile in this workspace: can it run, what is it doing, and is it
 /// the one a run would use next. A picture of `roster::rows` and nothing more;
 /// the rows are worked out there.
-fn render_roster(frame: &mut Frame, app: &App, area: Rect) {
+fn render_roster(frame: &mut Frame, app: &mut App, area: Rect) {
     let rows = super::roster::rows(
         &app.profile_ids,
         &app.probes,
@@ -1053,7 +1063,101 @@ fn render_roster(frame: &mut Frame, app: &App, area: Rect) {
         lines.truncate(height - 1);
         lines.push(dim(format!("\u{2026} {hidden} more lines")));
     }
+    // The tasks get what the profiles leave: a blank line, a heading and a
+    // rule, then as much of the list as fits, headers first.
+    app.task_headers.clear();
+    const TASK_HEADING: usize = 3;
+    let left = height.saturating_sub(lines.len());
+    if !app.task_groups.is_empty() && left > TASK_HEADING {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled("tasks", theme::bold())));
+        lines.push(Line::from(Span::styled(
+            "\u{2500}".repeat(room),
+            theme::muted(),
+        )));
+        let task_lines =
+            super::roster::task_lines(&app.task_groups, &app.tasks_closed, left - TASK_HEADING);
+        for line in task_lines {
+            if let super::roster::TaskLine::Header { repository, .. } = &line {
+                let y = area.y + u16::try_from(lines.len()).unwrap_or(u16::MAX);
+                app.task_headers.push((
+                    Rect {
+                        y,
+                        height: 1,
+                        ..area
+                    },
+                    repository.clone(),
+                ));
+            }
+            lines.push(task_line(&line, room));
+        }
+    }
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// One line of the task section.
+///
+/// A header reads `▾ name  ●1 ○2 ✓5`: going, waiting and done, each only where
+/// there are some. A task reads its state's mark, the time part of its id and
+/// as much of its prompt as fits. The first column is kept for a mark on a task
+/// waiting on a person, which the decisions queue will set.
+fn task_line(line: &super::roster::TaskLine, room: usize) -> Line<'static> {
+    use super::roster::{TaskLine, TaskState};
+    match line {
+        TaskLine::Header {
+            repository,
+            waiting,
+            going,
+            done,
+            open,
+        } => {
+            let counts: Vec<String> = [
+                (*going, "\u{25cf}"),
+                (*waiting, "\u{25cb}"),
+                (*done, "\u{2713}"),
+            ]
+            .iter()
+            .filter(|(n, _)| *n > 0)
+            .map(|(n, mark)| format!("{mark}{n}"))
+            .collect();
+            let counts = counts.join(" ");
+            let arrow = if *open { "\u{25be}" } else { "\u{25b8}" };
+            let name_room = room.saturating_sub(counts.chars().count() + 3);
+            Line::from(vec![
+                Span::styled(format!("{arrow} "), theme::muted()),
+                Span::styled(
+                    format!("{:<name_room$}", truncate(repository, name_room)),
+                    theme::bold(),
+                ),
+                Span::raw(" "),
+                Span::styled(counts, theme::muted()),
+            ])
+        }
+        TaskLine::Task(row) => {
+            let (mark, colour) = match &row.state {
+                TaskState::Going(_) => ("\u{25cf}", theme::WARN),
+                TaskState::Waiting => ("\u{25cb}", theme::MUTED),
+                TaskState::Done(Some(outcome)) if outcome == "approved" => ("\u{2713}", theme::OK),
+                TaskState::Done(_) => ("\u{2717}", theme::BAD),
+            };
+            let person = if row.needs_person { "!" } else { " " };
+            let id = super::roster::short_id(&row.id);
+            let phase = match &row.state {
+                TaskState::Going(Some(phase)) => format!("{} ", phase.title()),
+                _ => String::new(),
+            };
+            let used = 2 + id.chars().count() + 1 + phase.chars().count();
+            let prompt = row.prompt.lines().next().unwrap_or_default();
+            Line::from(vec![
+                Span::styled(person.to_string(), theme::on(theme::WARN)),
+                Span::styled(format!("{mark} "), theme::on(colour)),
+                Span::styled(format!("{id} "), theme::muted()),
+                Span::styled(phase, theme::on(theme::WARN)),
+                Span::styled(truncate(prompt, room.saturating_sub(used)), theme::text()),
+            ])
+        }
+        TaskLine::More(n) => dim(format!("  \u{2026} {n} more")),
+    }
 }
 
 fn columns_for(app: &App, width: u16) -> usize {
@@ -3546,6 +3650,83 @@ mod tests {
         ] {
             assert!(out.contains(want), "{want:?} is not on:\n{out}");
         }
+    }
+
+    fn with_tasks() -> App {
+        use super::super::roster::{TaskGroup, TaskRow, TaskState};
+        use ostraka_runtime::progress::Phase;
+        let mut app = with_agents();
+        let row = |id: &str, prompt: &str, state| TaskRow {
+            id: id.into(),
+            prompt: prompt.into(),
+            state,
+            needs_person: false,
+        };
+        app.task_groups = vec![
+            TaskGroup {
+                repository: "api".into(),
+                waiting: 1,
+                going: 1,
+                done: 4,
+                rows: vec![
+                    row(
+                        "k20260920T101500Z-0",
+                        "fix login",
+                        TaskState::Going(Some(Phase::Gating)),
+                    ),
+                    row("k20260920T101600Z-0", "add rate limit", TaskState::Waiting),
+                    row(
+                        "k20260920T090000Z-0",
+                        "bump deps",
+                        TaskState::Done(Some("approved".into())),
+                    ),
+                ],
+            },
+            TaskGroup {
+                repository: "web".into(),
+                waiting: 1,
+                going: 0,
+                done: 0,
+                rows: vec![row("k20260920T110000Z-2", "dark mode", TaskState::Waiting)],
+            },
+        ];
+        app
+    }
+
+    #[test]
+    fn tasks_are_listed_under_the_agents_by_repository() {
+        let mut app = with_tasks();
+        let out = screen(&mut app, 120, 30);
+        for want in [
+            "tasks",
+            "\u{25be} api",
+            "\u{25cf}1 \u{25cb}1 \u{2713}4",
+            "101500 gate fix login",
+            "101600 add rate limit",
+            "090000 bump deps",
+            "\u{25be} web",
+            "110000-2 dark mode",
+        ] {
+            assert!(out.contains(want), "{want:?} is not on:\n{out}");
+        }
+        assert_eq!(app.task_headers.len(), 2, "both headers answer a click");
+    }
+
+    /// Profiles first: on a short terminal the task list gives way, headers
+    /// last, and the agents above it are drawn whole.
+    #[test]
+    fn a_short_pane_keeps_the_agents_and_folds_the_tasks() {
+        let mut app = with_tasks();
+        let out = screen(&mut app, 120, 20);
+        assert!(out.contains("reviews next"), "the agents were cut:\n{out}");
+        assert!(
+            out.contains("\u{25b8} web") || out.contains("more"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("dark mode"),
+            "a task outlived its header:\n{out}"
+        );
     }
 
     /// Below the threshold the width is the work's, and nothing is drawn,
