@@ -3272,7 +3272,9 @@ fn fold(text: &str, width: usize) -> Vec<String> {
         let mut space: Option<(usize, usize)> = None;
         for character in source.chars() {
             let cells = UnicodeWidthChar::width(character).unwrap_or(0);
-            if used + cells > width && !row.is_empty() {
+            // Until the character fits: a break at a space can leave a tail
+            // that, with this character, is still too wide.
+            while used + cells > width && !row.is_empty() {
                 match space.take() {
                     // Broken after the last space that fit. The space stays on
                     // the row it ends, and is trimmed off it.
@@ -3291,7 +3293,9 @@ fn fold(text: &str, width: usize) -> Vec<String> {
             }
             row.push(character);
             used += cells;
-            if character == ' ' {
+            // Not a space in leading indentation: breaking there would push a
+            // row of nothing but spaces, which trims to an empty row.
+            if character == ' ' && row.chars().any(|c| c != ' ') {
                 space = Some((row.len(), used));
             }
         }
@@ -3581,6 +3585,34 @@ mod tests {
         ] {
             for row in fold(&text, 17) {
                 assert!(row.width() <= 17, "{row:?} is {} wide", row.width());
+            }
+        }
+    }
+
+    /// From the #87 review: leading indentation is never a break point, so it
+    /// cannot leave an empty row, and a break at a space that leaves too
+    /// little room is followed by another, so no row runs a cell over.
+    #[test]
+    fn fold_never_breaks_at_indentation_or_runs_over_after_a_space() {
+        use unicode_width::UnicodeWidthStr;
+        assert_eq!(fold(" \u{4e16}\u{4e16}", 3), vec![" \u{4e16}", "\u{4e16}"]);
+        assert_eq!(fold("    abcdefgh", 6), vec!["    ab", "cdefgh"]);
+        for text in [
+            " \u{4e16}\u{4e16}\u{4e16}".to_string(),
+            "   \u{4e16} \u{754c}\u{754c}\u{754c}".to_string(),
+            "  a \u{4e16}\u{4e16}\u{4e16}\u{4e16}".to_string(),
+            "      indented words that wrap".to_string(),
+            " x\u{4e16}".repeat(8),
+        ] {
+            for width in 2..12 {
+                for row in fold(&text, width) {
+                    assert!(
+                        row.width() <= width,
+                        "{text:?} at {width}: {row:?} is {} wide",
+                        row.width()
+                    );
+                    assert!(!row.is_empty(), "{text:?} at {width} left an empty row");
+                }
             }
         }
     }
