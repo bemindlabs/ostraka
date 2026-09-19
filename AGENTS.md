@@ -1052,6 +1052,18 @@ change — reported from a real Next.js onboarding, issue #1.
 the ecosystem and then handing over a gate that cannot run in the environment
 Ostraka itself builds is worse than not detecting it.
 
+The gate is written with the project's own package manager, read from its
+lockfile: `pnpm-lock.yaml` is pnpm, `yarn.lock` is yarn, `bun.lockb` or
+`bun.lock` is bun, and `package-lock.json` or none is npm. It used to be `npm
+test` for every Node project, which in a pnpm or yarn repository runs a
+different resolver against a lockfile it does not read. Bun's is `bun run test`
+and not `bun test`, which is Bun's own test runner and ignores the script — the
+gate runs what the project says its tests are, as `npm test`, `pnpm test` and
+`yarn test` all do. Where a repository has more than one lockfile, pnpm, yarn
+and bun are asked in that order before npm, because a `package-lock.json` left
+beside another tool's lockfile is the likelier leftover. `describe` names the
+tool, so what `init` detected is on the screen.
+
 **Worktrees are released on success only.** The commit is on the run's branch,
 and the diff pane, replay and promotion all read it from there, so the checkout
 is redundant once a run is approved — and a directory per run is how a busy
@@ -1075,6 +1087,18 @@ did not exist was somewhere to take the second task from, and a claim two
 workers cannot both win — `tasks::claim` renames `pending/<id>` to
 `running/<id>`, which is atomic everywhere this ships and tells the loser
 `NotFound`. No lock file, no crate.
+
+**Worktrees are made one at a time, even when runs are not.** `git worktree
+add` and `remove` read every other worktree's metadata while they run, and one
+being made at the same moment has its directory under `.git/worktrees` before it
+has a `commondir` in it. Read in that window, git fails and the run never starts
+— which is what `several_runs_at_once_do_not_collide` hit now and then for long
+enough to be written off as a flaky test. It was not only the test: `drain
+--workers N` and panes running together both do exactly this. A process-wide
+lock in `worktree` serializes the two git calls. Serialized rather than retried,
+because a retry keyed on git's wording stops working when git rewords itself,
+and an add takes milliseconds. Two separate `ostraka` processes on one
+repository are not covered.
 
 **One Ctrl-C stops everything, and one run can be stopped on its own.** The
 process-wide flag stays, because a signal is global: Ctrl-C during
