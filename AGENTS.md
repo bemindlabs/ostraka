@@ -1037,6 +1037,18 @@ change — reported from a real Next.js onboarding, issue #1.
 the ecosystem and then handing over a gate that cannot run in the environment
 Ostraka itself builds is worse than not detecting it.
 
+The gate is written with the project's own package manager, read from its
+lockfile: `pnpm-lock.yaml` is pnpm, `yarn.lock` is yarn, `bun.lockb` or
+`bun.lock` is bun, and `package-lock.json` or none is npm. It used to be `npm
+test` for every Node project, which in a pnpm or yarn repository runs a
+different resolver against a lockfile it does not read. Bun's is `bun run test`
+and not `bun test`, which is Bun's own test runner and ignores the script — the
+gate runs what the project says its tests are, as `npm test`, `pnpm test` and
+`yarn test` all do. Where a repository has more than one lockfile, pnpm, yarn
+and bun are asked in that order before npm, because a `package-lock.json` left
+beside another tool's lockfile is the likelier leftover. `describe` names the
+tool, so what `init` detected is on the screen.
+
 **Worktrees are released on success only.** The commit is on the run's branch,
 and the diff pane, replay and promotion all read it from there, so the checkout
 is redundant once a run is approved — and a directory per run is how a busy
