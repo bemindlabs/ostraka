@@ -177,6 +177,10 @@ ostraka promote ID # give an approved run a branch. Merges nothing
 ostraka completion bash  # a completion script, generated from this parser
 ```
 
+How a run moves through all of this — the workspace, the seven steps of a run,
+the states from task to merged change, parallel runs and the crates — is drawn
+in [docs/architecture.md](docs/architecture.md).
+
 ## A workspace
 
 Ostraka works from a workspace rather than from inside the repository it is
