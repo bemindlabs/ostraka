@@ -163,7 +163,7 @@ stateDiagram-v2
     Running --> Rejected: refused
     Running --> Failed: setup failed
 
-    Rejected --> Running: loop mode
+    Rejected --> Running: loop mode, some refusals
     Approved --> Running: run --from ID
 
     Approved --> Promoted: ostraka promote ID
