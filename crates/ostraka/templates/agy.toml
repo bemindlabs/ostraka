@@ -35,6 +35,14 @@ event_format = "none"
 # line rather than a row of zeroes — "does not say" and "spent nothing" are
 # different claims.
 
+# Said as data as well as in the paragraph above, because the paragraph is
+# read by people and routing reads neither. A workspace that has not listed
+# its reviewers is given a default that leaves this profile out, so a change
+# is not judged by a reviewer that never saw the rules it was written under.
+# It can still be named, and still reviews where nothing else can.
+[instructions]
+repository = false
+
 # How the model picker lists this profile's models: `agy models` prints an id
 # and a name per line, separated by a tab, after a line saying it is fetching.
 [models]

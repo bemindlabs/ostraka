@@ -300,9 +300,24 @@ about this workspace, not about how a repository is verified. A run nobody named
 a reviewer for takes the first profile on the list that exists here, is not the
 author named for it, and answers. Asking and planning take their read-only
 profile from the same list. A name with no profile behind it is skipped, not
-refused, because the list is written once and a machine may lack one CLI. An
-empty or missing list leaves routing's own ordering as it was. `init` writes
-the profiles that review read-only and are handed the repository's instructions.
+refused, because the list is written once and a machine may lack one CLI. `init`
+writes the profiles that review read-only and are handed the repository's
+instructions.
+
+**A profile can say it goes without the repository's rules, and a workspace that
+names no reviewers is not given one that does.** The list above fixed new
+workspaces and left every older one — and every hand-written config — on
+routing's own ordering, where `agy` still won on its id. The fact routing could
+not see is now data: `[instructions] repository = false` in a profile, read by
+the binary from the file the way `[models]` is, so `Profile` gains no field and
+the published parser ignores the table. `Workspace::reviewers` returns the
+workspace's list where it has one, and otherwise the profiles that review
+read-only and do not declare that, in id order. Asking and planning read the
+same list. Where nothing else qualifies the default is empty and routing decides
+as before, so a workspace whose only other profile falls short still gets a
+pair; a profile left out of the default can still be named. An existing
+workspace picks up the declaration through `ostraka check`, which reports the
+missing table, and `ostraka init --upgrade`, which appends it.
 
 **An identity nobody chose is the profile that did the work.** Records and commit
 authors used to say `author` and `reviewer` for every run nobody named anyone

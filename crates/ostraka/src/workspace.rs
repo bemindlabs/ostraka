@@ -549,18 +549,73 @@ impl Workspace {
         self.root.join(&config.worktree.base)
     }
 
-    /// Reads every `*.toml` in `.ostraka/adapters/`, in sorted order.
     /// The reviewers this workspace prefers, in order, for a run nobody named
-    /// a reviewer for. Empty where it says nothing, which leaves the choice to
-    /// routing. Read when asked: it is a file somebody edits.
+    /// a reviewer for. Read when asked: it is a file somebody edits.
+    ///
+    /// `[routing] reviewers` where the workspace says, and it always wins —
+    /// which profiles judge changes here is the operator's call. Where it says
+    /// nothing, the profiles that can review read-only and are handed the
+    /// repository's own rules, in id order. Empty where there are none of
+    /// those, which leaves the choice to routing, so a workspace whose only
+    /// other profile falls short still gets a pair.
+    ///
+    /// The default is what changed. Where a workspace said nothing, routing
+    /// used to decide on its own, and it ordered by whether a profile could
+    /// review read-only and then by id — so `agy`, which reviews read-only and
+    /// is not handed `AGENTS.md`, became the reviewer wherever its id sorted
+    /// first, and judged changes without the rules they were written under.
+    /// Only workspaces `init` had written a list into were spared that.
     pub fn reviewers(&self) -> Vec<String> {
-        std::fs::read_to_string(self.config_path())
+        let listed = std::fs::read_to_string(self.config_path())
             .ok()
             .and_then(|text| toml::from_str::<Layout>(&text).ok())
             .map(|layout| layout.routing.reviewers)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if !listed.is_empty() {
+            return listed;
+        }
+        self.reviews_with_the_rules()
     }
 
+    /// Profiles that review read-only and do not say they go without the
+    /// repository's instructions.
+    ///
+    /// Read from the files rather than from `Profile`, the same way `[models]`
+    /// is: whether a CLI is handed `AGENTS.md` is a fact about the vendor, a
+    /// profile is where vendor facts are written down, and a field for it on
+    /// the published type is a breaking change. The published parser ignores a
+    /// table it does not know, so one file serves both.
+    fn reviews_with_the_rules(&self) -> Vec<String> {
+        #[derive(serde::Deserialize)]
+        struct Side {
+            id: String,
+            #[serde(default)]
+            review_args: Vec<String>,
+            #[serde(default)]
+            instructions: InstructionsTable,
+        }
+        #[derive(Default, serde::Deserialize)]
+        struct InstructionsTable {
+            repository: Option<bool>,
+        }
+
+        let Ok(entries) = std::fs::read_dir(self.adapters()) else {
+            return Vec::new();
+        };
+        let mut ids: Vec<String> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "toml"))
+            .filter_map(|p| std::fs::read_to_string(p).ok())
+            .filter_map(|text| toml::from_str::<Side>(&text).ok())
+            .filter(|side| !side.review_args.is_empty())
+            .filter(|side| side.instructions.repository != Some(false))
+            .map(|side| side.id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// Reads every `*.toml` in `.ostraka/adapters/`, in sorted order.
     pub fn profiles(&self) -> Loaded<Vec<Profile>> {
         let dir = self.adapters();
         if !dir.is_dir() {
@@ -959,5 +1014,78 @@ mod tests {
         assert_eq!(Workspace::at(&dir).placeholder_gate(None), None);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Where a workspace names no reviewers, the default leaves out a profile
+    /// that says it is not handed the repository's instructions — and where it
+    /// does name them, what it names is used as written.
+    #[test]
+    fn a_reviewer_that_never_sees_the_rules_is_not_the_default() {
+        let dir = scratch("reviewers");
+        let adapters = dir.join(".ostraka/adapters");
+        std::fs::create_dir_all(&adapters).expect("adapters");
+        let profile = |id: &str, extra: &str| {
+            std::fs::write(
+                adapters.join(format!("{id}.toml")),
+                format!("id = \"{id}\"\ncommand = \"true\"\nargs = [\"{{{{prompt}}}}\"]\n{extra}"),
+            )
+            .expect("profile");
+        };
+        // Sorts first, reviews read-only, and says it never sees AGENTS.md.
+        profile(
+            "agy",
+            "review_args = [\"{{prompt}}\"]\n\n[instructions]\nrepository = false\n",
+        );
+        profile("codex", "review_args = [\"{{prompt}}\"]\n");
+        // Cannot review read-only at all, so it is no default either.
+        profile("writer", "");
+        std::fs::write(dir.join(".ostraka/ostraka.toml"), "[gate]\nchecks = []\n").expect("config");
+
+        assert_eq!(Workspace::at(&dir).reviewers(), vec!["codex".to_string()]);
+
+        // The workspace's own list wins, agy included, because it is a choice.
+        std::fs::write(
+            dir.join(".ostraka/ostraka.toml"),
+            "[gate]\nchecks = []\n\n[routing]\nreviewers = [\"agy\", \"codex\"]\n",
+        )
+        .expect("config");
+        assert_eq!(
+            Workspace::at(&dir).reviewers(),
+            vec!["agy".to_string(), "codex".to_string()]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// With nothing else that can review read-only and see the rules, the
+    /// default is empty and routing decides as before, so the workspace still
+    /// gets a pair rather than no reviewer at all.
+    #[test]
+    fn with_no_better_reviewer_the_choice_is_left_to_routing() {
+        let dir = scratch("reviewers-none");
+        let adapters = dir.join(".ostraka/adapters");
+        std::fs::create_dir_all(&adapters).expect("adapters");
+        std::fs::write(
+            adapters.join("agy.toml"),
+            "id = \"agy\"\ncommand = \"true\"\nargs = [\"{{prompt}}\"]\n\
+             review_args = [\"{{prompt}}\"]\n\n[instructions]\nrepository = false\n",
+        )
+        .expect("profile");
+        assert!(Workspace::at(&dir).reviewers().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The shipped profile says it, and the published parser still reads it.
+    #[test]
+    fn the_shipped_agy_profile_declares_it_and_still_parses() {
+        let (_, text) = crate::init::TEMPLATES
+            .iter()
+            .find(|(name, _)| *name == "agy.toml")
+            .expect("agy is shipped");
+        assert!(
+            text.contains("[instructions]\nrepository = false"),
+            "{text}"
+        );
+        ostraka_adapter::Profile::parse(text).expect("the published parser ignores the table");
     }
 }
