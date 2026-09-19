@@ -168,14 +168,14 @@ pub fn execute(
         .as_ref()
         .map(|r| r.repository.clone())
         .or_else(|| args.repository.clone());
-    if let (Some(run), Some(asked)) = (continued.as_ref(), args.repository.as_deref()) {
-        if run.repository != asked {
-            return Err(format!(
-                "run {} was made in {:?}, not in {asked:?}",
-                run.run_id, run.repository
-            )
-            .into());
-        }
+    if let (Some(run), Some(asked)) = (continued.as_ref(), args.repository.as_deref())
+        && run.repository != asked
+    {
+        return Err(format!(
+            "run {} was made in {:?}, not in {asked:?}",
+            run.run_id, run.repository
+        )
+        .into());
     }
 
     let repo = workspace.repository(named.as_deref())?;

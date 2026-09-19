@@ -166,10 +166,10 @@ fn fetch(url: &str) -> Result<Vec<u8>, Failure> {
 
 /// The tag of the newest published release.
 pub fn latest_tag() -> Result<String, Failure> {
-    if let Ok(pinned) = std::env::var(VERSION_ENV) {
-        if !pinned.is_empty() {
-            return Ok(pinned);
-        }
+    if let Ok(pinned) = std::env::var(VERSION_ENV)
+        && !pinned.is_empty()
+    {
+        return Ok(pinned);
     }
     let body = fetch(&format!(
         "https://api.github.com/repos/{REPO}/releases/latest"
