@@ -78,6 +78,15 @@ change. It belongs in CI, on a clean checkout.
    reviewer that crashed — all of these are rejections, never passes.
 6. **Read what happened from git, not from the agent.** Files touched come from
    `git status` in the worktree, never from a vendor's account of its own edits.
+7. **A sub-agent is not an identity.** A CLI may spawn sub-agents of its own,
+   and a profile may say how to define them. Everything one of them does
+   belongs to the profile that spawned it: anything a writer spawns *is* the
+   writer. A sub-agent can never be the independent reviewer, can never count
+   toward a quorum, and can never be what makes a change reviewed. Independence
+   here means a separate profile, invoked separately by the runtime, reading the
+   diff it did not write — not a role a vendor was asked to play inside one
+   invocation. The gate asks who the reviewer's profile was; a run where the
+   answer is "the author's own sub-agent" is a run that reviewed itself.
 
 ## Decisions that are settled
 
