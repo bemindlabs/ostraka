@@ -285,24 +285,28 @@ mod tests {
         let script = dir.join("lister.sh");
         std::fs::write(
             &script,
-            "#!/bin/sh\n[ \"$1\" = models ] || exit 3\necho \"p/$DECLARED\"\necho p/other\n",
+            "[ \"$1\" = models ] || exit 3\necho \"p/$DECLARED\"\necho p/other\n",
         )
         .expect("script");
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 
+        // Run through `sh` rather than executed. A script this test wrote a
+        // moment ago is a file another test thread may still hold open for
+        // writing — it forked between the write and the close, and the copy in
+        // its child outlives the write — and executing it then fails with
+        // `Text file busy`. Seen once in a full run and not alone. `sh` opens
+        // it for reading, which nothing refuses.
         let listed = catalog(&format!(
-            "id = \"lister\"\ncommand = \"{}\"\nargs = [\"{{{{prompt}}}}\"]\n\
+            "id = \"lister\"\ncommand = \"sh\"\nargs = [\"{{{{prompt}}}}\"]\n\
              [env]\nDECLARED = \"from-env\"\n\
-             [models]\nargs = [\"models\"]\nprefix = \"p/\"\n",
+             [models]\nargs = [\"{}\", \"models\"]\nprefix = \"p/\"\n",
             script.display()
         ))
         .expect("a catalog");
         assert_eq!(listed.models, ["from-env", "other"]);
 
         let failing = catalog(&format!(
-            "id = \"lister\"\ncommand = \"{}\"\nargs = [\"{{{{prompt}}}}\"]\n\
-             [models]\nargs = [\"nope\"]\n",
+            "id = \"lister\"\ncommand = \"sh\"\nargs = [\"{{{{prompt}}}}\"]\n\
+             [models]\nargs = [\"{}\", \"nope\"]\n",
             script.display()
         ))
         .expect("a catalog");
