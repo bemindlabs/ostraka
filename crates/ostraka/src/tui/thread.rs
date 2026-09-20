@@ -66,6 +66,9 @@ pub struct Thread {
     /// A plan that came back clean, and the task it was written for, until
     /// somebody runs it or writes another task.
     pub pending_plan: Option<(String, String)>,
+    /// The alternatives the pending plan offered. Empty is a plan with nothing
+    /// to choose between, which is what every plan was before options existed.
+    pub plan_options: Vec<crate::options::Alternative>,
     /// The task of the last question, until it is run or another is written.
     ///
     /// What "go" acts on. Asking and then wanting it done is the ordinary
@@ -99,6 +102,7 @@ impl Default for Thread {
             // question with a refusal, having paid a vendor to get there.
             mode: Mode::Ask,
             pending_plan: None,
+            plan_options: Vec::new(),
             ready: None,
             offer: None,
         }
@@ -139,6 +143,7 @@ impl Thread {
         let (task, author, reviewer) = mention::agents_named(&typed, agents);
         self.history.push(typed.clone());
         self.pending_plan = None;
+        self.plan_options.clear();
         self.ready = None;
         let mut args = self.args(repository, task, self.mode);
         if author.is_some() {
@@ -155,14 +160,38 @@ impl Thread {
     /// Runs the plan waiting here, as one run gated and reviewed like any other.
     /// Returns false when there is no plan to run.
     pub fn start_planned(&mut self, workspace: Workspace, repository: Option<String>) -> bool {
+        self.start_chosen(workspace, repository, None)
+    }
+
+    /// The same, with one of the plan's alternatives chosen.
+    ///
+    /// The choice reaches the run through its prompt, which the record keeps:
+    /// which way this was done is part of the run's own account of itself.
+    pub fn start_chosen(
+        &mut self,
+        workspace: Workspace,
+        repository: Option<String>,
+        option: Option<crate::options::Alternative>,
+    ) -> bool {
         let Some((task, plan)) = self.pending_plan.take() else {
             return false;
         };
-        let args = self.args(repository, Mode::planned(&task, &plan), Mode::Auto);
+        self.plan_options.clear();
+        let prompt = match &option {
+            Some(option) => crate::options::chosen(&task, &plan, option),
+            None => Mode::planned(&task, &plan),
+        };
+        let args = self.args(repository, prompt, Mode::Auto);
         let mut session = Session::start(workspace, args, Mode::Auto);
         // The transcript says what was asked, not the plan pasted under it: the
         // plan is already on the screen, in the turn above.
-        session.prompt = format!("{task} \u{2014} following the agreed plan");
+        session.prompt = match &option {
+            Some(option) => format!(
+                "{task} \u{2014} following the plan, option {}",
+                option.label
+            ),
+            None => format!("{task} \u{2014} following the agreed plan"),
+        };
         self.live = Some(session);
         true
     }
@@ -250,6 +279,11 @@ impl Thread {
         let ended = turn.finished.as_ref().map(|f| f.run_id.clone());
         if let Some(plan) = turn.finished.as_ref().and_then(|f| f.plan.clone()) {
             self.pending_plan = Some((turn.prompt.clone(), plan));
+            self.plan_options = turn
+                .finished
+                .as_ref()
+                .map(|f| f.options.clone())
+                .unwrap_or_default();
         }
         // A consultation has no outcome, because there was no change to judge.
         // That is what tells a question from a run here, rather than the mode
@@ -301,6 +335,7 @@ mod tests {
             outcome: Some(outcome),
             summary: format!("{outcome:?}"),
             plan: None,
+            options: Vec::new(),
         }
     }
 
@@ -315,6 +350,7 @@ mod tests {
                 outcome: None,
                 summary: "planned \u{2014} nothing written".into(),
                 plan: Some("1. edit main.rs".into()),
+                options: Vec::new(),
             }),
         );
         assert_eq!(

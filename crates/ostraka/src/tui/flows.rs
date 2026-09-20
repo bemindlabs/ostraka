@@ -1702,3 +1702,58 @@ mod agents_beside {
         );
     }
 }
+
+mod planning {
+    use super::*;
+    use crate::options::Alternative;
+
+    fn alternative(label: &str, title: &str) -> Alternative {
+        Alternative {
+            label: label.into(),
+            title: title.into(),
+            detail: vec![format!("what {label} costs")],
+        }
+    }
+
+    /// End to end: enter on a plan that offered a choice opens the list
+    /// instead of running, and the number keys run the option they name — with
+    /// the choice in the prompt the run records.
+    #[test]
+    fn enter_on_a_plan_with_options_asks_which_one_before_running() {
+        let _guard = exclusive();
+        let scratch = project("plan-options", 0);
+        let mut d = Driver::open(scratch.path());
+        d.screen();
+
+        d.app.thread_mut().pending_plan =
+            Some(("fix the parser".into(), "the plan, in prose".into()));
+        d.app.thread_mut().plan_options = vec![
+            alternative("A", "rewrite the parser"),
+            alternative("B", "patch the one case"),
+        ];
+
+        // Enter runs nothing yet: it asks.
+        d.key(KeyCode::Enter);
+        assert_eq!(d.app.dialog, Some(Dialog::Options));
+        assert!(d.app.thread().live.is_none(), "it ran before anybody chose");
+        d.shows("this plan offers a choice");
+
+        // Escape leaves the plan where it was, rather than throwing away what
+        // a vendor call bought.
+        d.key(KeyCode::Esc);
+        assert_eq!(d.app.dialog, None);
+        assert!(d.app.thread().pending_plan.is_some());
+        assert_eq!(d.app.thread().plan_options.len(), 2);
+
+        // A number picks that one and starts the run.
+        d.key(KeyCode::Enter).key(KeyCode::Char('2'));
+        assert_eq!(d.app.dialog, None);
+        let session = d.app.thread().live.as_ref().expect("a run started");
+        assert!(session.prompt.contains("option B"), "{}", session.prompt);
+        assert!(
+            d.app.thread().pending_plan.is_none(),
+            "the plan is still waiting after it ran"
+        );
+        d.until("the run to finish", |app| !app.thread().running());
+    }
+}

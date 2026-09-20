@@ -15,6 +15,7 @@ mod init_cmd;
 mod mode;
 mod models;
 mod offer;
+mod options;
 mod promote;
 mod prune;
 mod remedy;

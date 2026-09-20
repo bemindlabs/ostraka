@@ -48,6 +48,10 @@ pub struct Consulted {
     pub exit_code: Option<i32>,
     pub diagnostics: Option<String>,
     pub stopped: bool,
+    /// The alternatives the plan offered, where it offered more than one.
+    /// Empty is a plan with nothing to choose between, which is every plan
+    /// this wrote before options existed.
+    pub options: Vec<crate::options::Alternative>,
 }
 
 impl Consulted {
@@ -153,6 +157,9 @@ pub fn consult(
     let profile = reader(&profiles, args.adapter.as_deref(), &workspace.reviewers())?;
 
     let id = format!("{}-{}", mode.word(), run::task_id());
+    // Minted per consultation, so a plan that quotes a file cannot be read as
+    // offering options. Only plan mode asks for them.
+    let marker = crate::options::marker(&id);
     let mut log = RunLog::create(&workspace.ostraka().join("consulted"), &id)?.watched_by(watcher);
     log.enter(Phase::Isolating);
     let worktrees = workspace.worktrees(&config);
@@ -184,6 +191,7 @@ pub fn consult(
                 exit_code: None,
                 diagnostics: None,
                 stopped: true,
+                options: Vec::new(),
             });
         }
         return Err(format!(
@@ -200,7 +208,14 @@ pub fn consult(
         .stopped_by(stop.clone());
     let spec = TaskSpec {
         id: id.clone(),
-        prompt: mode.consulting(&args.prompt),
+        prompt: match mode {
+            Mode::Plan => format!(
+                "{}\n\n{}",
+                mode.consulting(&args.prompt),
+                crate::options::asked_for(&marker)
+            ),
+            _ => mode.consulting(&args.prompt),
+        },
         adapter: profile.id.clone(),
         author: ActorId::new(run::identity(&args.author, run::AUTHOR, &profile.id)),
         base_ref: args.base_ref.clone(),
@@ -239,15 +254,29 @@ pub fn consult(
         discard(&repo.path, &wt);
     }
 
+    let answer = answer.trim_end().to_string();
+    // Read before the answer is handed back, because the marker belongs to
+    // this consultation and nothing outside it can read the lines correctly.
+    let options = match mode {
+        Mode::Plan => crate::options::parse(&answer, &marker),
+        _ => Vec::new(),
+    };
+    let answer = match options.is_empty() {
+        // The option lines are instructions to the planner, not part of the
+        // plan: what is shown and what a run follows is the plan itself.
+        false => crate::options::plan_only(&answer, &marker),
+        true => answer,
+    };
     Ok(Consulted {
         id,
         mode,
         adapter: profile.id,
-        answer: answer.trim_end().to_string(),
+        answer,
         wrote,
         worktree: wt.path().to_path_buf(),
         exit_code: outcome.exit_code,
         diagnostics: outcome.diagnostics,
+        options,
         stopped: outcome.interrupted || stop.requested(),
     })
 }
@@ -278,6 +307,11 @@ pub fn run(workspace: &Workspace, args: &Args, mode: Mode, json: bool) -> Result
             "wrote": consulted.wrote,
             "exit_code": consulted.exit_code,
             "clean": consulted.clean(),
+            "options": consulted.options.iter().map(|o| serde_json::json!({
+                "label": o.label,
+                "title": o.title,
+                "detail": o.detail,
+            })).collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(consulted.clean());
@@ -293,20 +327,61 @@ pub fn run(workspace: &Workspace, args: &Args, mode: Mode, json: bool) -> Result
     if mode != Mode::Plan {
         return Ok(true);
     }
+    // The alternatives are part of the answer, so they are printed whether or
+    // not anybody here can choose between them.
+    if !consulted.options.is_empty() {
+        eprintln!("\nThis plan offers a choice:");
+        for (n, option) in consulted.options.iter().enumerate() {
+            eprintln!("  {}  {}", n + 1, option.line());
+            for said in &option.detail {
+                eprintln!("       {said}");
+            }
+        }
+    }
+
     if !crate::offer::at_a_terminal() {
         eprintln!("planned \u{2014} nothing was run, because nobody here can agree to it");
         return Ok(true);
     }
 
-    eprint!("\nRun this plan now? It is gated and reviewed like any run. [y/N] ");
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    if !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
-        eprintln!("nothing was run");
-        return Ok(true);
-    }
+    let chosen = match consulted.options.is_empty() {
+        true => {
+            eprint!("\nRun this plan now? It is gated and reviewed like any run. [y/N] ");
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+            if !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
+                eprintln!("nothing was run");
+                return Ok(true);
+            }
+            None
+        }
+        false => {
+            eprint!(
+                "\nWhich one? [1-{}], anything else runs nothing: ",
+                consulted.options.len()
+            );
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+            let picked = line
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n >= 1 && *n <= consulted.options.len())
+                .map(|n| consulted.options[n - 1].clone());
+            let Some(picked) = picked else {
+                eprintln!("nothing was run");
+                return Ok(true);
+            };
+            eprintln!("chose {}", picked.line());
+            Some(picked)
+        }
+    };
+
     let mut planned = args.clone();
-    planned.prompt = Mode::planned(&args.prompt, &consulted.answer);
+    planned.prompt = match &chosen {
+        Some(option) => crate::options::chosen(&args.prompt, &consulted.answer, option),
+        None => Mode::planned(&args.prompt, &consulted.answer),
+    };
     run::run(workspace, &planned, json)
 }
 
@@ -359,6 +434,13 @@ mod tests {
              if [ -n \"$marker\" ]; then echo \"$marker APPROVE\"; exit 0; fi\n\
              if [ \"$reading\" = yes ]; then\n\
              \x20 if printf '%s' \"$1\" | grep -q 'write anyway'; then echo sneaky > sneaky.txt; fi\n\
+             \x20 opt=$(printf '%s' \"$1\" | grep -o 'OPTION-[0-9a-f]*:' | head -1)\n\
+             \x20 if [ -n \"$opt\" ] && printf '%s' \"$1\" | grep -q 'two ways'; then\n\
+             \x20   echo 'the plan, in prose'\n\
+             \x20   echo \"$opt A: rewrite it\"; echo 'costs a day'\n\
+             \x20   echo \"$opt B: patch it\"; echo 'an hour, and it comes back'\n\
+             \x20   exit 0\n\
+             \x20 fi\n\
              \x20 echo 'the answer is 42'; exit 0\n\
              fi\n\
              if printf '%s' \"$1\" | grep -q 'was not kept'; then echo good > wrote.txt; else echo bad > wrote.txt; fi\n\
@@ -442,6 +524,52 @@ mod tests {
                 .is_dir(),
             "the consultation was not recorded"
         );
+    }
+
+    /// End to end: the plan prompt carries a marker minted for this
+    /// consultation, a planner answering with marked lines has them read back
+    /// as options, and the plan handed on is the plan without them.
+    #[test]
+    fn a_plan_that_offers_two_ways_comes_back_with_both() {
+        let (_scratch, workspace) = workspace("options");
+        let consulted = consult(
+            &workspace,
+            &asked("there are two ways to do this", "reader"),
+            Mode::Plan,
+            None,
+            &Stop::new(),
+        )
+        .expect("consulted");
+
+        assert!(consulted.clean(), "{}", consulted.summary());
+        let labels: Vec<&str> = consulted
+            .options
+            .iter()
+            .map(|option| option.label.as_str())
+            .collect();
+        assert_eq!(labels, ["A", "B"], "{:#?}", consulted.options);
+        assert_eq!(consulted.options[0].title, "rewrite it");
+        assert_eq!(consulted.options[0].detail, ["costs a day"]);
+        assert_eq!(consulted.answer, "the plan, in prose");
+    }
+
+    /// A plan with one way to do it offers nothing and reads exactly as it did
+    /// before options existed.
+    #[test]
+    fn a_plan_with_nothing_to_choose_between_offers_nothing() {
+        let (_scratch, workspace) = workspace("one-way");
+        let consulted = consult(
+            &workspace,
+            &asked("just plan it", "reader"),
+            Mode::Plan,
+            None,
+            &Stop::new(),
+        )
+        .expect("consulted");
+
+        assert!(consulted.clean(), "{}", consulted.summary());
+        assert!(consulted.options.is_empty());
+        assert_eq!(consulted.answer, "the answer is 42");
     }
 
     #[test]
