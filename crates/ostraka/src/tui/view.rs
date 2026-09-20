@@ -238,6 +238,12 @@ pub struct App {
     pub tasks_closed: std::collections::HashSet<String>,
     /// Where each repository's header was last drawn, for a click to find.
     pub task_headers: Vec<(Rect, String)>,
+    /// Approved runs whose branch is still there and was never promoted,
+    /// read from each repository's branches on the tick.
+    pub unpromoted: std::collections::HashSet<String>,
+    /// The newest listed run's record, read when the newest run changes: it
+    /// is what says which check or which reviewer refused it.
+    pub last_record: Option<ostraka_core::record::RunRecord>,
     /// The first pane shown when there are more panes than columns.
     pub first: usize,
     /// What `@` can name here: this repository's paths and the agents. Read
@@ -316,6 +322,8 @@ impl App {
             task_groups: Vec::new(),
             tasks_closed: Default::default(),
             task_headers: Vec::new(),
+            unpromoted: Default::default(),
+            last_record: None,
             first: 0,
             mentionable: Mentionable::default(),
             models: Vec::new(),
@@ -815,13 +823,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     let width = rows[5].width.saturating_sub(theme::GUTTER);
     let mut lines = Vec::new();
-    if footer >= 3 {
-        lines.push(routing_row(app));
-    }
+    // The commands are the row added first, as they were before the facts
+    // had one; the facts get a row of their own at three, and until then ride
+    // on the bottom row after the suggestion, where the width allows.
     if footer >= 2 {
         lines.push(commands_row(app, width));
     }
-    lines.push(status_bar(app, width));
+    if footer >= 3 {
+        lines.push(facts_row(app, width));
+    }
+    lines.push(status_bar(app, width, footer < 3));
     frame.render_widget(Paragraph::new(lines), theme::inset(rows[5]));
 
     match app.dialog {
@@ -2081,29 +2092,173 @@ fn commands_row(app: &App, width: u16) -> Line<'static> {
     Line::from(spans)
 }
 
-/// What the next run will be made with.
+/// One piece of a footer row: its spans, and how wide they draw.
+struct Segment(Vec<Span<'static>>);
+
+impl Segment {
+    fn width(&self) -> usize {
+        use unicode_width::UnicodeWidthStr;
+        self.0.iter().map(|s| s.content.width()).sum()
+    }
+}
+
+/// The gap between segments of a row.
+const SEGMENT_GAP: &str = "  \u{b7}  ";
+
+/// Segments in priority order, as many as fit, and never wrapped.
 ///
-/// Only the two facts that decide the shape of a run and are otherwise behind a
-/// dialog: which profile writes and which reviews. Where the path, the
-/// repository and the branch already sit on the top row, repeating them here
-/// would cost a line to say something twice.
-fn routing_row(app: &App) -> Line<'static> {
+/// Which ones fit is `footer::fit`'s to decide; this only draws its answer. A
+/// cut first segment keeps its first style and loses its end.
+fn row_of(segments: Vec<Segment>, width: usize) -> (Vec<Span<'static>>, usize) {
+    use unicode_width::UnicodeWidthStr;
+    let widths: Vec<usize> = segments.iter().map(Segment::width).collect();
+    let gap = SEGMENT_GAP.width();
+    let (kept, cut) = super::footer::fit(&widths, width, gap);
+    let mut spans = Vec::new();
+    let mut used = 0;
+    for (i, segment) in segments.into_iter().take(kept).enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(SEGMENT_GAP, theme::muted()));
+            used += gap;
+        }
+        match cut {
+            Some(room) if i == 0 => {
+                let style = segment.0.first().map(|s| s.style).unwrap_or_default();
+                let text: String = segment.0.iter().map(|s| s.content.as_ref()).collect();
+                let text = truncate_cells(&text, room);
+                used += text.width();
+                spans.push(Span::styled(text, style));
+            }
+            _ => {
+                used += segment.width();
+                spans.extend(segment.0);
+            }
+        }
+    }
+    (spans, used)
+}
+
+/// What the footer is drawn from, gathered from what the browser holds.
+fn footer_facts(app: &App) -> super::footer::Facts {
+    let listed: Vec<&RunSummary> = app
+        .matching
+        .iter()
+        .filter_map(|i| app.runs.get(*i))
+        .collect();
+    super::footer::facts(
+        &listed,
+        app.task_groups.iter().map(|g| g.waiting).sum(),
+        app.live.len(),
+        &app.unpromoted,
+        app.last_record.as_ref(),
+    )
+}
+
+/// How the listed runs ended, what is waiting and going, and the last run.
+fn facts_segments(app: &App) -> Vec<Segment> {
+    let facts = footer_facts(app);
+    let mut segments = Vec::new();
+    let counts = super::footer::counts(&facts);
+    if !counts.is_empty() {
+        segments.push(Segment(vec![Span::styled(
+            counts.join(", "),
+            theme::text(),
+        )]));
+    }
+    if let Some(last) = &facts.last {
+        segments.push(Segment(vec![Span::styled(last.phrase(), theme::muted())]));
+    }
+    segments
+}
+
+/// The facts row: counts, the last run, and — only while the agents are not
+/// beside the work, since they mark it there — which profiles write and
+/// review next.
+fn facts_row(app: &App, width: u16) -> Line<'static> {
+    let mut segments = facts_segments(app);
+    if !app.side_shown {
+        segments.push(routing_segment(app));
+    }
+    Line::from(row_of(segments, width as usize).0)
+}
+
+/// What the next run will be made with: which profile writes and which
+/// reviews. The path, the repository and the branch are on the top row.
+fn routing_segment(app: &App) -> Segment {
     let chosen = |id: &Option<String>| match id {
         Some(id) => id.clone(),
         None => "automatic".to_string(),
     };
-    Line::from(vec![
+    Segment(vec![
         Span::styled("writes ", theme::muted()),
         Span::styled(chosen(&app.thread().adapter), theme::text()),
-        Span::styled("   reviews ", theme::muted()),
+        Span::styled("  reviews ", theme::muted()),
         Span::styled(chosen(&app.thread().review_adapter), theme::text()),
     ])
 }
 
-/// The bottom line: what is happening, and what it has cost.
-fn status_bar(app: &App, width: u16) -> Line<'static> {
+/// The one next action worth naming, with the keys that take it.
+fn suggestion_segment(app: &App) -> Option<Segment> {
+    use super::footer::Suggestion;
+    let selected_unpromoted = app
+        .current()
+        .filter(|run| app.unpromoted.contains(&run.run_id))
+        .map(|run| run.run_id.as_str());
+    let state = super::footer::Situation {
+        facts: footer_facts(app),
+        blocked: app.blocked.is_some(),
+        selected_unpromoted,
+        mode: app.thread().mode,
+    };
+    let keyed = |command: Command, said: String| {
+        Segment(vec![
+            Span::styled("next  ", theme::muted()),
+            Span::styled(
+                format!("{} {}", label(Chord::Leader), command.leader()),
+                theme::on(theme::ACCENT),
+            ),
+            Span::styled(format!(" {said}"), theme::text()),
+        ])
+    };
+    let runs = |n: usize| format!("{n} approved run{}", plural(n));
+    Some(match super::footer::suggest(&state)? {
+        Suggestion::Fix => keyed(Command::Fix, "fix what is in the way".into()),
+        Suggestion::Promote(_) => keyed(Command::Promote, "promote the selected run".into()),
+        Suggestion::OpenRuns(n) => keyed(Command::Runs, format!("{} to promote", runs(n))),
+        Suggestion::Loop => keyed(
+            Command::Mode,
+            "loop mode, which retries with what the check said".into(),
+        ),
+        Suggestion::Drain(n) => Segment(vec![
+            Span::styled("next  ", theme::muted()),
+            Span::styled("ostraka drain", theme::on(theme::ACCENT)),
+            Span::styled(
+                format!(" takes the {n} waiting task{}", plural(n)),
+                theme::text(),
+            ),
+        ]),
+    })
+}
+
+/// The bottom line: what is happening, what to do next, and what it cost.
+///
+/// In priority order, dropped from the end: a status message or the running
+/// state, the suggestion, then — where the facts have no row of their own —
+/// the counts and the last run, and last the tokens, drawn at the right edge.
+fn status_bar(app: &App, width: u16, only_row: bool) -> Line<'static> {
+    use unicode_width::UnicodeWidthStr;
+    // A status message first, even over the leader and setup lines: it is the
+    // answer to what somebody just did, and the setup screen is where most
+    // keys answer with a reason rather than an action.
     if let Some(status) = &app.status {
-        return Line::from(Span::styled(status.clone(), theme::on(theme::WARN)));
+        let (spans, _) = row_of(
+            vec![Segment(vec![Span::styled(
+                status.clone(),
+                theme::on(theme::WARN),
+            )])],
+            width as usize,
+        );
+        return Line::from(spans);
     }
     if app.leader {
         let mut spans = vec![Span::styled(
@@ -2129,50 +2284,55 @@ fn status_bar(app: &App, width: u16) -> Line<'static> {
         ));
     }
 
-    let left = match app.thread().live.as_ref().filter(|s| s.live()) {
-        Some(session) => vec![
-            Span::styled(
-                if session.stopping {
-                    "stopping"
-                } else {
-                    "running"
-                },
-                theme::on(theme::WARN).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(
-                    "  {}  \u{b7}  {}s",
-                    session.phase.map(Phase::title).unwrap_or("\u{2026}"),
-                    session.elapsed_secs
+    // Running first. Idle, the name and version go last among the segments:
+    // the brief ranks the suggestion and the counts above them, and they are
+    // the one thing on the row that never changes.
+    let running = app
+        .thread()
+        .live
+        .as_ref()
+        .filter(|s| s.live())
+        .map(|session| {
+            Segment(vec![
+                Span::styled(
+                    if session.stopping {
+                        "stopping"
+                    } else {
+                        "running"
+                    },
+                    theme::on(theme::WARN).add_modifier(Modifier::BOLD),
                 ),
-                theme::muted(),
-            ),
-        ],
-        None => vec![
+                Span::styled(
+                    format!(
+                        "  {}  \u{b7}  {}s",
+                        session.phase.map(Phase::title).unwrap_or("\u{2026}"),
+                        session.elapsed_secs
+                    ),
+                    theme::muted(),
+                ),
+            ])
+        });
+    let idle = running.is_none();
+    let mut segments: Vec<Segment> = running.into_iter().collect();
+    segments.extend(suggestion_segment(app));
+    if only_row {
+        segments.extend(facts_segments(app));
+    }
+    if idle {
+        segments.push(Segment(vec![
             Span::styled("ostraka", theme::bold()),
             Span::styled(format!(" {}", env!("CARGO_PKG_VERSION")), theme::muted()),
-            Span::styled(format!("  \u{b7}  {}", counted(app)), theme::muted()),
-        ],
-    };
-    let right = tokens(app);
-
-    let left_width: usize = left.iter().map(|s| s.content.chars().count()).sum();
-    let right_width: usize = right.iter().map(|s| s.content.chars().count()).sum();
+        ]));
+    }
     let width = width as usize;
+    let (mut spans, used) = row_of(segments, width);
 
-    let mut spans = left;
-    if left_width + right_width + 2 <= width {
-        spans.push(Span::raw(" ".repeat(width - left_width - right_width)));
+    // The tokens last, at the right edge, and only whole.
+    let right = tokens(app);
+    let right_width: usize = right.iter().map(|s| s.content.width()).sum();
+    if used + right_width + 2 <= width {
+        spans.push(Span::raw(" ".repeat(width - used - right_width)));
         spans.extend(right);
-    } else if left_width + 10 < width {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            truncate(
-                &right.iter().map(|s| s.content.as_ref()).collect::<String>(),
-                width - left_width - 2,
-            ),
-            theme::muted(),
-        ));
     }
     Line::from(spans)
 }
@@ -3408,6 +3568,36 @@ fn truncate(text: &str, width: usize) -> String {
     }
     let kept: String = flat.chars().take(width.saturating_sub(1)).collect();
     format!("{kept}\u{2026}")
+}
+
+/// `text` cut to `cells` display columns, ending in an ellipsis when it was cut.
+///
+/// Not [`truncate`], which counts characters: a row of wide characters cut to a
+/// character count is twice as wide as asked for, and the footer's promise is
+/// that nothing runs past the edge.
+fn truncate_cells(text: &str, cells: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    let flat = text.replace('\n', " ");
+    if cells == 0 {
+        return String::new();
+    }
+    if flat.width() <= cells {
+        return flat;
+    }
+    // One cell is kept for the ellipsis, which is what says it was cut.
+    let room = cells - 1;
+    let mut out = String::new();
+    let mut used = 0;
+    for character in flat.chars() {
+        let wide = UnicodeWidthChar::width(character).unwrap_or(0);
+        if used + wide > room {
+            break;
+        }
+        out.push(character);
+        used += wide;
+    }
+    out.push('\u{2026}');
+    out
 }
 
 /// Breaks text into lines of at most `width` characters, on spaces where it can.
@@ -5228,6 +5418,176 @@ mod tests {
         for out in [&short, &medium, &tall] {
             assert!(out.contains("ostraka "), "the status line went:\n{out}");
         }
+    }
+
+    /// Raised in review: the footer measures in display cells, so a row of
+    /// wide characters cut to a character count would be twice as wide as the
+    /// space it was cut for.
+    #[test]
+    fn a_cut_segment_is_measured_in_cells_not_characters() {
+        use unicode_width::UnicodeWidthStr;
+        assert_eq!(truncate_cells("hello", 10), "hello");
+        assert_eq!(truncate_cells("hello there", 6), "hello\u{2026}");
+        assert_eq!(truncate_cells("", 4), "");
+        assert_eq!(truncate_cells("anything", 0), "");
+        for text in [
+            "\u{4e16}\u{754c}\u{4e16}\u{754c}",
+            "a\u{4e16}b\u{754c}c",
+            "plain words here",
+        ] {
+            for cells in 1..12 {
+                assert!(
+                    truncate_cells(text, cells).width() <= cells,
+                    "{text:?} at {cells}: {:?}",
+                    truncate_cells(text, cells)
+                );
+            }
+        }
+        // And a status message of wide characters does not run past the edge.
+        // Measured in cells of the drawn screen: the test backend renders a
+        // wide character as its cell plus the blank one it covers, so a
+        // display-width count of the dump would count it twice.
+        let mut app = two_runs();
+        app.status = Some("\u{4e16}\u{754c}".repeat(30));
+        for width in [20u16, 31, 60] {
+            let out = screen(&mut app, width, 24);
+            for line in out.lines() {
+                assert!(line.chars().count() <= width as usize, "{width}: {line:?}");
+            }
+        }
+    }
+
+    /// The bottom row of a drawn screen.
+    fn bottom(out: &str) -> String {
+        out.lines().last().unwrap_or_default().to_string()
+    }
+
+    fn two_runs() -> App {
+        App::new(
+            nowhere(),
+            vec![
+                summary("t2-20260907T000300Z", "rename", Some(Outcome::Rejected)),
+                summary("t1-20260907T000100Z", "add a test", Some(Outcome::Approved)),
+            ],
+        )
+    }
+
+    /// Each suggestion on the bottom row, with the chord that takes it.
+    #[test]
+    fn the_footer_suggests_the_next_action_with_its_keys() {
+        let leader = label(Chord::Leader);
+
+        // The selected run is the approved one, not yet promoted.
+        let mut app = two_runs();
+        app.unpromoted.insert("t1-20260907T000100Z".into());
+        app.selected = 1;
+        let row = bottom(&screen(&mut app, 120, 24));
+        assert!(
+            row.contains(&format!("next  {leader} p promote the selected run")),
+            "{row}"
+        );
+
+        // Selected elsewhere: `p` would promote the wrong run.
+        app.selected = 0;
+        let row = bottom(&screen(&mut app, 120, 24));
+        assert!(
+            row.contains(&format!("{leader} l 1 approved run to promote")),
+            "{row}"
+        );
+
+        // The newest run was refused by a check.
+        let mut app = two_runs();
+        app.last_record = Some(record(
+            "t2-20260907T000300Z",
+            "rename",
+            vec![check("test", 1, "")],
+        ));
+        let row = bottom(&screen(&mut app, 120, 24));
+        assert!(row.contains(&format!("{leader} m loop mode")), "{row}");
+
+        // Something in the way comes first.
+        app.blocked = Some("not a git repository".into());
+        let row = bottom(&screen(&mut app, 120, 24));
+        assert!(
+            row.contains(&format!("{leader} x fix what is in the way")),
+            "{row}"
+        );
+
+        // Waiting tasks and nothing taking them.
+        let mut app = App::new(nowhere(), Vec::new());
+        app.task_groups = vec![super::super::roster::TaskGroup {
+            repository: "only".into(),
+            waiting: 2,
+            going: 0,
+            done: 0,
+            rows: Vec::new(),
+        }];
+        let row = bottom(&screen(&mut app, 120, 24));
+        assert!(
+            row.contains("next  ostraka drain takes the 2 waiting tasks"),
+            "{row}"
+        );
+
+        // And nothing worth doing says nothing.
+        let mut app = App::new(nowhere(), Vec::new());
+        assert!(!bottom(&screen(&mut app, 120, 24)).contains("next"));
+    }
+
+    /// With three rows the facts get the middle one: the counts, the last run
+    /// in a phrase, and which check refused it.
+    #[test]
+    fn the_facts_row_counts_the_runs_and_says_how_the_last_one_ended() {
+        let mut app = two_runs();
+        app.last_record = Some(record(
+            "t2-20260907T000300Z",
+            "rename",
+            vec![check("clippy", 1, "")],
+        ));
+        let out = screen(&mut app, 120, 40);
+        let facts = out
+            .lines()
+            .find(|l| l.contains("1 approved"))
+            .unwrap_or_else(|| panic!("no facts row:\n{out}"));
+        assert!(facts.contains("1 approved, 1 rejected"), "{facts}");
+        assert!(
+            facts.contains("last run refused by the clippy check"),
+            "{facts}"
+        );
+    }
+
+    /// Narrow: nothing wraps or runs past the edge, what is dropped is dropped
+    /// from the end, and the status message outlives everything else.
+    #[test]
+    fn a_narrow_footer_keeps_its_priorities_and_its_edge() {
+        use unicode_width::UnicodeWidthStr;
+        let mut app = two_runs();
+        app.unpromoted.insert("t1-20260907T000100Z".into());
+        app.selected = 1;
+        for width in [30u16, 50, 70, 120] {
+            let out = screen(&mut app, width, 24);
+            for line in out.lines() {
+                assert!(line.width() <= width as usize, "{width}: {line:?}");
+            }
+            let row = bottom(&out);
+            // The suggestion goes before the counts do: a row with the counts
+            // on it has the suggestion too.
+            if row.contains("approved,") {
+                assert!(row.contains("promote"), "{width}: {row}");
+            }
+        }
+        // At fifty the suggestion is there and the version is what went.
+        let row = bottom(&screen(&mut app, 50, 24));
+        assert!(row.contains("promote the selected run"), "{row}");
+        assert!(!row.contains("ostraka 1."), "{row}");
+        let row = bottom(&screen(&mut app, 70, 24));
+        assert!(!row.contains("tokens"), "tokens outlived the counts: {row}");
+
+        app.status = Some("promoted to promoted/t1 \u{2014} nothing merged".into());
+        let row = bottom(&screen(&mut app, 30, 24));
+        assert!(
+            row.contains("promoted to"),
+            "the status message went: {row}"
+        );
     }
 
     #[test]
