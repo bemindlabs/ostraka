@@ -21,6 +21,7 @@ mod remedy;
 mod replay;
 mod run;
 mod runs;
+mod setup;
 mod task_cmd;
 mod tasks;
 mod tui;
@@ -113,6 +114,13 @@ enum Commands {
         /// change takes as well as the shape a correction upstream takes.
         #[arg(long, conflicts_with = "force")]
         upgrade: bool,
+
+        /// Do not ask anything: write the files, say what is left, and stop.
+        ///
+        /// What `init` does anyway without a terminal. Named so that a script
+        /// can say it on purpose rather than rely on where it happens to run.
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
 
     /// List adapter profiles and whether each one can run here.
@@ -338,11 +346,16 @@ fn main() -> ExitCode {
 
     let result = match command {
         Commands::Check { fix } => check::run(&workspace, *fix, cli.json),
-        Commands::Init { force, upgrade } => init_cmd::run(
+        Commands::Init {
+            force,
+            upgrade,
+            yes,
+        } => init_cmd::run(
             &here,
             cli.repositories.as_deref(),
             *force,
             *upgrade,
+            *yes,
             cli.json,
         ),
         Commands::Adapters => adapters::run(&workspace, cli.json),

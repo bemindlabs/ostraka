@@ -244,6 +244,11 @@ pub struct App {
     /// The newest listed run's record, read when the newest run changes: it
     /// is what says which check or which reviewer refused it.
     pub last_record: Option<ostraka_core::record::RunRecord>,
+    /// What this directory still needs before it can run something, from the
+    /// same module `init` and `check` read. Taken once on a thread while the
+    /// setup screen is up, because gathering it probes every chosen CLI.
+    pub setup_steps: Vec<crate::setup::Step>,
+    pub setup_steps_loading: Option<std::sync::mpsc::Receiver<Vec<crate::setup::Step>>>,
     /// The first pane shown when there are more panes than columns.
     pub first: usize,
     /// What `@` can name here: this repository's paths and the agents. Read
@@ -324,6 +329,8 @@ impl App {
             task_headers: Vec::new(),
             unpromoted: Default::default(),
             last_record: None,
+            setup_steps: Vec::new(),
+            setup_steps_loading: None,
             first: 0,
             mentionable: Mentionable::default(),
             models: Vec::new(),
@@ -2446,6 +2453,37 @@ fn render_setup(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(""),
         dim("Nothing already on disk is overwritten. `ostraka init` does the same.".to_string()),
     ];
+
+    // The files are the first step of six. The rest are what `ostraka init`
+    // walks at a terminal and `ostraka check` lists, read from the same module
+    // so the three cannot disagree about what is left.
+    if !app.setup_steps.is_empty() {
+        tail.push(Line::from(""));
+        tail.push(bold(
+            "Then, in the order that costs most when it is wrong:".to_string(),
+        ));
+        for step in &app.setup_steps {
+            let (mark, colour) = match step.state {
+                crate::setup::State::Done => ("done", theme::OK),
+                crate::setup::State::Todo => ("to do", theme::ACCENT),
+                crate::setup::State::Yours(_) => ("yours", theme::WARN),
+            };
+            tail.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("{mark:<6}"), theme::on(colour)),
+                Span::raw(step.title.to_string()),
+            ]));
+            let said = match &step.state {
+                crate::setup::State::Yours(said) => Some(said.clone()),
+                _ => step.detail.first().cloned(),
+            };
+            if let Some(said) = said {
+                for part in wrap(&said, area.width.saturating_sub(12) as usize) {
+                    tail.push(dim(format!("        {part}")));
+                }
+            }
+        }
+    }
 
     // What setting up will not fix, said before the offer is taken rather than
     // by a run failing later in somebody else's words.
@@ -5588,6 +5626,44 @@ mod tests {
             row.contains("promoted to"),
             "the status message went: {row}"
         );
+    }
+
+    /// The setup screen lists the plan and, under it, the same steps
+    /// `ostraka init` walks and `ostraka check` reports.
+    #[test]
+    fn the_setup_screen_lists_the_steps_after_the_files() {
+        use crate::setup::{Id, Offer, State, Step};
+        let mut app = App::new(nowhere(), Vec::new());
+        app.setup = Some(crate::init::plan(&nowhere().root));
+        app.setup_steps = vec![
+            Step {
+                id: Id::Gate,
+                title: "the gate, run once",
+                why: "The checks are what a change is judged by.",
+                state: State::Todo,
+                detail: vec!["they have not been run here yet".into()],
+                offer: Offer::RunGate,
+            },
+            Step {
+                id: Id::Auth,
+                title: "can each of them actually run",
+                why: "Installed and logged out is the failure that looks like a bad change.",
+                state: State::Yours("Log in to the CLI.".into()),
+                detail: Vec::new(),
+                offer: Offer::Nothing,
+            },
+        ];
+        let out = screen(&mut app, 100, 40);
+        for want in [
+            "the gate, run once",
+            "to do",
+            "they have not been run here yet",
+            "can each of them actually run",
+            "yours",
+            "Log in to the CLI.",
+        ] {
+            assert!(out.contains(want), "{want:?} is not on:\n{out}");
+        }
     }
 
     #[test]

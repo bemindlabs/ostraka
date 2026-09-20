@@ -124,6 +124,27 @@ pub fn run(workspace: &Workspace, fix: bool, json: bool) -> Outcome {
         print!("{}", crate::drift::report(&drifts));
     }
 
+    // The same steps `init` walks and the browser lists, from the same module:
+    // what this directory still needs before it can run something. Reported,
+    // never taken — `--fix` below is the only thing here that does anything.
+    if !json {
+        let facts = crate::setup::gather(workspace, None);
+        let left = crate::setup::remaining(&facts);
+        if !left.is_empty() {
+            println!("\nstill to set up ({}):", left.len());
+            for step in left {
+                println!("  {}", step.title);
+                for said in step.detail.iter().take(1) {
+                    println!("    {said}");
+                }
+                if let crate::setup::State::Yours(said) = &step.state {
+                    println!("    {said}");
+                }
+            }
+            println!("  `ostraka init` at a terminal walks these.");
+        }
+    }
+
     // `--fix` walks the same steps the browser takes, from the same module.
 
     // Only where somebody is there to answer: a walk that met the commit

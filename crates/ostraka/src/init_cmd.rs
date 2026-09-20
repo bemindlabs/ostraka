@@ -11,6 +11,7 @@ pub fn run(
     repositories: Option<&Path>,
     force: bool,
     upgrade: bool,
+    yes: bool,
     json: bool,
 ) -> Outcome {
     // Refused by name before anything is planned. Taken, the workspace would
@@ -139,6 +140,11 @@ pub fn run(
         drifts = drift::survey(&workspace);
     }
 
+    // Gathered before the report is printed, because `--json` is one object
+    // and the steps belong in it: a script told about the files and nothing
+    // about what is still missing would have to parse the prose or go without.
+    let steps = crate::setup::gather(&workspace, None);
+
     if json {
         println!(
             "{}",
@@ -148,11 +154,48 @@ pub fn run(
                 "complete": plan.complete(),
                 "files": rows,
                 "drift": drift::as_json(&drifts),
+                "setup": crate::setup::as_json(&crate::setup::steps(&steps)),
             }))?
         );
     } else if !drifts.is_empty() {
         print!("{}", drift::report(&drifts));
     }
 
+    // The files are the start of it. What is left — a repository to work on, a
+    // gate that has been run, two CLIs that can answer — is the difference
+    // between a directory that has been written to and one that can run
+    // something. At a terminal it is walked; otherwise it is only said, because
+    // a question nobody can answer is a command that hangs until something
+    // kills it.
+    if !json {
+        if yes || !crate::offer::at_a_terminal() {
+            say_what_is_left(&steps);
+        } else {
+            let stdin = std::io::stdin();
+            crate::setup::walk(&workspace, &mut stdin.lock(), &mut std::io::stdout())?;
+        }
+    }
+
     Ok(true)
+}
+
+/// What is left, said rather than asked about.
+fn say_what_is_left(facts: &crate::setup::Facts) {
+    let left = crate::setup::remaining(facts);
+    if left.is_empty() {
+        println!("\nEvery step is taken: this project can run.");
+        return;
+    }
+    println!("\nStill to do, in the order that costs most when it is wrong:");
+    for step in left {
+        println!("\n  {}", step.title);
+        println!("    {}", step.why);
+        for said in &step.detail {
+            println!("    {said}");
+        }
+        if let crate::setup::State::Yours(said) = &step.state {
+            println!("    {said}");
+        }
+    }
+    println!("\n`ostraka init` at a terminal walks these, one at a time.");
 }
