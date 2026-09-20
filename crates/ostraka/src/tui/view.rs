@@ -113,6 +113,8 @@ pub enum Dialog {
     Models,
     /// A vendor could not run, and the other profiles that answer.
     Fallback,
+    /// The alternatives a plan offered, to choose between before it runs.
+    Options,
 }
 
 /// One adapter profile, as the agents dialog shows it.
@@ -854,6 +856,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Dialog::Prune) => render_prune(frame, app, screen),
         Some(Dialog::Models) => render_models(frame, app, screen),
         Some(Dialog::Fallback) => render_fallback(frame, app, screen),
+        Some(Dialog::Options) => render_options(frame, app, screen),
         None => {}
     }
 
@@ -2969,6 +2972,55 @@ fn render_palette(frame: &mut Frame, app: &App, screen: Rect) {
 }
 
 /// A vendor that could not run, and the profiles that could take its seat.
+/// The alternatives a plan offered, as a list to choose between.
+///
+/// A plan with nothing to choose between never opens this: enter runs it, as
+/// it always did. Choosing is not approving — whichever option is taken, the
+/// run that follows is gated and reviewed like any other.
+fn render_options(frame: &mut Frame, app: &App, screen: Rect) {
+    let options = &app.thread().plan_options;
+    if options.is_empty() {
+        return;
+    }
+    let width = 84u16.min(screen.width);
+    let room = width.saturating_sub(6) as usize;
+    let mut lines = vec![
+        Line::from(Span::styled("this plan offers a choice", theme::bold())),
+        dim("whichever is taken, the run is gated and reviewed".to_string()),
+        theme::rule(width.saturating_sub(6)),
+    ];
+    for (n, option) in options.iter().enumerate() {
+        let picked = n == app.pick;
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{}{} ", if picked { "> " } else { "  " }, n + 1),
+                theme::on(if picked { theme::ACCENT } else { theme::MUTED }),
+            ),
+            Span::styled(
+                truncate(&option.line(), room.saturating_sub(5)),
+                if picked { theme::bold() } else { theme::text() },
+            ),
+        ]));
+        for said in &option.detail {
+            for part in wrap(said, room.saturating_sub(6)) {
+                lines.push(dim(format!("      {part}")));
+            }
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(dim(
+        "a number or enter chooses \u{b7} esc leaves the plan waiting".to_string(),
+    ));
+
+    let area = theme::centred(screen, width, lines.len() as u16 + 2);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(theme::fit(lines, area.height))
+            .block(theme::panel(true).padding(Padding::horizontal(2))),
+        area,
+    );
+}
+
 fn render_fallback(frame: &mut Frame, app: &App, screen: Rect) {
     use super::session::Seat;
     let Some(offer) = &app.fallback else {
@@ -3744,6 +3796,7 @@ mod tests {
             outcome: Some(outcome),
             summary: summary.to_string(),
             plan: None,
+            options: Vec::new(),
         }
     }
 
@@ -5626,6 +5679,49 @@ mod tests {
             row.contains("promoted to"),
             "the status message went: {row}"
         );
+    }
+
+    /// A plan that offered a choice asks it before anything runs, and the
+    /// dialog says what each option costs.
+    #[test]
+    fn a_plan_with_options_is_chosen_from_before_it_runs() {
+        use crate::options::Alternative;
+        let mut app = App::new(nowhere(), Vec::new());
+        app.thread_mut().pending_plan =
+            Some(("fix the parser".into(), "the plan, in prose".into()));
+        app.thread_mut().plan_options = vec![
+            Alternative {
+                label: "A".into(),
+                title: "rewrite the parser".into(),
+                detail: vec!["Costs a day. Fixes every case.".into()],
+            },
+            Alternative {
+                label: "B".into(),
+                title: "patch the one case".into(),
+                detail: vec!["An hour, and it comes back.".into()],
+            },
+        ];
+        app.dialog = Some(Dialog::Options);
+        let out = screen(&mut app, 100, 30);
+        for want in [
+            "this plan offers a choice",
+            "gated and reviewed",
+            "A: rewrite the parser",
+            "Costs a day.",
+            "B: patch the one case",
+            "esc leaves the plan waiting",
+        ] {
+            assert!(out.contains(want), "{want:?} is not on:\n{out}");
+        }
+
+        // The second one is marked once it is picked, and the first is not.
+        app.pick = 1;
+        let out = screen(&mut app, 100, 30);
+        let row = out
+            .lines()
+            .find(|l| l.contains("B: patch"))
+            .unwrap_or_default();
+        assert!(row.contains('>'), "the pick is not marked: {row}");
     }
 
     /// The setup screen lists the plan and, under it, the same steps

@@ -104,6 +104,9 @@ pub struct Finished {
     /// The plan a consultation in plan mode came back with, when it came back
     /// clean. What enter runs next.
     pub plan: Option<String>,
+    /// The alternatives that plan offered, where it offered a choice. Enter
+    /// asks which one before it runs anything.
+    pub options: Vec<crate::options::Alternative>,
 }
 
 /// The worker's last word: how the run ended, and whether a vendor failing
@@ -165,6 +168,7 @@ impl Session {
                     summary: consulted.summary(),
                     plan: (mode == Mode::Plan && consulted.clean())
                         .then(|| consulted.answer.clone()),
+                    options: consulted.options.clone(),
                 })
             } else {
                 let attempts = args.attempts;
@@ -221,6 +225,7 @@ impl Session {
                             (None, None) => "rejected".to_string(),
                         },
                         plan: None,
+                        options: Vec::new(),
                     }
                 })
             }
@@ -464,6 +469,7 @@ mod tests {
                 outcome: Some(Outcome::Approved),
                 summary: "approved — nothing merged".into(),
                 plan: None,
+                options: Vec::new(),
             }),
         );
         assert!(!session.live());

@@ -1148,6 +1148,7 @@ fn dialog_key(app: &mut App, key: KeyEvent, records_root: &Path) {
         Some(Dialog::Agents) => agents_key(app, key.code),
         Some(Dialog::Models) => models_key(app, key.code),
         Some(Dialog::Fallback) => fallback_key(app, key.code),
+        Some(Dialog::Options) => options_key(app, key.code),
         Some(Dialog::Fix) => fix_key(app, key.code),
         Some(Dialog::Settings) => settings_key(app, key.code),
         Some(Dialog::Repos) => repos_key(app, key.code, records_root),
@@ -1489,6 +1490,49 @@ fn offer_fallback(app: &mut App, offer: session::Fallback) {
 }
 
 /// Keys while another profile is offered for a vendor that could not run.
+/// Keys while a plan's alternatives are being chosen between.
+///
+/// Escape leaves the plan waiting rather than discarding it: the plan cost a
+/// vendor call, and the choice can be made on the next enter.
+fn options_key(app: &mut App, code: KeyCode) {
+    let count = app.thread().plan_options.len();
+    match code {
+        KeyCode::Esc => {
+            app.close();
+            app.status = Some("the plan is still waiting \u{2014} enter asks again".to_string());
+        }
+        KeyCode::Down => app.pick = (app.pick + 1).min(count.saturating_sub(1)),
+        KeyCode::Up => app.pick = app.pick.saturating_sub(1),
+        // A number picks that one outright. The list is short by construction
+        // — a planner is asked for at most four — so this is the fast path.
+        KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+            let at = (c as usize) - ('1' as usize);
+            if at < count {
+                app.pick = at;
+                choose_option(app);
+            }
+        }
+        KeyCode::Enter => choose_option(app),
+        _ => {}
+    }
+}
+
+/// Runs the plan with the option now picked.
+fn choose_option(app: &mut App) {
+    let Some(option) = app.thread().plan_options.get(app.pick).cloned() else {
+        return;
+    };
+    app.close();
+    let workspace = app.workspace.clone();
+    let repository = app.repository().map(|repo| repo.name.clone());
+    if app
+        .thread_mut()
+        .start_chosen(workspace, repository, Some(option.clone()))
+    {
+        app.status = Some(format!("running the plan, option {}", option.label));
+    }
+}
+
 fn fallback_key(app: &mut App, code: KeyCode) {
     let count = app.agents.len();
     match code {
@@ -1726,6 +1770,13 @@ fn start_run(app: &mut App) {
     let repository = app.repository().map(|r| r.name.clone());
     let workspace = app.workspace.clone();
     if planned {
+        // A plan that offered a choice asks it before anything runs. Nothing
+        // is started here: the dialog's answer starts it.
+        if !app.thread().plan_options.is_empty() {
+            app.pick = 0;
+            app.open(Dialog::Options);
+            return;
+        }
         app.thread_mut().start_planned(workspace, repository);
     } else {
         app.thread_mut()
