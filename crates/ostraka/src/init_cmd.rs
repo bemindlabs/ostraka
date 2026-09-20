@@ -140,6 +140,11 @@ pub fn run(
         drifts = drift::survey(&workspace);
     }
 
+    // Gathered before the report is printed, because `--json` is one object
+    // and the steps belong in it: a script told about the files and nothing
+    // about what is still missing would have to parse the prose or go without.
+    let steps = crate::setup::gather(&workspace, None);
+
     if json {
         println!(
             "{}",
@@ -149,6 +154,7 @@ pub fn run(
                 "complete": plan.complete(),
                 "files": rows,
                 "drift": drift::as_json(&drifts),
+                "setup": crate::setup::as_json(&crate::setup::steps(&steps)),
             }))?
         );
     } else if !drifts.is_empty() {
@@ -162,7 +168,6 @@ pub fn run(
     // a question nobody can answer is a command that hangs until something
     // kills it.
     if !json {
-        let steps = crate::setup::gather(&workspace, None);
         if yes || !crate::offer::at_a_terminal() {
             say_what_is_left(&steps);
         } else {

@@ -123,6 +123,35 @@ pub fn steps(facts: &Facts) -> Vec<Step> {
     ]
 }
 
+/// The steps as a script can read them.
+///
+/// `--json` is one object, and a command that says what is left in prose and
+/// nothing in JSON leaves a script to parse the prose or go without.
+pub fn as_json(steps: &[Step]) -> serde_json::Value {
+    serde_json::Value::Array(
+        steps
+            .iter()
+            .map(|step| {
+                serde_json::json!({
+                    "step": format!("{:?}", step.id).to_lowercase(),
+                    "title": step.title,
+                    "why": step.why,
+                    "state": match &step.state {
+                        State::Done => "done",
+                        State::Todo => "todo",
+                        State::Yours(_) => "yours",
+                    },
+                    "detail": step.detail,
+                    "yours": match &step.state {
+                        State::Yours(said) => Some(said.clone()),
+                        _ => None,
+                    },
+                })
+            })
+            .collect(),
+    )
+}
+
 /// The steps that are not done yet.
 pub fn remaining(facts: &Facts) -> Vec<Step> {
     steps(facts).into_iter().filter(|s| !s.done()).collect()
@@ -439,8 +468,13 @@ pub fn gather(workspace: &Workspace, project: Option<&Path>) -> Facts {
             (remedy.problem, commands)
         })
     });
-    let config = repositories
-        .first()
+    // The configuration of the repository these steps are about, not of
+    // whichever one sorts first: a repository may carry its own, and the gate
+    // and policy reported here have to be the ones that would actually run.
+    let config = repository
+        .as_ref()
+        .and_then(|path| repositories.iter().find(|repo| &repo.path == path))
+        .or_else(|| repositories.first())
         .and_then(|repo| workspace.config_for(repo).ok());
     let configured: Vec<String> = workspace
         .profiles()
@@ -515,7 +549,7 @@ pub fn walk(
     input: &mut impl std::io::BufRead,
     output: &mut impl std::io::Write,
 ) -> std::io::Result<()> {
-    let facts = gather(workspace, None);
+    let mut facts = gather(workspace, None);
     let left = remaining(&facts);
     if left.is_empty() {
         writeln!(output, "\nEvery step is taken: this project can run.")?;
@@ -528,7 +562,18 @@ pub fn walk(
     )?;
 
     let repository = workspace.repositories().first().map(|r| r.path.clone());
-    for step in left {
+    // Each step is taken against what is on disk *now*, not against what was
+    // there when the walk started: writing the profiles that make a pair makes
+    // the next step's "nothing to probe until there is a pair" untrue, and a
+    // walk that said it anyway would be reporting its own first reading back.
+    // Re-read only after something changed, since reading probes.
+    let mut taken: Vec<Id> = Vec::new();
+    while let Some(step) = remaining(&facts)
+        .into_iter()
+        .find(|step| !taken.contains(&step.id))
+    {
+        taken.push(step.id);
+        let mut changed = false;
         writeln!(output, "\n{}", step.title)?;
         writeln!(output, "  {}", step.why)?;
         for said in &step.detail {
@@ -538,6 +583,7 @@ pub fn walk(
             writeln!(output, "\n  This one is yours: {said}")?;
             continue;
         }
+        let facts_before = &facts;
         match &step.offer {
             Offer::Nothing => continue,
             Offer::Commands(commands) => {
@@ -550,7 +596,9 @@ pub fn walk(
                 }
                 // The remedy asks for itself, step by step, with its own
                 // warnings: it is the one that commits somebody's files.
-                if crate::fix::walk(path, remedy, input, output)? != crate::fix::Outcome::Fixed {
+                let outcome = crate::fix::walk(path, remedy, input, output)?;
+                changed = true;
+                if outcome != crate::fix::Outcome::Fixed {
                     writeln!(
                         output,
                         "\nStopped here. `ostraka init` resumes from this step."
@@ -568,6 +616,7 @@ pub fn walk(
                     continue;
                 }
                 run_gate(workspace, path, output)?;
+                changed = true;
             }
             Offer::WriteProfiles(_) => {
                 // The same offer a run makes when it cannot route, from the
@@ -582,7 +631,10 @@ pub fn walk(
                     said: "This workspace has no pair that can write and review.".to_string(),
                     found: crate::discover::unconfigured(&configured),
                 };
-                crate::offer::profiles(workspace, &problem, input, output, true)?;
+                changed = matches!(
+                    crate::offer::profiles(workspace, &problem, input, output, true)?,
+                    crate::offer::Choice::Wrote
+                );
             }
             Offer::Probe => {
                 if !asked(
@@ -592,7 +644,11 @@ pub fn walk(
                 )? {
                     continue;
                 }
-                for id in facts.pair.iter().flat_map(|(a, b)| [a.clone(), b.clone()]) {
+                for id in facts_before
+                    .pair
+                    .iter()
+                    .flat_map(|(a, b)| [a.clone(), b.clone()])
+                {
                     match probe(workspace, &id) {
                         Ok(()) => writeln!(output, "  {id}: answered")?,
                         Err(why) => writeln!(output, "  {id}: {why}")?,
@@ -600,11 +656,22 @@ pub fn walk(
                 }
             }
         }
+        if changed {
+            facts = gather(workspace, None);
+        }
     }
-    writeln!(
-        output,
-        "\n`ostraka init` again picks up whatever is still left."
-    )?;
+    // Counted again from disk rather than from what this walk did, so what it
+    // says is what the next `init` will find.
+    let left = remaining(&gather(workspace, None));
+    if left.is_empty() {
+        writeln!(output, "\nEvery step is taken: this project can run.")?;
+    } else {
+        writeln!(
+            output,
+            "\n{} step(s) still left. `ostraka init` picks up from there.",
+            left.len()
+        )?;
+    }
     Ok(())
 }
 
@@ -771,6 +838,27 @@ mod tests {
         // Steps nobody but a person can take are said, not asked about.
         assert!(said.contains("This one is yours"), "{said}");
 
+        // Counted from disk at both ends, not from what the walk did: the
+        // gate ran during this walk, so one fewer step is left after it than
+        // the walk was told about at the start.
+        let before: usize = said
+            .split(" step(s) left")
+            .next()
+            .and_then(|s| s.rsplit('\n').next())
+            .and_then(|s| s.trim().parse().ok())
+            .expect("a count to start with");
+        let after: usize = said
+            .split(" step(s) still left")
+            .next()
+            .and_then(|s| s.rsplit('\n').next())
+            .and_then(|s| s.trim().parse().ok())
+            .expect("a count to end with");
+        assert_eq!(
+            after,
+            before - 1,
+            "the gate still counts as a step:\n{said}"
+        );
+
         // And it is remembered, so the next init does not ask again: that is
         // what "init resumes where it stopped" means for a step that runs
         // something.
@@ -810,6 +898,50 @@ mod tests {
         assert_eq!(facts.gate_tried, Some(false));
         assert_eq!(step_of(&facts, Id::Gate).state, State::Todo);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Raised in review: a repository that carries its own configuration is
+    /// judged by that one, not by whichever repository sorts first.
+    #[test]
+    fn the_gate_reported_is_the_one_that_would_run() {
+        let dir = scratch("ownconfig");
+        // A second repository, sorting before "work", with a gate of its own.
+        let other = dir.join("repositories/apart");
+        std::fs::create_dir_all(&other).expect("repository");
+        std::fs::write(
+            // A repository's own configuration sits at its root.
+            other.join("ostraka.toml"),
+            "[gate]\nchecks = [{ name = \"theirs\", cmd = \"true\", required = true }]\n\n             [gate.review]\nmust_differ_from_author = true\n",
+        )
+        .expect("config");
+        let workspace = Workspace::at(&dir);
+
+        // Asked about that repository, the steps report its checks.
+        let facts = gather(&workspace, Some(&other));
+        assert_eq!(facts.checks, ["theirs"]);
+        // Asked about the other one, the workspace's.
+        let facts = gather(&workspace, Some(&dir.join("repositories/work")));
+        assert_eq!(facts.checks, ["test"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Raised in review: a script reading `--json` sees the steps too.
+    #[test]
+    fn the_steps_are_readable_as_json() {
+        let json = as_json(&steps(&Facts::default()));
+        let rows = json.as_array().expect("an array");
+        assert_eq!(rows.len(), 6);
+        assert_eq!(rows[0]["step"], "repository");
+        assert_eq!(rows[0]["state"], "yours");
+        assert!(
+            rows[0]["yours"]
+                .as_str()
+                .is_some_and(|s| s.contains("Clone"))
+        );
+        assert_eq!(rows[1]["step"], "gate");
+        assert_eq!(rows[1]["state"], "todo");
+        assert_eq!(as_json(&steps(&ready()))[0]["state"], "done");
     }
 
     #[test]
