@@ -410,18 +410,21 @@ fn copy_selection(app: &mut App) {
 /// Approved runs still waiting on a promotion, across this workspace's
 /// repositories: one `git for-each-ref` each.
 fn unpromoted(app: &App) -> std::collections::HashSet<String> {
-    let approved: Vec<&str> = app
-        .runs
-        .iter()
-        .filter(|run| run.approved())
-        .map(|run| run.run_id.as_str())
-        .collect();
+    let approved: Vec<&ostraka_runtime::index::RunSummary> =
+        app.runs.iter().filter(|run| run.approved()).collect();
     if approved.is_empty() {
         return Default::default();
     }
+    // Only the repositories that actually hold an approved run. A workspace of
+    // twenty repositories where one has finished work is one `git` call, not
+    // twenty: the rest have nothing this could be asking about.
+    let wanted: std::collections::HashSet<&str> =
+        approved.iter().map(|run| run.repository.as_str()).collect();
+    let approved: Vec<&str> = approved.iter().map(|run| run.run_id.as_str()).collect();
     app.workspace
         .repositories()
         .iter()
+        .filter(|repo| wanted.contains(repo.name.as_str()))
         .flat_map(|repo| {
             let branches = std::process::Command::new("git")
                 .args([
@@ -502,6 +505,12 @@ fn stock_roster(app: &mut App, records_root: &Path) {
             &repositories,
             &app.live,
         );
+    }
+    // Once every five seconds rather than every one: a promotion is a person's
+    // act, and this asks git a question per repository. What this window does
+    // itself does not wait for the tick — `promote` takes the run out of the
+    // set as soon as it succeeds.
+    if app.tick.is_multiple_of(20) {
         app.unpromoted = unpromoted(app);
     }
     stock_last_record(app, records_root);
@@ -986,7 +995,16 @@ fn perform(app: &mut App, command: Command, records_root: &Path) {
             }
         }
         Command::EvenPanes => app.even_panes(),
-        Command::Promote => app.status = Some(promote_selected(app)),
+        Command::Promote => {
+            let (said, promoted) = promote_selected(app);
+            // Out of the set at once rather than at the next five-second read:
+            // the footer would otherwise go on suggesting a promotion that has
+            // already happened.
+            if let Some(run) = promoted {
+                app.unpromoted.remove(&run);
+            }
+            app.status = Some(said);
+        }
         Command::Reload => match index::list(records_root) {
             Ok(runs) => {
                 app.runs = runs;
@@ -1765,31 +1783,38 @@ fn initialise(app: &mut App, records_root: &Path) {
     }
 }
 
-fn promote_selected(app: &App) -> String {
+/// What to say about it, and the run id when one was actually promoted.
+fn promote_selected(app: &App) -> (String, Option<String>) {
     let Some(run) = app.current() else {
-        return "nothing selected".to_string();
+        return ("nothing selected".to_string(), None);
     };
     if !run.approved() {
         // The gate would refuse this anyway. Saying so without spending a git
         // call is the same answer, sooner.
-        return format!("{} was not approved; nothing to promote", run.run_id);
+        return (
+            format!("{} was not approved; nothing to promote", run.run_id),
+            None,
+        );
     }
 
     let repo = match crate::promote::repository_for(&app.workspace, run) {
         Ok(repo) => repo,
-        Err(e) => return format!("could not tell which repository: {e}"),
+        Err(e) => return (format!("could not tell which repository: {e}"), None),
     };
     let config = match app.workspace.config_for(&repo) {
         Ok(config) => config,
-        Err(e) => return format!("could not read the configuration: {e}"),
+        Err(e) => return (format!("could not read the configuration: {e}"), None),
     };
     let records_root: PathBuf = app.workspace.records();
 
     match promote::promote(&repo.path, &records_root, &run.run_id, &config, None) {
-        Ok(Ok(p)) => format!("promoted to {} \u{2014} nothing merged", p.branch),
-        Ok(Err(NotPromoted::Refused(r))) => format!("the gate refuses this run: {r:?}"),
-        Ok(Err(why)) => format!("not promoted \u{2014} {why}"),
-        Err(e) => format!("not promoted \u{2014} {e}"),
+        Ok(Ok(p)) => (
+            format!("promoted to {} \u{2014} nothing merged", p.branch),
+            Some(run.run_id.clone()),
+        ),
+        Ok(Err(NotPromoted::Refused(r))) => (format!("the gate refuses this run: {r:?}"), None),
+        Ok(Err(why)) => (format!("not promoted \u{2014} {why}"), None),
+        Err(e) => (format!("not promoted \u{2014} {e}"), None),
     }
 }
 

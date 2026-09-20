@@ -2112,7 +2112,7 @@ const SEGMENT_GAP: &str = "  \u{b7}  ";
 fn row_of(segments: Vec<Segment>, width: usize) -> (Vec<Span<'static>>, usize) {
     use unicode_width::UnicodeWidthStr;
     let widths: Vec<usize> = segments.iter().map(Segment::width).collect();
-    let gap = SEGMENT_GAP.chars().count();
+    let gap = SEGMENT_GAP.width();
     let (kept, cut) = super::footer::fit(&widths, width, gap);
     let mut spans = Vec::new();
     let mut used = 0;
@@ -2125,7 +2125,7 @@ fn row_of(segments: Vec<Segment>, width: usize) -> (Vec<Span<'static>>, usize) {
             Some(room) if i == 0 => {
                 let style = segment.0.first().map(|s| s.style).unwrap_or_default();
                 let text: String = segment.0.iter().map(|s| s.content.as_ref()).collect();
-                let text = truncate(&text, room);
+                let text = truncate_cells(&text, room);
                 used += text.width();
                 spans.push(Span::styled(text, style));
             }
@@ -3568,6 +3568,36 @@ fn truncate(text: &str, width: usize) -> String {
     }
     let kept: String = flat.chars().take(width.saturating_sub(1)).collect();
     format!("{kept}\u{2026}")
+}
+
+/// `text` cut to `cells` display columns, ending in an ellipsis when it was cut.
+///
+/// Not [`truncate`], which counts characters: a row of wide characters cut to a
+/// character count is twice as wide as asked for, and the footer's promise is
+/// that nothing runs past the edge.
+fn truncate_cells(text: &str, cells: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    let flat = text.replace('\n', " ");
+    if cells == 0 {
+        return String::new();
+    }
+    if flat.width() <= cells {
+        return flat;
+    }
+    // One cell is kept for the ellipsis, which is what says it was cut.
+    let room = cells - 1;
+    let mut out = String::new();
+    let mut used = 0;
+    for character in flat.chars() {
+        let wide = UnicodeWidthChar::width(character).unwrap_or(0);
+        if used + wide > room {
+            break;
+        }
+        out.push(character);
+        used += wide;
+    }
+    out.push('\u{2026}');
+    out
 }
 
 /// Breaks text into lines of at most `width` characters, on spaces where it can.
@@ -5387,6 +5417,43 @@ mod tests {
         // says whether anything is running.
         for out in [&short, &medium, &tall] {
             assert!(out.contains("ostraka "), "the status line went:\n{out}");
+        }
+    }
+
+    /// Raised in review: the footer measures in display cells, so a row of
+    /// wide characters cut to a character count would be twice as wide as the
+    /// space it was cut for.
+    #[test]
+    fn a_cut_segment_is_measured_in_cells_not_characters() {
+        use unicode_width::UnicodeWidthStr;
+        assert_eq!(truncate_cells("hello", 10), "hello");
+        assert_eq!(truncate_cells("hello there", 6), "hello\u{2026}");
+        assert_eq!(truncate_cells("", 4), "");
+        assert_eq!(truncate_cells("anything", 0), "");
+        for text in [
+            "\u{4e16}\u{754c}\u{4e16}\u{754c}",
+            "a\u{4e16}b\u{754c}c",
+            "plain words here",
+        ] {
+            for cells in 1..12 {
+                assert!(
+                    truncate_cells(text, cells).width() <= cells,
+                    "{text:?} at {cells}: {:?}",
+                    truncate_cells(text, cells)
+                );
+            }
+        }
+        // And a status message of wide characters does not run past the edge.
+        // Measured in cells of the drawn screen: the test backend renders a
+        // wide character as its cell plus the blank one it covers, so a
+        // display-width count of the dump would count it twice.
+        let mut app = two_runs();
+        app.status = Some("\u{4e16}\u{754c}".repeat(30));
+        for width in [20u16, 31, 60] {
+            let out = screen(&mut app, width, 24);
+            for line in out.lines() {
+                assert!(line.chars().count() <= width as usize, "{width}: {line:?}");
+            }
         }
     }
 

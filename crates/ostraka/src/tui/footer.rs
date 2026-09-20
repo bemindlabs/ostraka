@@ -130,11 +130,22 @@ pub fn facts(
 /// `promoted/<run>`. A run pruned after its change was merged has neither, and
 /// is not waiting on anybody.
 pub fn unpromoted(approved: &[&str], branches: &[String]) -> Vec<String> {
-    let has = |name: String| branches.contains(&name);
+    // The branches are read once into two sets rather than searched per run:
+    // this is on the tick, and a workspace with many runs and many branches
+    // would otherwise pay for every pair of them, allocating a name each time.
+    let mut theirs = std::collections::HashSet::new();
+    let mut promoted = std::collections::HashSet::new();
+    for branch in branches {
+        if let Some(run) = branch.strip_prefix("ostraka/") {
+            theirs.insert(run);
+        } else if let Some(run) = branch.strip_prefix("promoted/") {
+            promoted.insert(run);
+        }
+    }
     approved
         .iter()
-        .filter(|run| has(format!("ostraka/{run}")) && !has(format!("promoted/{run}")))
-        .map(|run| run.to_string())
+        .filter(|run| theirs.contains(*run) && !promoted.contains(*run))
+        .map(|run| (*run).to_string())
         .collect()
 }
 
@@ -406,6 +417,22 @@ mod tests {
         ];
         // t3's branch was pruned after its change was merged.
         assert_eq!(unpromoted(&["t1", "t2", "t3"], &branches), ["t1"]);
+    }
+
+    /// Raised in review: read the branches once, not per run.
+    #[test]
+    fn promotion_is_read_from_the_branches_in_one_pass() {
+        let branches: Vec<String> = (0..500)
+            .map(|n| format!("ostraka/t{n}"))
+            .chain((0..250).map(|n| format!("promoted/t{n}")))
+            .chain(["main".to_string(), "ostraka".to_string()])
+            .collect();
+        let approved: Vec<String> = (0..500).map(|n| format!("t{n}")).collect();
+        let approved: Vec<&str> = approved.iter().map(String::as_str).collect();
+        let waiting = unpromoted(&approved, &branches);
+        assert_eq!(waiting.len(), 250);
+        assert!(waiting.contains(&"t250".to_string()));
+        assert!(!waiting.contains(&"t249".to_string()), "already promoted");
     }
 
     #[test]
