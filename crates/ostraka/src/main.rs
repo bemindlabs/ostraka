@@ -6,6 +6,7 @@ mod bench;
 mod check;
 mod chord;
 mod consult;
+mod decide;
 mod discover;
 mod drain;
 mod drift;
@@ -257,6 +258,33 @@ enum Commands {
         branch: Option<String>,
     },
 
+    /// Approve or refuse a run whose reviewer handed it to a person.
+    ///
+    /// Only for a run that was escalated: deciding about a run that was judged
+    /// would be overruling a review, and the gate reads a decision only where
+    /// a reviewer asked for one. Promotion still needs every required check to
+    /// have passed, and the decider must not be the author.
+    Decide {
+        /// Run id, as printed by `run`.
+        run_id: String,
+
+        /// Approve it. Without this, the run is refused.
+        #[arg(long, conflicts_with = "reject")]
+        approve: bool,
+
+        /// Refuse it.
+        #[arg(long)]
+        reject: bool,
+
+        /// Why. Recorded either way, and worth writing for a refusal.
+        #[arg(long)]
+        reason: Option<String>,
+
+        /// Who is deciding. Defaults to the login name.
+        #[arg(long = "as")]
+        who: Option<String>,
+    },
+
     /// Remove worktrees left by finished runs. Branches are untouched.
     Prune {
         /// Actually remove them. Without this it only reports what it would do.
@@ -405,6 +433,26 @@ fn main() -> ExitCode {
         }
         Commands::Prune { apply } => prune::run(&workspace, *apply, cli.json),
         Commands::Tui => tui::run(&workspace),
+        Commands::Decide {
+            run_id,
+            approve,
+            reject,
+            reason,
+            who,
+        } => {
+            if !approve && !reject {
+                eprintln!("error: say --approve or --reject");
+                return ExitCode::FAILURE;
+            }
+            decide::run(
+                &workspace,
+                run_id,
+                *approve,
+                reason.as_deref(),
+                who.as_deref(),
+                cli.json,
+            )
+        }
         Commands::Promote { run_id, branch } => {
             promote::run(&workspace, run_id, branch.as_deref(), cli.json)
         }
