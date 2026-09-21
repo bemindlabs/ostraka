@@ -9,8 +9,13 @@ pub fn run(workspace: &crate::workspace::Workspace, run_id: &str, json: bool) ->
     let (record, events) = orchestrator::replay(&records_root, run_id)?;
     // Which agents took the seats. A run made before this was recorded has
     // none, and says so rather than having one guessed for it.
-    let provenance =
-        ostraka_runtime::record::read_provenance(&records_root.join("runs").join(run_id));
+    let run_dir = records_root.join("runs").join(run_id);
+    let provenance = ostraka_runtime::record::read_provenance(&run_dir);
+    // What the review reported, whether it approved or not, and — where it
+    // declined to judge — what it asked a person and what they said.
+    let findings = ostraka_runtime::record::read_findings(&run_dir);
+    let escalation = ostraka_runtime::record::read_escalation(&run_dir);
+    let decision = ostraka_runtime::record::read_decision(&run_dir);
 
     if json {
         println!(
@@ -18,6 +23,9 @@ pub fn run(workspace: &crate::workspace::Workspace, run_id: &str, json: bool) ->
             serde_json::to_string_pretty(&serde_json::json!({
                 "record": record,
                 "provenance": provenance,
+                "findings": findings,
+                "escalation": escalation,
+                "decision": decision,
                 "events": events,
             }))?
         );
@@ -39,6 +47,35 @@ pub fn run(workspace: &crate::workspace::Workspace, run_id: &str, json: bool) ->
                 }
             }
             None => println!("  no provenance recorded for this run"),
+        }
+        for finding in &findings {
+            println!(
+                "  finding  {} [{}, {}] {}",
+                finding.at, finding.severity, finding.disposition, finding.said
+            );
+        }
+        if let Some(escalation) = &escalation {
+            println!(
+                "  escalated by {}: {}",
+                escalation.reviewer, escalation.said
+            );
+            match &decision {
+                Some(decision) => println!(
+                    "  {} {} it{}",
+                    decision.by,
+                    if decision.approved {
+                        "approved"
+                    } else {
+                        "refused"
+                    },
+                    decision
+                        .reason
+                        .as_deref()
+                        .map(|why| format!(": {why}"))
+                        .unwrap_or_default()
+                ),
+                None => println!("  waiting on a person \u{2014} `ostraka decide {run_id} …`"),
+            }
         }
         for c in &record.checks {
             let mark = if c.passed() { "pass" } else { "FAIL" };

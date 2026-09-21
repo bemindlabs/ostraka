@@ -383,6 +383,68 @@ pub fn reaffirm(
     record: &ostraka_core::record::RunRecord,
     must_differ_from_author: bool,
 ) -> std::result::Result<MergeToken, Refusal> {
+    reaffirm_with(spec, record, None, must_differ_from_author)
+}
+
+/// [`reaffirm`], with a person's decision about a run that was escalated.
+///
+/// A reviewer may hand a change to a person instead of judging it. What comes
+/// back is an approval like any other — the gate has always asked *who*
+/// approved, not what kind of thing they are — so the rules are unchanged:
+/// every required check must still have passed, and the approver must still
+/// differ from the author. A person approving a run they are recorded as the
+/// author of is refused by the same rule that refuses an agent approving
+/// itself.
+///
+/// A decision is only read for a run that was escalated. Anything else is
+/// judged by the record's own approval, so nobody can decide their way past a
+/// review that actually said no.
+pub fn reaffirm_with(
+    spec: &GateSpec,
+    record: &ostraka_core::record::RunRecord,
+    decision: Option<&crate::record::Decision>,
+    must_differ_from_author: bool,
+) -> std::result::Result<MergeToken, Refusal> {
+    if let Some(decision) = decision {
+        if !decision.approved {
+            return Err(Refusal::Rejected {
+                reason: match &decision.reason {
+                    Some(said) => format!("{} decided against it: {said}", decision.by),
+                    None => format!("{} decided against it", decision.by),
+                },
+            });
+        }
+        let approval = Approval {
+            reviewer: ActorId::new(&decision.by),
+            verdict: ostraka_core::gate::Verdict::Approve,
+        };
+        return with_approval(spec, record, &approval, must_differ_from_author);
+    }
+    reaffirm_recorded(spec, record, must_differ_from_author)
+}
+
+fn reaffirm_recorded(
+    spec: &GateSpec,
+    record: &ostraka_core::record::RunRecord,
+    must_differ_from_author: bool,
+) -> std::result::Result<MergeToken, Refusal> {
+    let Some(approval) = &record.approval else {
+        return Err(Refusal::Rejected {
+            reason: "the run record carries no approval, so nothing reviewed this change"
+                .to_string(),
+        });
+    };
+    with_approval(spec, record, approval, must_differ_from_author)
+}
+
+/// The checks the record holds, weighed against the project's *current*
+/// required checks, and then the approval given.
+fn with_approval(
+    spec: &GateSpec,
+    record: &ostraka_core::record::RunRecord,
+    approval: &Approval,
+    must_differ_from_author: bool,
+) -> std::result::Result<MergeToken, Refusal> {
     let mut records = Vec::with_capacity(spec.checks.len());
     let mut failed = Vec::new();
 
@@ -402,13 +464,6 @@ pub fn reaffirm(
     if !failed.is_empty() {
         return Err(Refusal::ChecksFailed { failed, records });
     }
-
-    let Some(approval) = &record.approval else {
-        return Err(Refusal::Rejected {
-            reason: "the run record carries no approval, so nothing reviewed this change"
-                .to_string(),
-        });
-    };
 
     evaluate(
         AllChecksPassed { records },

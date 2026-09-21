@@ -87,6 +87,76 @@ pub fn read_provenance(run_dir: &Path) -> Option<Provenance> {
     serde_json::from_str(&fs::read_to_string(provenance_path(run_dir)).ok()?).ok()
 }
 
+/// A review that was handed to a person instead of being judged.
+///
+/// Beside the record rather than in it: `Outcome` is public and not
+/// `#[non_exhaustive]`, so `Escalated` is a 2.0 change. Until then the run is
+/// recorded `Rejected` — nothing may merge on it — and this file is what says
+/// the difference between "refused" and "waiting on somebody".
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Escalation {
+    /// The profile that declined to judge.
+    pub reviewer: String,
+    /// What it says a person has to decide.
+    pub said: String,
+    pub at: String,
+}
+
+/// What a person decided about a run that was handed to them.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Decision {
+    /// Who decided. This becomes the reviewer the gate is shown, so it is an
+    /// identity, not a note: approving is an act somebody owns.
+    pub by: String,
+    /// True to approve, false to refuse.
+    pub approved: bool,
+    pub reason: Option<String>,
+    pub at: String,
+}
+
+/// Where a run's `escalation.json` is.
+pub fn escalation_path(run_dir: &Path) -> PathBuf {
+    run_dir.join("escalation.json")
+}
+
+/// Where a run's `findings.json` is.
+pub fn findings_path(run_dir: &Path) -> PathBuf {
+    run_dir.join("findings.json")
+}
+
+/// Where a run's `decision.json` is.
+pub fn decision_path(run_dir: &Path) -> PathBuf {
+    run_dir.join("decision.json")
+}
+
+/// The escalation a run recorded, if it was escalated.
+pub fn read_escalation(run_dir: &Path) -> Option<Escalation> {
+    serde_json::from_str(&fs::read_to_string(escalation_path(run_dir)).ok()?).ok()
+}
+
+/// What a reviewer reported about a run. Empty for a review that reported
+/// nothing, and for every run made before findings were recorded.
+pub fn read_findings(run_dir: &Path) -> Vec<crate::review::Finding> {
+    fs::read_to_string(findings_path(run_dir))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// What a person decided about a run, if anybody has.
+pub fn read_decision(run_dir: &Path) -> Option<Decision> {
+    serde_json::from_str(&fs::read_to_string(decision_path(run_dir)).ok()?).ok()
+}
+
+/// Writes what a person decided. Theirs to write, so it is not `RunLog`'s: the
+/// run is over by the time anybody decides.
+pub fn write_decision(run_dir: &Path, decision: &Decision) -> Result<()> {
+    let json = serde_json::to_string_pretty(decision)
+        .map_err(|e| Error::Other(format!("serializing decision: {e}")))?;
+    fs::write(decision_path(run_dir), json)?;
+    Ok(())
+}
+
 pub struct RunLog {
     dir: PathBuf,
     events: File,
@@ -270,6 +340,24 @@ impl RunLog {
             event: event.clone(),
         });
         Ok(())
+    }
+
+    /// Writes what the reviewer reported. Best effort, like `live.json`: a
+    /// run is not failed because the evidence beside it could not be written,
+    /// and the verdict — which is what decides anything — is in the record.
+    pub fn write_findings(&self, findings: &[crate::review::Finding]) {
+        let Ok(json) = serde_json::to_string_pretty(findings) else {
+            return;
+        };
+        let _ = fs::write(findings_path(&self.dir), json);
+    }
+
+    /// Writes that the reviewer handed this run to a person.
+    pub fn write_escalation(&self, escalation: &Escalation) {
+        let Ok(json) = serde_json::to_string_pretty(escalation) else {
+            return;
+        };
+        let _ = fs::write(escalation_path(&self.dir), json);
     }
 
     /// Writes which agents took this run's seats.

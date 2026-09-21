@@ -67,6 +67,13 @@ fn verdict(answer: &str) -> String {
     )
 }
 
+/// A reviewer that reports a finding and then hands the change to a person,
+/// using the marker it was given — the mechanism, not a shortcut.
+fn escalates() -> String {
+    "marker=$(printf '%s' \"$1\" | grep -o 'VERDICT-[0-9a-f]*:' | head -1)\n     echo \"$marker FINDING: added.txt:1 | question | discuss | is this file wanted\"\n     echo \"$marker ESCALATE: the task does not say whether this file belongs here\""
+        .to_string()
+}
+
 /// A fixture script. It answers the probe a run starts with by naming itself
 /// and a version, and does nothing else then: its body ignores its arguments,
 /// and probed, it would do its whole job — writing files, sleeping — before the
@@ -525,6 +532,167 @@ fn a_model_hint_the_author_cannot_take_is_not_recorded_as_used() {
         ostraka_runtime::record::read_provenance(&records.join("runs").join(&report.record.run_id))
             .expect("provenance.json was written");
     assert_eq!(provenance.author.model, None);
+}
+
+/// A reviewer may decline to judge. What follows is a person's decision, and
+/// the gate treats it as the approval it is: the checks still have to have
+/// passed, and the decider still has to differ from the author.
+#[test]
+fn a_run_handed_to_a_person_waits_for_one_and_then_promotes_on_their_word() {
+    let f = fixture("escalate");
+    let writer = agent(&f.repo, "writer", "echo new > added.txt");
+    let reviewer = agent(&f.repo, "reviewer", &escalates());
+    let routing = route::select(
+        &[writer, reviewer],
+        Some("writer"),
+        Some("reviewer"),
+        &f.repo.join(".ostraka/vendor-home"),
+        None,
+    )
+    .unwrap();
+
+    let (worktrees, records) = places(&f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+        skills: None,
+    };
+    let config = config("true");
+    let report = orchestrator::run_task(
+        &places,
+        &config,
+        &routing,
+        &task("add a file", "archon"),
+        &ActorId::new("ephor"),
+        None,
+    )
+    .expect("run completes");
+
+    // Nothing merges on a review that did not judge.
+    assert!(!report.approved(), "an escalation approved something");
+    assert_eq!(report.record.outcome, Some(Outcome::Rejected));
+
+    let run_dir = records.join("runs").join(&report.record.run_id);
+    let escalation =
+        ostraka_runtime::record::read_escalation(&run_dir).expect("an escalation was recorded");
+    assert_eq!(escalation.reviewer, "reviewer");
+    assert!(
+        escalation.said.contains("does not say whether"),
+        "{escalation:?}"
+    );
+
+    // And what the reviewer reported is beside it, in its own file.
+    let findings = ostraka_runtime::record::read_findings(&run_dir);
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    assert_eq!(findings[0].severity, "question");
+    assert_eq!(findings[0].disposition, "discuss");
+
+    // Until somebody decides, it cannot be promoted, and the refusal says why.
+    let refused =
+        ostraka_runtime::promote::promote(&f.repo, &records, &report.record.run_id, &config, None)
+            .expect("promote runs");
+    match refused {
+        Err(ostraka_runtime::promote::NotPromoted::Unverifiable(said)) => {
+            assert!(said.contains("waiting on a person"), "{said}");
+        }
+        other => panic!("an undecided escalation promoted: {other:?}"),
+    }
+
+    // A person refuses it: still nothing.
+    ostraka_runtime::record::write_decision(
+        &run_dir,
+        &ostraka_runtime::record::Decision {
+            by: "bmt".into(),
+            approved: false,
+            reason: Some("not wanted".into()),
+            at: "2026-09-21T00:00:00Z".into(),
+        },
+    )
+    .expect("writes");
+    let refused =
+        ostraka_runtime::promote::promote(&f.repo, &records, &report.record.run_id, &config, None)
+            .expect("promote runs");
+    assert!(refused.is_err(), "a refusal promoted");
+
+    // And a person approving it is an approval like any other: the branch is
+    // made, and the token names the person as the reviewer.
+    ostraka_runtime::record::write_decision(
+        &run_dir,
+        &ostraka_runtime::record::Decision {
+            by: "bmt".into(),
+            approved: true,
+            reason: None,
+            at: "2026-09-21T00:01:00Z".into(),
+        },
+    )
+    .expect("writes");
+    let promoted =
+        ostraka_runtime::promote::promote(&f.repo, &records, &report.record.run_id, &config, None)
+            .expect("promote runs")
+            .expect("promoted on the person's word");
+    assert_eq!(promoted.token.reviewer().as_str(), "bmt");
+    assert_eq!(promoted.token.author().as_str(), "archon");
+}
+
+/// The gate does not care that a person is a person: a decision from the
+/// author is self-approval, and is refused by the rule that already existed.
+#[test]
+fn a_person_cannot_approve_a_run_they_are_the_author_of() {
+    let f = fixture("escalate-self");
+    let writer = agent(&f.repo, "writer", "echo new > added.txt");
+    let reviewer = agent(&f.repo, "reviewer", &escalates());
+    let routing = route::select(
+        &[writer, reviewer],
+        Some("writer"),
+        Some("reviewer"),
+        &f.repo.join(".ostraka/vendor-home"),
+        None,
+    )
+    .unwrap();
+    let (worktrees, records) = places(&f);
+    let places = orchestrator::Places {
+        repo: &f.repo,
+        worktrees: &worktrees,
+        records: &records,
+        name: "work",
+        notes: None,
+        skills: None,
+    };
+    let config = config("true");
+    let report = orchestrator::run_task(
+        &places,
+        &config,
+        &routing,
+        &task("add a file", "bmt"),
+        &ActorId::new("ephor"),
+        None,
+    )
+    .expect("run completes");
+
+    let run_dir = records.join("runs").join(&report.record.run_id);
+    ostraka_runtime::record::write_decision(
+        &run_dir,
+        &ostraka_runtime::record::Decision {
+            by: "bmt".into(),
+            approved: true,
+            reason: None,
+            at: "2026-09-21T00:02:00Z".into(),
+        },
+    )
+    .expect("writes");
+
+    let refused =
+        ostraka_runtime::promote::promote(&f.repo, &records, &report.record.run_id, &config, None)
+            .expect("promote runs");
+    match refused {
+        Err(ostraka_runtime::promote::NotPromoted::Refused(
+            ostraka_runtime::gate::Refusal::SelfApproval { actor },
+        )) => assert_eq!(actor.as_str(), "bmt"),
+        other => panic!("an author approved their own run: {other:?}"),
+    }
 }
 
 #[test]

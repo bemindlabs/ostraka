@@ -71,18 +71,35 @@ pub fn promote(
 ) -> Result<std::result::Result<Promotion, NotPromoted>> {
     let record = read_record(records_root, run_id)?;
 
+    // A run whose reviewer handed it to a person, and what that person
+    // decided, if anybody has yet. A decision is read only for an escalated
+    // run: nobody decides their way past a review that said no.
+    let run_dir = records_root.join("runs").join(run_id);
+    let escalated = crate::record::read_escalation(&run_dir);
+    let decision = escalated
+        .is_some()
+        .then(|| crate::record::read_decision(&run_dir))
+        .flatten();
+
     // The recorded outcome is checked first only so the refusal is legible; the
     // gate below is what actually decides, and it does not consult this field.
-    if record.outcome != Some(Outcome::Approved) {
-        return Ok(Err(NotPromoted::Unverifiable(format!(
-            "run {run_id:?} ended as {:?}, not approved",
-            record.outcome
-        ))));
+    // An escalated run is recorded as refused — nothing merges on a review that
+    // did not judge — so it is a person's approval that lets it through here.
+    let decided = decision.as_ref().is_some_and(|d| d.approved);
+    if record.outcome != Some(Outcome::Approved) && !decided {
+        return Ok(Err(NotPromoted::Unverifiable(match &escalated {
+            Some(escalation) => format!(
+                "run {run_id:?} is waiting on a person: {} \u{2014} `ostraka decide {run_id}                  approve` or `reject`",
+                escalation.said
+            ),
+            None => format!("run {run_id:?} ended as {:?}, not approved", record.outcome),
+        })));
     }
 
-    let token = match gate::reaffirm(
+    let token = match gate::reaffirm_with(
         &config.gate,
         &record,
+        decision.as_ref(),
         config.gate.review.must_differ_from_author,
     ) {
         Ok(token) => token,
@@ -100,7 +117,7 @@ pub fn promote(
     };
 
     let message = commit_message(repo, &commit)?;
-    if let Err(why) = trailers_agree(&message, run_id, &record, &token) {
+    if let Err(why) = trailers_agree(&message, run_id, &record, &token, escalated.is_some()) {
         return Ok(Err(NotPromoted::Unverifiable(why)));
     }
 
@@ -175,6 +192,7 @@ fn trailers_agree(
     run_id: &str,
     record: &RunRecord,
     token: &MergeToken,
+    escalated: bool,
 ) -> std::result::Result<(), String> {
     // The trailers the orchestrator writes are the last paragraph of the
     // message, and only that paragraph is read. The message begins with the
@@ -202,10 +220,21 @@ fn trailers_agree(
             record.author
         ));
     }
-    if !has("Reviewed-by:", token.reviewer().as_str()) {
+    // Who the commit says reviewed it. For an escalated run that is the
+    // reviewer that declined to judge — the commit was made before anybody
+    // decided, and a commit is not rewritten to match a later decision. What
+    // the record must agree with is the approval it carries, and the person's
+    // approval lives in `decision.json`, which the gate above has already read.
+    let reviewed_by = match escalated {
+        true => record.approval.as_ref().map(|a| a.reviewer.to_string()),
+        false => Some(token.reviewer().to_string()),
+    };
+    if let Some(reviewer) = reviewed_by
+        && !has("Reviewed-by:", &reviewer)
+    {
         return Err(format!(
-            "the commit says it was reviewed by someone other than {}, which the approval names",
-            token.reviewer()
+            "the commit says it was reviewed by someone other than {reviewer}, which the \
+             record names"
         ));
     }
     Ok(())
@@ -261,7 +290,7 @@ mod tests {
     fn agreeing_trailers_are_accepted() {
         let message = "Do a thing\n\nRun: r1\nAuthored-by: archon (claude-code)\nReviewed-by: \
                        ephor (codex)\n";
-        assert!(trailers_agree(message, "r1", &record(), &token()).is_ok());
+        assert!(trailers_agree(message, "r1", &record(), &token(), false).is_ok());
     }
 
     #[test]
@@ -271,18 +300,20 @@ mod tests {
         // commit whose actual trailers name a different reviewer.
         let message = "Do a thing\n\nRun: r1\nAuthored-by: archon (c)\nReviewed-by: ephor (d)\n\n\
                        Run: r1\nAuthored-by: archon (c)\nReviewed-by: archon (c)\n";
-        let err = trailers_agree(message, "r1", &record(), &token()).expect_err("must refuse");
+        let err =
+            trailers_agree(message, "r1", &record(), &token(), false).expect_err("must refuse");
         assert!(err.contains("reviewed by"), "{err}");
 
         // And a prompt's trailers cannot supply one the real block leaves out.
         let missing = "Run: r1\nAuthored-by: archon (c)\nReviewed-by: ephor (d)\n\nRun: r1\n";
-        assert!(trailers_agree(missing, "r1", &record(), &token()).is_err());
+        assert!(trailers_agree(missing, "r1", &record(), &token(), false).is_err());
     }
 
     #[test]
     fn a_commit_from_a_different_run_is_not_this_runs_commit() {
         let message = "Do a thing\n\nRun: r2\nAuthored-by: archon (c)\nReviewed-by: ephor (d)\n";
-        let err = trailers_agree(message, "r1", &record(), &token()).expect_err("must refuse");
+        let err =
+            trailers_agree(message, "r1", &record(), &token(), false).expect_err("must refuse");
         assert!(err.contains("Run: r1"), "{err}");
     }
 
@@ -291,7 +322,8 @@ mod tests {
         // Forging a promotion would take editing the record and rewriting the
         // commit; agreeing with only one of them is not enough.
         let message = "Do a thing\n\nRun: r1\nAuthored-by: archon (c)\nReviewed-by: archon (c)\n";
-        let err = trailers_agree(message, "r1", &record(), &token()).expect_err("must refuse");
+        let err =
+            trailers_agree(message, "r1", &record(), &token(), false).expect_err("must refuse");
         assert!(err.contains("reviewed by"), "{err}");
     }
 

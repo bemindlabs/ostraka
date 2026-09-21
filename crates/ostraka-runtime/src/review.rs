@@ -44,13 +44,25 @@ pub fn review_prompt(task: &str, diff: &str, checks: &[CheckRecord], marker: &st
          two things: whether it is correct, and whether it stays inside what was \
          asked — an unrequested change is a rejection even when it is an \
          improvement.\n\n\
-         Say whatever you need to. End with exactly one line of this form, on a \
-         line of its own:\n\
+         Say whatever you need to. Where you have something specific to report, \
+         write one line per finding, each on a line of its own:\n\
+         {marker} FINDING: <file>:<line> | <severity> | <disposition> | <one sentence>\n\
+         severity is one of blocker, major, minor, question; disposition is one \
+         of fix, discuss, accept. Findings are a record, not the decision, and \
+         none is not a failing.\n\n\
+         Then end with exactly one line of this form, on a line of its own:\n\
          {marker} APPROVE\n\
          or\n\
-         {marker} REJECT: <one sentence>\n\n\
-         Use that marker exactly. An answer without it is read as a rejection, \
-         and so is an answer with more than one of it.\n\n\
+         {marker} REJECT: <one sentence>\n\
+         or, where this is not yours to decide \u{2014} the task is ambiguous, the \
+         change is defensible but consequential, or judging it needs something \
+         you were not given:\n\
+         {marker} ESCALATE: <one sentence saying what a person has to decide>\n\n\
+         Escalating is not a way to avoid judging. Use it where a decision \
+         belongs to somebody who can change the task, not where the change is \
+         simply wrong \u{2014} that is a rejection.\n\n\
+         Use that marker exactly. An answer without one of those three endings \
+         is read as a rejection, and so is an answer with more than one.\n\n\
          ----- task -----\n{task}\n\n\
          ----- checks -----\n{}\n\
          ----- diff -----\n{diff}",
@@ -135,6 +147,124 @@ pub fn parse_verdict(output: &str, marker: &str) -> Verdict {
     Verdict::parse(output, marker)
 }
 
+/// One thing a reviewer reported, in IEEE 1028's shape: where it is, how bad
+/// it is, and what should happen about it.
+///
+/// Evidence rather than control flow. The verdict line decides the outcome; a
+/// reviewer that rejects without writing findings is not refused, because a
+/// reviewer made to fill in a form writes filler.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Finding {
+    /// Where the reviewer said it is, as it wrote it: `src/main.rs:42`, or a
+    /// path alone, or whatever it could say.
+    pub at: String,
+    /// blocker, major, minor, question.
+    pub severity: String,
+    /// fix, discuss, accept.
+    pub disposition: String,
+    pub said: String,
+}
+
+/// What a review came to: the verdict, what it reported, and — where it
+/// declined to judge — what it wants a person to decide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reviewed {
+    pub verdict: Verdict,
+    /// The sentence from an `ESCALATE` line. `Some` means the reviewer handed
+    /// the decision to a person rather than judging it.
+    pub escalated: Option<String>,
+    pub findings: Vec<Finding>,
+}
+
+/// The whole of a reviewer's answer.
+///
+/// The verdict is read exactly as it always was, by the same rule and with the
+/// same fail-safe: one ending line, anywhere, or it is a rejection. An
+/// escalation is one of the three endings and counts as one of them, so an
+/// answer that both approves and escalates is an answer nobody can read — a
+/// rejection.
+///
+/// An escalated review is *recorded* as a rejection as well, because nothing
+/// may merge on it, and `escalated` is what says the difference. At 2.0 this
+/// becomes a verdict of its own.
+pub fn parse_review(output: &str, marker: &str) -> Reviewed {
+    let marked: Vec<&str> = output
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix(marker))
+        .map(str::trim)
+        .collect();
+
+    let findings = marked
+        .iter()
+        .filter_map(|rest| rest.strip_prefix("FINDING:"))
+        .filter_map(finding)
+        .collect();
+
+    let endings: Vec<&&str> = marked
+        .iter()
+        .filter(|rest| !rest.starts_with("FINDING:"))
+        .collect();
+    let escalated = match endings.as_slice() {
+        [only] => only
+            .strip_prefix("ESCALATE:")
+            .map(|why| why.trim().to_string()),
+        _ => None,
+    };
+    if let Some(why) = escalated.filter(|why| !why.is_empty()) {
+        return Reviewed {
+            // Nothing merges on an escalation, and the record has to say so in
+            // the vocabulary it has. `escalated` is what tells a reader that
+            // this was handed on rather than judged against.
+            verdict: Verdict::Reject {
+                reason: format!("escalated to a person: {why}"),
+            },
+            escalated: Some(why),
+            findings,
+        };
+    }
+
+    // Everything else is the verdict rule, unchanged — including an `ESCALATE`
+    // with nothing after it, which is an ending nobody can act on.
+    let only_endings = endings
+        .iter()
+        .map(|rest| format!("{marker} {rest}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Reviewed {
+        verdict: Verdict::parse(&only_endings, marker),
+        escalated: None,
+        findings,
+    }
+}
+
+/// `<at> | <severity> | <disposition> | <said>`, or nothing.
+///
+/// A line missing a field is dropped rather than guessed at: a finding with an
+/// invented severity is worse than one that was not recorded.
+fn finding(rest: &str) -> Option<Finding> {
+    let parts: Vec<&str> = rest.split('|').map(str::trim).collect();
+    let [at, severity, disposition, said @ ..] = parts.as_slice() else {
+        return None;
+    };
+    let said = said.join(" | ");
+    if at.is_empty() || said.trim().is_empty() {
+        return None;
+    }
+    let one_of = |value: &str, allowed: &[&str]| {
+        allowed
+            .iter()
+            .find(|word| value.eq_ignore_ascii_case(word))
+            .map(|word| (*word).to_string())
+    };
+    Some(Finding {
+        at: (*at).to_string(),
+        severity: one_of(severity, &["blocker", "major", "minor", "question"])?,
+        disposition: one_of(disposition, &["fix", "discuss", "accept"])?,
+        said: said.trim().to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +278,91 @@ mod tests {
             stderr: String::new(),
             duration_ms: 2309,
         }
+    }
+
+    const M: &str = "VERDICT-abc123:";
+
+    #[test]
+    fn an_escalation_is_recorded_as_one_and_still_merges_nothing() {
+        let said = format!("I cannot tell.\n{M} ESCALATE: the task does not say if the flag stays");
+        let reviewed = parse_review(&said, M);
+        assert_eq!(
+            reviewed.escalated.as_deref(),
+            Some("the task does not say if the flag stays")
+        );
+        // Nothing merges on it, in the vocabulary the record has today.
+        match reviewed.verdict {
+            Verdict::Reject { reason } => assert!(reason.contains("escalated to a person")),
+            other => panic!("an escalation approved something: {other:?}"),
+        }
+    }
+
+    /// The verdict rule is unchanged, and an escalation counts as one of the
+    /// three endings: an answer that both approves and escalates is one
+    /// nobody can read.
+    #[test]
+    fn two_endings_are_a_rejection_however_they_disagree() {
+        let both = format!("{M} APPROVE\n{M} ESCALATE: ask somebody");
+        let reviewed = parse_review(&both, M);
+        assert!(reviewed.escalated.is_none());
+        assert!(matches!(reviewed.verdict, Verdict::Reject { .. }));
+
+        // And an escalation with nothing after it is an ending nobody can act
+        // on, which is a rejection like any other unreadable answer.
+        let empty = format!("{M} ESCALATE:");
+        assert!(parse_review(&empty, M).escalated.is_none());
+        assert!(matches!(
+            parse_review(&empty, M).verdict,
+            Verdict::Reject { .. }
+        ));
+
+        // Plain approval still approves, and reports nothing.
+        let plain = format!("looks right to me\n{M} APPROVE");
+        let reviewed = parse_review(&plain, M);
+        assert_eq!(reviewed.verdict, Verdict::Approve);
+        assert!(reviewed.findings.is_empty());
+        assert!(reviewed.escalated.is_none());
+    }
+
+    #[test]
+    fn findings_are_read_beside_the_verdict_and_do_not_decide_it() {
+        let said = format!(
+            "{M} FINDING: src/main.rs:42 | major | fix | the error is swallowed\n             {M} FINDING: README.md | minor | discuss | the example is now wrong\n             {M} APPROVE"
+        );
+        let reviewed = parse_review(&said, M);
+        assert_eq!(
+            reviewed.verdict,
+            Verdict::Approve,
+            "findings decided the verdict"
+        );
+        assert_eq!(reviewed.findings.len(), 2);
+        assert_eq!(reviewed.findings[0].at, "src/main.rs:42");
+        assert_eq!(reviewed.findings[0].severity, "major");
+        assert_eq!(reviewed.findings[0].disposition, "fix");
+        assert_eq!(reviewed.findings[0].said, "the error is swallowed");
+    }
+
+    /// A finding missing a field, or naming a severity nobody defined, is
+    /// dropped: an invented severity is worse than a finding not recorded.
+    #[test]
+    fn a_malformed_finding_is_dropped_rather_than_guessed_at() {
+        let said = format!(
+            "{M} FINDING: src/main.rs | catastrophic | fix | invented severity\n             {M} FINDING: src/main.rs | major | ponder | invented disposition\n             {M} FINDING: no pipes at all\n             {M} FINDING:  | major | fix | nowhere in particular\n             {M} FINDING: src/ok.rs:1 | minor | accept | this one is fine\n             {M} REJECT: no"
+        );
+        let reviewed = parse_review(&said, M);
+        assert_eq!(reviewed.findings.len(), 1, "{:#?}", reviewed.findings);
+        assert_eq!(reviewed.findings[0].at, "src/ok.rs:1");
+        assert!(matches!(reviewed.verdict, Verdict::Reject { .. }));
+    }
+
+    /// Findings are not endings: a review that writes ten of them and one
+    /// verdict has not written eleven verdicts.
+    #[test]
+    fn findings_do_not_count_as_endings() {
+        let said = format!(
+            "{M} FINDING: a.rs:1 | minor | fix | one\n             {M} FINDING: b.rs:2 | minor | fix | two\n             {M} APPROVE"
+        );
+        assert_eq!(parse_review(&said, M).verdict, Verdict::Approve);
     }
 
     #[test]

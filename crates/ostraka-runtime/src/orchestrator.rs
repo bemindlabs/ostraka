@@ -355,7 +355,7 @@ pub fn run_task_until(
 
     // 6. Review, by an adapter that is not the one that wrote the change.
     log.enter(Phase::Reviewing);
-    let (verdict, reviewer_usage) = collect_verdict(
+    let (judged, reviewer_usage) = collect_verdict(
         routing.reviewer.as_ref(),
         task,
         &diff,
@@ -364,9 +364,25 @@ pub fn run_task_until(
         &mut log,
     )?;
     record.usage.extend(reviewer_usage);
+    // What the reviewer reported, kept beside the run whatever it decided: a
+    // rejection's findings are the reason, and an approval's are what somebody
+    // reading this later has instead of the review.
+    if !judged.findings.is_empty() {
+        log.write_findings(&judged.findings);
+    }
+    // A review that handed the change to a person rather than judging it. The
+    // run is still recorded as refused, because nothing may merge on it, and
+    // this is what says the difference.
+    if let Some(said) = &judged.escalated {
+        log.write_escalation(&crate::record::Escalation {
+            reviewer: routing.reviewer.id().to_string(),
+            said: said.clone(),
+            at: now_rfc3339(),
+        });
+    }
     let approval = Approval {
         reviewer: reviewer_identity.clone(),
-        verdict: verdict.clone(),
+        verdict: judged.verdict.clone(),
     };
     record.approval = Some(approval.clone());
 
@@ -439,7 +455,38 @@ pub fn run_task_until(
             }
             finish(log, record, Outcome::Approved, Some(token), None, diff)
         }
-        Err(refusal) => finish(log, record, Outcome::Rejected, None, Some(refusal), diff),
+        Err(refusal) => {
+            // A change handed to a person has to survive until they answer.
+            // Its commit is made on the run's branch, with the same trailers
+            // as any other, and no token: the gate refused, and a person may
+            // yet approve it through `decide`. Its worktree is kept, like any
+            // refused run's, because a decision may need to look at it.
+            //
+            // Every other refusal commits nothing, exactly as before. A change
+            // nobody approved does not get a commit just for existing.
+            if judged.escalated.is_some() {
+                let message = format!(
+                    "{}\n\nRun: {run_id}\nAuthored-by: {} ({})\nReviewed-by: {} ({})\n\
+                     Author-cli: {}\nAuthor-model: {}\nReviewer-cli: {}\nReviewer-model: {}",
+                    task.prompt,
+                    task.author,
+                    routing.author.id(),
+                    reviewer_identity,
+                    routing.reviewer.id(),
+                    provenance.author.cli_trailer(),
+                    provenance.author.model_trailer(),
+                    provenance.reviewer.cli_trailer(),
+                    provenance.reviewer.model_trailer(),
+                );
+                if let Err(e) = worktree::commit(wt.path(), &message, &task.author) {
+                    log.append(&Event::Error {
+                        message: format!("the escalated change could not be committed: {e}"),
+                        raw: None,
+                    })?;
+                }
+            }
+            finish(log, record, Outcome::Rejected, None, Some(refusal), diff)
+        }
     }
 }
 
@@ -479,7 +526,8 @@ fn drive(
 ///
 /// Fail-safe throughout: a reviewer that cannot be launched, or that says
 /// nothing usable, has not approved anything.
-type Reviewed = (Verdict, Option<ostraka_core::record::TokenUsage>);
+/// What a review came to, and what it cost.
+type Reviewed = (review::Reviewed, Option<ostraka_core::record::TokenUsage>);
 
 fn collect_verdict(
     reviewer: &dyn VendorAdapter,
@@ -506,8 +554,12 @@ fn collect_verdict(
         Ok(s) => s,
         Err(e) => {
             return Ok((
-                Verdict::Reject {
-                    reason: format!("reviewer could not be launched: {e}"),
+                review::Reviewed {
+                    verdict: Verdict::Reject {
+                        reason: format!("reviewer could not be launched: {e}"),
+                    },
+                    escalated: None,
+                    findings: Vec::new(),
                 },
                 None,
             ));
@@ -539,10 +591,17 @@ fn collect_verdict(
             message: reason.clone(),
             raw: None,
         })?;
-        return Ok((Verdict::Reject { reason }, outcome.usage));
+        return Ok((
+            review::Reviewed {
+                verdict: Verdict::Reject { reason },
+                escalated: None,
+                findings: Vec::new(),
+            },
+            outcome.usage,
+        ));
     }
 
-    Ok((review::parse_verdict(&spoken, &marker), outcome.usage))
+    Ok((review::parse_review(&spoken, &marker), outcome.usage))
 }
 
 fn finish(
